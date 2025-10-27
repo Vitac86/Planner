@@ -8,6 +8,7 @@ import flet as ft
 from .pages.today import TodayPage
 from .pages.calendar import CalendarPage
 from .pages.settings import SettingsPage
+from .pages.history import HistoryPage
 
 # Google
 from services.google_auth import GoogleAuth
@@ -37,6 +38,7 @@ class AppShell:
         # --- страницы ---
         self._today = TodayPage(self)
         self._calendar = CalendarPage(self)
+        self._history = HistoryPage(self)
         self._settings = SettingsPage(self)  # использует self.gcal
 
         # контейнер контента
@@ -62,6 +64,11 @@ class AppShell:
                     label="Календарь",
                 ),
                 ft.NavigationRailDestination(
+                    icon=ft.Icons.HISTORY_EDU_OUTLINED,
+                    selected_icon=ft.Icons.HISTORY,
+                    label="История",
+                ),
+                ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED,
                     selected_icon=ft.Icons.SETTINGS,
                     label="Настройки",
@@ -82,7 +89,21 @@ class AppShell:
 
         # автообновление активной страницы
         self._auto_task: asyncio.Task | None = None
-        self._active_view: str | None = None  # "today" | "calendar" | "settings"
+        self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
+
+    def cleanup_overlays(self):
+        """Remove closed AlertDialogs from the overlay to avoid "ghost" windows."""
+        overlays = getattr(self.page, "overlay", None) or []
+        changed = False
+        for ctrl in list(overlays):
+            if isinstance(ctrl, ft.AlertDialog) and not getattr(ctrl, "open", False):
+                try:
+                    overlays.remove(ctrl)
+                    changed = True
+                except Exception:
+                    pass
+        if changed:
+            self.page.update()
 
     # ---------- утилиты ----------
     def _has_open_overlay(self) -> bool:
@@ -182,6 +203,11 @@ class AppShell:
             except Exception:
                 pass
             self._start_auto_refresh("calendar", self._calendar.load)
+
+        elif idx == 2:  # История
+            self.content.content = self._history.view
+            self._stop_auto_refresh()
+            self._history.activate_from_menu()
 
         else:  # Настройки (используем полноценную страницу настроек)
             self.content.content = self._settings.view

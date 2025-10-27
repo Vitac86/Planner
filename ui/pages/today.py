@@ -4,6 +4,12 @@ from datetime import datetime, date, timedelta
 import flet as ft
 
 from services.tasks import TaskService
+from core.priorities import (
+    priority_options,
+    priority_label,
+    priority_color,
+    normalize_priority,
+)
 
 
 class TodayPage:
@@ -57,6 +63,12 @@ class TodayPage:
         )
 
         self.dur_tf = ft.TextField(label="Длительность, мин", value="30", width=160, prefix=ft.Icon(ft.Icons.TIMER))
+        self.priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=160,
+            value=str(0),
+            options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
+        )
         self.to_calendar_cb = ft.Checkbox(label="Сразу в календарь", value=True)
         self.add_btn = ft.FilledButton("Добавить", icon=ft.Icons.ADD, on_click=self.on_add)
 
@@ -71,6 +83,7 @@ class TodayPage:
                                 ft.Row([self.date_tf, self.date_btn], spacing=6),
                                 ft.Row([self.time_tf, self.time_btn], spacing=6),
                                 self.dur_tf,
+                                self.priority_dd,
                                 self.to_calendar_cb,
                                 self.add_btn,
                             ],
@@ -235,7 +248,14 @@ class TodayPage:
         except ValueError:
             return self._toast("Длительность должна быть числом (мин)")
 
-        task = self.svc.add(title=title, start=start_dt, duration_minutes=duration)
+        priority = normalize_priority(self.priority_dd.value)
+
+        task = self.svc.add(
+            title=title,
+            start=start_dt,
+            duration_minutes=duration,
+            priority=priority,
+        )
 
         msg = "Задача добавлена"
         if self.to_calendar_cb.value and start_dt and duration:
@@ -250,6 +270,7 @@ class TodayPage:
         self.date_tf.value = ""
         self.time_tf.value = ""
         self.dur_tf.value = "30"
+        self.priority_dd.value = str(priority)
         self.refresh_lists()
         self._toast(msg)
 
@@ -279,12 +300,19 @@ class TodayPage:
         self.unscheduled_list.controls.clear()
         for t in self.svc.list_unscheduled():
             self.unscheduled_list.controls.append(self._row_for_task(t))
+        self.app.cleanup_overlays()
         self.app.page.update()
 
     def _row_for_task(self, t):
         meta = self._human_time(t)
+        priority_text = (
+            ft.Text(priority_label(t.priority, short=True), color=priority_color(t.priority), weight=ft.FontWeight.W_500)
+            if getattr(t, "priority", 0) > 0
+            else ft.Container()
+        )
         right = ft.Row(
             controls=[
+                priority_text,
                 ft.Text(meta, italic=True),
                 ft.Icon(ft.Icons.LINK) if t.gcal_event_id else ft.Container(),
                 ft.IconButton(icon=ft.Icons.EDIT_OUTLINED, tooltip="Редактировать", data=t.id, on_click=self.on_edit_click),
@@ -293,10 +321,18 @@ class TodayPage:
             ],
             spacing=8, alignment=ft.MainAxisAlignment.END,
         )
+        checkbox = ft.Checkbox(
+            label=t.title,
+            value=(t.status == "done"),
+            on_change=lambda e, tid=t.id: self.on_toggle_done(tid, e.control.value),
+        )
         return ft.Row(
             controls=[
-                ft.Checkbox(label=t.title, value=(t.status == "done"),
-                            on_change=lambda e, tid=t.id: self.on_toggle_done(tid, e.control.value)),
+                ft.Row(
+                    [self._priority_icon(t.priority), checkbox],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
                 right,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -344,6 +380,12 @@ class TodayPage:
             value=(str(t.duration_minutes) if t.duration_minutes else ""),
             width=140
         )
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=160,
+            value=str(getattr(t, "priority", 0)),
+            options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
+        )
         notes_tf = ft.TextField(
             label="Заметки", value=(t.notes or ""),
             multiline=True, min_lines=3, max_lines=6
@@ -369,7 +411,8 @@ class TodayPage:
                 title=new_title,
                 notes=notes_tf.value,
                 start=new_start,
-                duration_minutes=new_dur
+                duration_minutes=new_dur,
+                priority=normalize_priority(priority_dd.value),
             )
 
             # gcal-sync
@@ -397,6 +440,7 @@ class TodayPage:
                 self.app.page.overlay.remove(self.edit_dialog)
             self.edit_dialog = None
             self.app.page.update()
+            self.app.cleanup_overlays()
             self.refresh_lists()
             self._toast("Сохранено")
 
@@ -406,6 +450,7 @@ class TodayPage:
                 self.app.page.overlay.remove(self.edit_dialog)
             self.edit_dialog = None
             self.app.page.update()
+            self.app.cleanup_overlays()
 
         # --- КОМПАКТНАЯ ВЁРСТКА ---
 
@@ -421,7 +466,7 @@ class TodayPage:
         time_btn.icon_size = 18
 
         utils_row = ft.Row(
-            [date_tf, date_btn, time_tf, time_btn, dur_tf],
+            [date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.END,
         )
@@ -463,6 +508,16 @@ class TodayPage:
                 return "без времени"
             return t.start.strftime("%d.%m %H:%M")
         return "без времени"
+
+    def _priority_icon(self, priority: int) -> ft.Control:
+        if priority <= 0:
+            return ft.Container(width=0)
+        return ft.Icon(
+            ft.Icons.FLAG,
+            size=18,
+            color=priority_color(priority),
+            tooltip=priority_label(priority),
+        )
 
     def _toast(self, text: str):
         self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
