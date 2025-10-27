@@ -8,6 +8,13 @@ from datetime import datetime, date, timedelta
 from typing import Dict, Tuple, List, Optional
 
 from services.tasks import TaskService
+from core.priorities import (
+    priority_options,
+    priority_label,
+    priority_color,
+    priority_bgcolor,
+    normalize_priority,
+)
 
 # ===== настройки =====
 DAY_START = 0
@@ -56,6 +63,7 @@ class CalendarPage:
     def __init__(self, app):
         self.app = app
         self.svc = TaskService()
+        self._priority_options = [ft.dropdown.Option(key, label) for key, label in priority_options().items()]
 
         self.week_start: date = self._monday_of(date.today())
 
@@ -169,6 +177,7 @@ class CalendarPage:
         self._cleanup_backdrop()
         self._sweep_overlay()
         self.app.page.update()
+        self.app.cleanup_overlays()
 
     def _close_any_dialog(self):
         # на всякий случай закрыть всё
@@ -181,6 +190,7 @@ class CalendarPage:
             pass
         self._cleanup_backdrop()
         self.app.page.update()
+        self.app.cleanup_overlays()
     def _delete_task(self, task_id: int):
         t = self.svc.get(task_id)
         if not t:
@@ -204,12 +214,15 @@ class CalendarPage:
         return [self.week_start + timedelta(days=i) for i in range(7)]
 
     def go_home(self):
+        self._close_any_dialog()
         self.week_start = self._monday_of(date.today())
         self._need_scroll_now = True
         self.load()
 
     def shift_week(self, delta_weeks: int):
-        self.week_start = self.week_start + timedelta(days=7 * delta_weeks)
+        self._close_any_dialog()
+        base = self.week_start or self._monday_of(date.today())
+        self.week_start = self._monday_of(base + timedelta(days=7 * delta_weeks))
         self._need_scroll_now = True
         self.load()
     
@@ -232,6 +245,7 @@ class CalendarPage:
                         pass
         if changed:
             self.app.page.update()
+            self.app.cleanup_overlays()
 
     # ===== Загрузка =====
     def load(self):
@@ -253,7 +267,13 @@ class CalendarPage:
                 di = (st.date() - ws).days
                 if 0 <= di < 7:
                     self.idx.setdefault((di, st.hour), []).append(
-                        {"title": t.title, "task_id": t.id, "duration": dur, "gcal_event_id": getattr(t, "gcal_event_id", None)}
+                        {
+                            "title": t.title,
+                            "task_id": t.id,
+                            "duration": dur,
+                            "gcal_event_id": getattr(t, "gcal_event_id", None),
+                            "priority": getattr(t, "priority", 0),
+                        }
                     )
 
         # высоты строк
@@ -265,6 +285,9 @@ class CalendarPage:
             height = ROW_MIN_H if max_n <= 0 else max(ROW_MIN_H, CELL_VPAD + max_n * CHIP_EST_H + (max_n - 1) * CHIPS_SPACING)
             self.row_h[h] = height
 
+        for key, tasks in self.idx.items():
+            tasks.sort(key=lambda item: (-item.get("priority", 0), item.get("title", "").lower()))
+
         self._build_unscheduled()
         self.grid.content = self._build_week_grid()
         self.app.page.update()
@@ -272,6 +295,7 @@ class CalendarPage:
         if self._need_scroll_now:
             self._need_scroll_now = False
             self._scroll_to_now()
+        self.app.cleanup_overlays()
     def _sync_from_google(self, ws: date, we: date):
         """Подтягивает изменения из Google за окно недели (с небольшим буфером)
         и обновляет/создаёт/отвязывает локальные задачи.
@@ -421,9 +445,15 @@ class CalendarPage:
     def _build_unscheduled(self):
         self.unscheduled_list.controls.clear()
         for t in self.svc.list_unscheduled():
+            badge = self._priority_badge(t.priority)
             chip = ft.Container(
-                content=ft.Text(t.title, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, color=CLR_CHIP_TXT),
-                padding=8, bgcolor=CLR_UNS_BG,
+                content=ft.Row(
+                    [badge, ft.Text(t.title, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, color=CLR_CHIP_TXT)],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=8,
+                bgcolor=priority_bgcolor(t.priority) if t.priority else CLR_UNS_BG,
                 border=ft.border.all(0.5, CLR_OUTLINE), border_radius=8,
                 width=SIDE_PANEL_W - 20,
             )
@@ -589,11 +619,26 @@ class CalendarPage:
         title = t.get("title", "")
         tid = t.get("task_id")
         dur = t.get("duration", 30)
+        priority = t.get("priority", 0)
 
         chip_body = ft.Container(
-            content=ft.Text(title, size=11, color=CLR_CHIP_TXT,
-                            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
-            bgcolor=CLR_CHIP, border=ft.border.all(0.5, CLR_OUTLINE), border_radius=8,
+            content=ft.Row(
+                [
+                    self._priority_badge(priority),
+                    ft.Text(
+                        title,
+                        size=11,
+                        color=CLR_CHIP_TXT,
+                        no_wrap=True,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=priority_bgcolor(priority) if priority else CLR_CHIP,
+            border=ft.border.all(0.5, CLR_OUTLINE),
+            border_radius=8,
             padding=6, width=DAY_COL_W-12,
         )
         gd = ft.GestureDetector(
@@ -677,7 +722,17 @@ class CalendarPage:
     # ===== Планирование и быстрый блок =====
     def _schedule_task(self, task_id: int, day: date, hour: int):
         start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
-        dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
+        task = self.svc.get(task_id)
+        if not task:
+            return self._toast("Задача не найдена")
+        dur_value = task.duration_minutes or 30
+        dur_tf = ft.TextField(label="Длительность, мин", value=str(dur_value), width=140)
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=180,
+            value=str(getattr(task, "priority", 0)),
+            options=self._priority_options,
+        )
         dlg = None
 
         def on_save(_):
@@ -688,7 +743,14 @@ class CalendarPage:
             except Exception:
                 return self._toast("Длительность должна быть > 0")
 
-            t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
+            priority = normalize_priority(priority_dd.value)
+
+            t = self.svc.update(
+                task_id,
+                start=start_dt,
+                duration_minutes=duration,
+                priority=priority,
+            )
             try:
                 if t and getattr(t, "gcal_event_id", None):
                     self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
@@ -711,7 +773,7 @@ class CalendarPage:
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Запланировать — {start_dt.strftime('%a, %d.%m %H:00')}"),
-            content=ft.Column([dur_tf], spacing=10, tight=True),  # без Container и width
+            content=ft.Column([dur_tf, priority_dd], spacing=10, tight=True),  # без Container и width
             actions=[
                 ft.TextButton("Отмена", on_click=on_cancel),
                 ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
@@ -725,6 +787,12 @@ class CalendarPage:
         start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
         title_tf = ft.TextField(label="Название", expand=True)
         dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=180,
+            value=str(0),
+            options=self._priority_options,
+        )
         dlg = None
 
         def on_save(_):
@@ -737,8 +805,9 @@ class CalendarPage:
                     raise ValueError
             except Exception:
                 return self._toast("Длительность должна быть > 0")
+            priority = normalize_priority(priority_dd.value)
 
-            task = self.svc.add(title=title, start=start_dt, duration_minutes=duration)
+            task = self.svc.add(title=title, start=start_dt, duration_minutes=duration, priority=priority)
             try:
                 ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
                 self.svc.set_event_id(task.id, ev["id"])
@@ -759,7 +828,7 @@ class CalendarPage:
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Быстрый блок — {start_dt.strftime('%a, %d.%m %H:00')}"),
-            content=ft.Column([title_tf, dur_tf], spacing=10, tight=True),
+            content=ft.Column([title_tf, dur_tf, priority_dd], spacing=10, tight=True),
             actions=[
                 ft.TextButton("Отмена", on_click=on_cancel),
                 ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
@@ -799,6 +868,12 @@ class CalendarPage:
         date_tf  = ft.TextField(label="Дата",  value=date_str, width=DATE_W, read_only=True)
         time_tf  = ft.TextField(label="Время", value=time_str, width=TIME_W, read_only=True)
         dur_tf   = ft.TextField(label="Длительность, мин", value=str(dur_init), width=DUR_W)
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=160,
+            value=str(getattr(t, "priority", 0)),
+            options=self._priority_options,
+        )
 
         # заметки (авто-увеличение по числу строк)
         notes_tf = ft.TextField(
@@ -872,6 +947,7 @@ class CalendarPage:
                 notes=notes_tf.value,
                 start=new_start,
                 duration_minutes=new_dur,
+                priority=normalize_priority(priority_dd.value),
             )
 
             # --- Google Calendar sync ---
@@ -906,7 +982,7 @@ class CalendarPage:
 
         # --- компактная вёрстка (без Wrap) ---
         utils_row = ft.Row(
-            [date_tf, date_btn, time_tf, time_btn, dur_tf],
+            [date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.END,
         )
@@ -1004,6 +1080,21 @@ class CalendarPage:
 
 
     # ===== сервис =====
+    def _priority_badge(self, priority: int) -> ft.Control:
+        if priority <= 0:
+            return ft.Container(width=0)
+        return ft.Container(
+            content=ft.Text(
+                priority_label(priority, short=True),
+                size=10,
+                weight=ft.FontWeight.W_500,
+                color=priority_color(priority),
+            ),
+            bgcolor=priority_bgcolor(priority),
+            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+            border_radius=ft.border_radius.all(6),
+        )
+
     def _toast(self, text: str):
         self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
         self.app.page.snack_bar.open = True
