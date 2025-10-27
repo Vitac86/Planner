@@ -1,0 +1,200 @@
+# ui/app_shell.py
+from __future__ import annotations
+
+import asyncio
+import flet as ft
+
+# страницы
+from .pages.today import TodayPage
+from .pages.calendar import CalendarPage
+from .pages.settings import SettingsPage
+
+# Google
+from services.google_auth import GoogleAuth
+from services.google_calendar import GoogleCalendar
+from googleapiclient.discovery import build
+
+# Pull-синхронизация Google -> локально
+from services.sync import GoogleSync, JsonTokenStore
+
+SAFE_SURFACE_BG = "#F1F5F9"  # вместо ft.Colors.SURFACE_VARIANT (его нет в 0.28.3)
+
+
+class AppShell:
+    def __init__(self, page: ft.Page):
+        self.page = page
+
+        # базовые настройки окна
+        self.page.title = "Planner"
+        self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
+        self.page.vertical_alignment = ft.MainAxisAlignment.START
+
+        # --- Google Auth + Calendar (важно: до создания страниц) ---
+        # при необходимости можно передать пути: GoogleAuth(secrets_path=..., token_path=...)
+        self.auth = GoogleAuth()
+        self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
+
+        # --- страницы ---
+        self._today = TodayPage(self)
+        self._calendar = CalendarPage(self)
+        self._settings = SettingsPage(self)  # использует self.gcal
+
+        # контейнер контента
+        self.content = ft.Container(expand=True)
+
+        # левое меню
+        self.nav = ft.NavigationRail(
+            selected_index=0,
+            label_type=ft.NavigationRailLabelType.ALL,
+            min_width=90,
+            min_extended_width=200,
+            group_alignment=-0.9,
+            on_change=self.on_nav_change,
+            destinations=[
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
+                    selected_icon=ft.Icons.CHECK_CIRCLE,
+                    label="Сегодня",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.CALENDAR_MONTH_OUTLINED,
+                    selected_icon=ft.Icons.CALENDAR_MONTH,
+                    label="Календарь",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.SETTINGS_OUTLINED,
+                    selected_icon=ft.Icons.SETTINGS,
+                    label="Настройки",
+                ),
+            ],
+        )
+
+        # корневой лэйаут
+        self.root = ft.Row(
+            controls=[
+                ft.Container(self.nav, width=88, bgcolor=SAFE_SURFACE_BG),
+                ft.VerticalDivider(width=1),
+                self.content,
+            ],
+            expand=True,
+            spacing=0,
+        )
+
+        # автообновление активной страницы
+        self._auto_task: asyncio.Task | None = None
+        self._active_view: str | None = None  # "today" | "calendar" | "settings"
+
+    # ---------- утилиты ----------
+    def _has_open_overlay(self) -> bool:
+        """Если открыт любой диалог/оверлей — пропускаем автообновление."""
+        try:
+            if getattr(self.page, "dialog", None) and getattr(self.page.dialog, "open", False):
+                return True
+        except Exception:
+            pass
+        try:
+            return any(getattr(c, "open", False) for c in (self.page.overlay or []))
+        except Exception:
+            return False
+
+    def _pull_from_google(self) -> bool:
+        """
+        Подтягиваем изменения из Google -> локально.
+        Возвращает True, если локальная база изменилась (для логов/отладки).
+        """
+        try:
+            if not self.gcal or not getattr(self.gcal, "service", None) or not getattr(self.gcal, "calendar_id", None):
+                return False
+            sync = GoogleSync(self.gcal.service, self.gcal.calendar_id, JsonTokenStore())
+            return sync.pull()
+        except Exception as e:
+            print("Google pull sync error:", e)
+            return False
+
+    def _start_auto_refresh(self, view_name: str, refresh_fn, period_sec: int = 60):
+        """Периодически дергаем pull + refresh_fn, пока активен указанный view."""
+        self._stop_auto_refresh()
+        self._active_view = view_name
+
+        async def _loop():
+            # первый прогон — сразу: подтянуть изменения и перерисовать
+            try:
+                self._pull_from_google()
+                refresh_fn()
+            except Exception as e:
+                print("auto refresh (initial):", e)
+
+            while self._active_view == view_name:
+                await asyncio.sleep(period_sec)
+                if self._active_view != view_name:
+                    break
+                if self._has_open_overlay():
+                    continue
+                try:
+                    self._pull_from_google()
+                    refresh_fn()
+                except Exception as e:
+                    print("auto refresh:", e)
+
+        self._auto_task = self.page.run_task(_loop)
+
+    def _stop_auto_refresh(self):
+        try:
+            if self._auto_task:
+                self._auto_task.cancel()
+        except Exception:
+            pass
+        self._auto_task = None
+        self._active_view = None
+
+    # ---------- монтаж ----------
+    def mount(self):
+        self.page.controls.clear()
+        self.page.add(self.root)
+
+        # стартуем со «Сегодня»
+        self.content.content = self._today.view
+        self.page.update()
+
+        # 1) Подтянуть последние изменения из Google,
+        # 2) отрисовать страницу,
+        # 3) запустить автообновление.
+        self._pull_from_google()
+        self._today.activate_from_menu()
+        self._start_auto_refresh("today", self._today.load)
+
+    # ---------- переключение вкладок ----------
+    def on_nav_change(self, e: ft.ControlEvent):
+        idx = int(e.control.selected_index)
+
+        if idx == 0:  # Сегодня
+            self.content.content = self._today.view
+            self._pull_from_google()
+            self._today.activate_from_menu()
+            self._start_auto_refresh("today", self._today.load)
+
+        elif idx == 1:  # Календарь
+            self.content.content = self._calendar.view
+            self._pull_from_google()
+            self._calendar.activate_from_menu()
+            try:
+                self._calendar.scroll_to_now()  # к текущему часу
+            except Exception:
+                pass
+            self._start_auto_refresh("calendar", self._calendar.load)
+
+        else:  # Настройки (используем полноценную страницу настроек)
+            self.content.content = self._settings.view
+            self._stop_auto_refresh()
+
+        self.page.update()
+
+    # ---------- ручной вызов синка (если где-то используете) ----------
+    def current_page_auto_sync(self):
+        if self._has_open_overlay():
+            return
+        self._pull_from_google()
+        if self._active_view == "calendar":
+            self._calendar.load()
+        elif self._active_view == "today":
+            self._today.load()

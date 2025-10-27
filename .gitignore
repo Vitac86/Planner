@@ -1,0 +1,34 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv/
+venv/
+
+# Editors/IDE
+.idea/
+.vscode/
+*.iml
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Project data (ignore by default)
+data/*.db
+*.sqlite
+*.sqlite3
+*.tsv
+*.csv
+*.tmp

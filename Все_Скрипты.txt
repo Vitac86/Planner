@@ -1,0 +1,2571 @@
+# Сборка скриптов
+# Сгенерировано: 2025-10-14 18:09:31
+# Всего файлов: 18
+
+### core/settings.py
+```python
+
+```
+
+### main.py
+```python
+# planner/main.py
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import flet as ft
+from storage.db import init_db
+from ui.app_shell import AppShell
+
+
+
+def main(page: ft.Page):
+    page.title = "Planner"
+    page.theme_mode = "system"
+    page.theme = ft.Theme(color_scheme_seed=ft.Colors.INDIGO)  # приятный базовый цвет
+    page.appbar = ft.AppBar(title=ft.Text("Planner"), center_title=False)
+    page.padding = 0
+    page.window_min_width = 900
+    page.window_min_height = 600
+
+    init_db()
+    shell = AppShell(page)
+    shell.mount()
+
+ft.app(target=main)
+
+```
+
+### models/__init__.py
+```python
+
+```
+
+### models/task.py
+```python
+# planner/models/task.py
+from typing import Optional
+from datetime import datetime
+from sqlmodel import SQLModel, Field
+
+class Task(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    notes: Optional[str] = None
+    start: Optional[datetime] = None
+    due: Optional[datetime] = None
+    duration_minutes: Optional[int] = None
+    priority: int = 0
+    status: str = "todo"          # todo / doing / done
+    gcal_event_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+```
+
+### scrpt2txt.py
+```python
+# -*- coding: utf-8 -*-
+"""
+Собирает все скрипты из папки (рекурсивно) в один файл.
+Не падает молча: валидирует путь, печатает прогресс (в режиме --verbose),
+пишет traceback в collect_all_error.log при любой ошибке.
+"""
+from __future__ import annotations
+import os
+import sys
+import argparse
+import traceback
+from pathlib import Path
+from typing import Iterable, List, Tuple, Sequence
+import datetime as _dt
+
+# ---------- настройки по умолчанию (устойчивые) ----------
+HERE = Path(__file__).resolve().parent
+
+# Авто-определение корня: если рядом есть crm/scripts — берём его,
+# иначе берём текущую папку как корень обхода
+if (HERE / "crm" / "scripts").is_dir():
+    DEFAULT_ROOT = HERE / "crm" / "scripts"
+else:
+    DEFAULT_ROOT = HERE
+
+DEFAULT_OUT = HERE / "Все_Скрипты.txt"
+
+IGNORE_DIRS = {
+    "__pycache__", ".git", ".idea", ".vscode",
+    "venv", ".venv", "env", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "dist", "build", "node_modules",
+}
+
+# ---------- утилиты ----------
+def eprint(*a, **kw):
+    print(*a, file=sys.stderr, flush=True, **kw)
+
+def vprint(verbose: bool, *a):
+    if verbose:
+        print(*a, flush=True)
+
+def collect_scripts(root: Path,
+                    exts: Iterable[str] = (".py",),
+                    ignore_dirs: Iterable[str] = IGNORE_DIRS,
+                    max_size_mb: float | None = None,
+                    verbose: bool = False) -> List[Tuple[str, str]]:
+    """
+    Рекурсивно собирает файлы нужных расширений из root и подпапок.
+    Возвращает список (relative_path, code).
+    """
+    root = root.resolve()
+    exts = tuple(e.lower() for e in exts)
+    ignore = set(ignore_dirs)
+
+    if not root.exists():
+        raise FileNotFoundError(f"Папка не найдена: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Это не папка: {root}")
+
+    scripts: List[Tuple[str, str]] = []
+    vprint(verbose, f"[collect] старт: {root}")
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # фильтруем подпапки на месте — os.walk туда не зайдёт
+        before = list(dirnames)
+        dirnames[:] = [d for d in dirnames if d not in ignore]
+        dropped = set(before) - set(dirnames)
+        if dropped and verbose:
+            vprint(verbose, f"  └─ skip dirs: {', '.join(sorted(dropped))}")
+
+        for fname in filenames:
+            if not any(fname.lower().endswith(ext) for ext in exts):
+                continue
+            fpath = Path(dirpath) / fname
+
+            try:
+                if max_size_mb is not None and fpath.stat().st_size > max_size_mb * 1024 * 1024:
+                    vprint(verbose, f"  └─ skip big file: {fpath}")
+                    continue
+            except OSError as ex:
+                eprint(f"[warn] не удалось получить размер: {fpath} ({ex})")
+                continue
+
+            try:
+                code = fpath.read_text(encoding="utf-8", errors="replace")
+            except OSError as ex:
+                eprint(f"[warn] не удалось прочитать: {fpath} ({ex})")
+                continue
+
+            rel = fpath.relative_to(root)
+            rel_str = str(rel).replace("\\", "/")
+            scripts.append((rel_str, code))
+            vprint(verbose, f"  + {rel_str}")
+
+    scripts.sort(key=lambda x: x[0].lower())
+    vprint(verbose, f"[collect] готово: файлов {len(scripts)}")
+    return scripts
+
+def _lang_for(path: str) -> str:
+    p = path.lower()
+    if p.endswith(".py"): return "python"
+    if p.endswith(".bas"): return ""
+    if p.endswith(".frm"): return ""
+    return ""
+
+def write_all_scripts(scripts: Sequence[Tuple[str, str]], output_file: Path, verbose: bool = False) -> None:
+    output_file = output_file.resolve()
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    vprint(verbose, f"[write] -> {output_file}")
+
+    with open(output_file, "w", encoding="utf-8", newline="\n") as out:
+        header = f"# Сборка скриптов\n# Сгенерировано: {_dt.datetime.now():%Y-%m-%d %H:%M:%S}\n# Всего файлов: {len(scripts)}\n\n"
+        out.write(header)
+        for relpath, code in scripts:
+            lang = _lang_for(relpath)
+            out.write(f"### {relpath}\n")
+            out.write(f"```{lang}\n")
+            out.write(code)
+            out.write("\n```\n\n")
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Собрать все скрипты рекурсивно в один файл.")
+    ap.add_argument("--root", type=str, default=str(DEFAULT_ROOT),
+                    help=f"Корневая папка (по умолчанию: {DEFAULT_ROOT})")
+    ap.add_argument("--out", type=str, default=str(DEFAULT_OUT),
+                    help=f"Итоговый файл (по умолчанию: {DEFAULT_OUT})")
+    ap.add_argument("--ext", nargs="+", default=[".py"],
+                    help="Какие расширения включать (напр.: --ext .py .bas .frm)")
+    ap.add_argument("--max-size-mb", type=float, default=None,
+                    help="Максимальный размер файла в МБ (по умолчанию без ограничения)")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Подробный вывод")
+    args = ap.parse_args(argv)
+
+    root = Path(args.root)
+    out = Path(args.out)
+
+    print(f"[run] root={root}")
+    print(f"[run] out ={out}")
+    print(f"[run] ext ={', '.join(args.ext)}")
+    if args.max_size_mb:
+        print(f"[run] max_size_mb={args.max_size_mb}")
+
+    scripts = collect_scripts(root, exts=args.ext, max_size_mb=args.max_size_mb, verbose=args.verbose)
+    write_all_scripts(scripts, out, verbose=args.verbose)
+    print(f"Собрано файлов: {len(scripts)}")
+    print(f"Все скрипты сохранены в {out}")
+    return 0
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except SystemExit as se:
+        raise
+    except Exception:
+        # Ловим любые падения и пишем в лог — чтобы не было «молчаливо»
+        log_path = Path(__file__).with_name("collect_all_error.log")
+        tb = traceback.format_exc()
+        try:
+            log_path.write_text(tb, encoding="utf-8")
+        except Exception:
+            pass
+        eprint("[fatal] скрипт завершился с ошибкой. См. лог:", log_path)
+        eprint(tb)
+        # Если запустили двойным кликом без консоли — задержка, чтобы увидеть сообщение
+        if os.name == "nt" and not sys.stdin.isatty():
+            os.system("pause")
+        sys.exit(1)
+
+```
+
+### services/__init__.py
+```python
+
+```
+
+### services/google_auth.py
+```python
+# planner/services/google_auth.py
+from pathlib import Path
+from typing import Optional
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+class GoogleAuth:
+    def __init__(self, secrets_path: str | Path = "client_secret_321977136899-7lmhos5q0dntmob4ehjg28cu2gfs7q3m.apps.googleusercontent.com.json",
+                 token_path: str | Path = "token.json"):
+        self.secrets_path = Path(secrets_path)
+        self.token_path = Path(token_path)
+        self.creds: Optional[Credentials] = None
+
+    def ensure_credentials(self) -> bool:
+        if self.creds and self.creds.valid:
+            return True
+
+        if self.token_path.exists():
+            self.creds = Credentials.from_authorized_user_file(
+                str(self.token_path), SCOPES
+            )
+
+        if not self.creds or not self.creds.valid:
+            if self.creds and self.creds.expired and self.creds.refresh_token:
+                self.creds.refresh(Request())
+            else:
+                if not self.secrets_path.exists():
+                    raise FileNotFoundError(
+                        f"Не найден {self.secrets_path}. "
+                        "Создайте OAuth-клиент (Desktop) в Google Cloud и скачайте JSON."
+                    )
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(self.secrets_path), SCOPES
+                )
+                # Откроет браузер и поднимет локальный сервер для callback
+                self.creds = flow.run_local_server(port=0)
+
+            # Сохраняем полученный токен
+            self.token_path.write_text(self.creds.to_json(), encoding="utf-8")
+
+        return True
+
+```
+
+### services/google_calendar.py
+```python
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+try:
+    from google.oauth2.credentials import Credentials
+except Exception:
+    Credentials = None
+
+DEFAULT_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+# ---------- время в RFC3339 ----------
+def _ensure_tz(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = datetime.now().astimezone().replace(year=dt.year, month=dt.month, day=dt.day,
+                                                 hour=dt.hour, minute=dt.minute, second=dt.second, microsecond=dt.microsecond)
+    return dt.astimezone()
+
+def _to_rfc3339(dt: datetime) -> str:
+    return _ensure_tz(dt).isoformat()
+
+def _path_exists(p) -> bool:
+    try:
+        return os.path.exists(os.fspath(p))
+    except Exception:
+        return False
+
+# ---------- извлечение сервиса из auth ----------
+def _build_service_from_creds(creds) -> Any:
+    if creds is None:
+        return None
+    return build("calendar", "v3", credentials=creds)
+
+def _find_creds_in_auth(auth, scopes: Optional[List[str]] = None):
+    for name in ("get_credentials", "credentials", "creds"):
+        val = getattr(auth, name, None)
+        if callable(val):
+            try:
+                val = val()
+            except Exception:
+                val = None
+        if val is not None and hasattr(val, "valid"):
+            return val
+
+    token_path = None
+    for attr in ("token_path", "token_file", "token", "token_json"):
+        p = getattr(auth, attr, None)
+        if p and _path_exists(p):
+            token_path = os.fspath(p)
+            break
+    if token_path and Credentials:
+        try:
+            return Credentials.from_authorized_user_file(token_path, scopes or DEFAULT_SCOPES)
+        except Exception:
+            pass
+    return None
+
+def _find_service_in_auth(auth) -> Any:
+    for attr in ("calendar_service", "calendar", "service", "svc", "calendar_v3"):
+        svc = getattr(auth, attr, None)
+        if svc and hasattr(svc, "events"):
+            return svc
+    for meth in ("get_calendar_service", "build_calendar_service", "create_calendar_service"):
+        if hasattr(auth, meth) and callable(getattr(auth, meth)):
+            svc = getattr(auth, meth)()
+            if svc and hasattr(svc, "events"):
+                return svc
+    for meth in ("get_service", "service_for", "build_service"):
+        if hasattr(auth, meth) and callable(getattr(auth, meth)):
+            try:
+                svc = getattr(auth, meth)("calendar", "v3")
+            except TypeError:
+                svc = getattr(auth, meth)("calendar")
+            if svc and hasattr(svc, "events"):
+                return svc
+    return None
+
+# ---------- основной класс ----------
+class GoogleCalendar:
+    """
+    Совместим с GoogleCalendar(self.auth) из AppShell.
+    Ставит маркер planner_task_id:<id> в description для двусторонней синхронизации.
+    """
+    def __init__(self, auth, calendar_id: str = "primary"):
+        self.auth = auth
+        self.calendar_id = getattr(auth, "calendar_id", None) or calendar_id
+        self.service = None
+        self._maybe_build_service()
+
+    def connect(self):
+        if hasattr(self.auth, "ensure_credentials") and callable(getattr(self.auth, "ensure_credentials")):
+            self.auth.ensure_credentials()
+        self._maybe_build_service(strict=True)
+        return True
+
+    def _maybe_build_service(self, strict: bool = False):
+        if self.service and hasattr(self.service, "events"):
+            return
+        svc = _find_service_in_auth(self.auth)
+        if svc:
+            self.service = svc
+            return
+        creds = _find_creds_in_auth(self.auth, DEFAULT_SCOPES)
+        if creds:
+            self.service = _build_service_from_creds(creds)
+            return
+        if strict:
+            raise RuntimeError(
+                "GoogleCalendar: не удалось собрать сервис из auth. Нужен token.json "
+                "или ensure_credentials(), или get_credentials()/credentials/creds, "
+                "или готовый service в auth."
+            )
+
+    # ----- utils для маркера -----
+    @staticmethod
+    def _with_marker(task, notes: Optional[str]) -> str:
+        base = (notes or "").strip()
+        marker = f"planner_task_id:{getattr(task, 'id', '')}"
+        return f"{base}\n{marker}" if base else marker
+
+    @staticmethod
+    def parse_task_id_from_description(desc: Optional[str]) -> Optional[int]:
+        if not desc:
+            return None
+        key = "planner_task_id:"
+        try:
+            for line in desc.splitlines():
+                line = line.strip()
+                if line.startswith(key):
+                    return int(line[len(key):].strip())
+        except Exception:
+            return None
+        return None
+
+    # ----- операции -----
+    def list_range(self, start_dt: datetime, end_dt: datetime, show_deleted: bool = False) -> List[Dict[str, Any]]:
+        self._maybe_build_service(strict=True)
+        params = dict(
+            calendarId=self.calendar_id,
+            timeMin=_to_rfc3339(start_dt),
+            timeMax=_to_rfc3339(end_dt),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=2500,
+        )
+        if show_deleted:
+            params["showDeleted"] = True
+        res = self.service.events().list(**params).execute()
+        return res.get("items", [])
+
+    def create_event_for_task(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
+        self._maybe_build_service(strict=True)
+        end_dt = _ensure_tz(start_dt) + timedelta(minutes=duration_minutes)
+        body = {
+            "summary": getattr(task, "title", "Задача"),
+            "description": self._with_marker(task, getattr(task, "notes", None)),
+            "start": {"dateTime": _to_rfc3339(start_dt)},
+            "end": {"dateTime": _to_rfc3339(end_dt)},
+        }
+        return self.service.events().insert(calendarId=self.calendar_id, body=body).execute()
+
+    def update_event_for_task(self, event_id: str, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
+        self._maybe_build_service(strict=True)
+        end_dt = _ensure_tz(start_dt) + timedelta(minutes=duration_minutes)
+        body = {
+            "summary": getattr(task, "title", "Задача"),
+            "description": self._with_marker(task, getattr(task, "notes", None)),
+            "start": {"dateTime": _to_rfc3339(start_dt)},
+            "end": {"dateTime": _to_rfc3339(end_dt)},
+        }
+        return self.service.events().patch(
+            calendarId=self.calendar_id, eventId=event_id, body=body
+        ).execute()
+
+    def delete_event_by_id(self, event_id: str) -> None:
+        self._maybe_build_service(strict=True)
+        try:
+            self.service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
+        except HttpError as e:
+            if getattr(e, "resp", None) and getattr(e.resp, "status", None) == 404:
+                return
+            raise
+
+```
+
+### services/sync.py
+```python
+# services/sync.py
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Optional
+from datetime import datetime, timezone, timedelta
+
+from services.tasks import TaskService
+
+DELETE_ON_GOOGLE_CANCEL = False  # True — удалять задачу; False — только снимать расписание (как сейчас)
+_MARKER_RE = re.compile(r"planner_task_id\s*:\s*(\d+)", re.I)
+
+
+class JsonTokenStore:
+    """Простейшее хранение syncToken в файле (чтобы получать только изменения)."""
+    def __init__(self, path: str | Path = "storage/gcal_sync_token.json"):
+        self.path = Path(path)
+
+    def get_sync_token(self) -> Optional[str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data.get("syncToken")
+        except Exception:
+            return None
+
+    def set_sync_token(self, token: str):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"syncToken": token}), encoding="utf-8")
+
+
+def _parse_marker(description: str | None) -> Optional[int]:
+    if not description:
+        return None
+    m = _MARKER_RE.search(description)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _strip_marker(description: str | None) -> str:
+    if not description:
+        return ""
+    lines = [ln for ln in description.splitlines() if not _MARKER_RE.search(ln)]
+    return "\n".join(lines).strip()
+
+
+def _parse_g_datetime(obj: dict | None) -> Optional[datetime]:
+    """start/end из Google: либо {'dateTime': '...Z'}, либо {'date': 'YYYY-MM-DD'}."""
+    if not obj:
+        return None
+    if "dateTime" in obj and obj["dateTime"]:
+        # RFC3339; делаем tz-aware
+        s = str(obj["dateTime"]).replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+    if "date" in obj and obj["date"]:
+        # all-day -> в полночь локального дня (без tz; дальше ты сам решаешь как отображать)
+        try:
+            d = datetime.fromisoformat(str(obj["date"]))
+            return d  # 00:00
+        except Exception:
+            # некоторые клиенты присылают 'YYYY-MM-DD' -> отработает
+            try:
+                y, m, dd = str(obj["date"]).split("-")
+                return datetime(int(y), int(m), int(dd))
+            except Exception:
+                return None
+    return None
+
+
+class GoogleSync:
+    """
+    Двусторонняя связка:
+      - Если событие в Google помечено marker'ом planner_task_id:NN — обновляем соответствующую локальную задачу.
+      - Если marker'а нет, но мы видим event_id == Task.gcal_event_id — обновляем эту задачу.
+      - Если marker'а нет и event_id незнаком — создаём новую локальную задачу и обратно проставляем marker в событие.
+      - Если событие в Google отменено (status=cancelled) — снимаем расписание у соответствующей задачи (не удаляем).
+    """
+    def __init__(self, gcal_service, calendar_id: str, token_store: JsonTokenStore | None = None):
+        self.service = gcal_service
+        self.calendar_id = calendar_id
+        self.store = token_store or JsonTokenStore()
+        self.svc = TaskService()
+
+    def pull(self) -> bool:
+        """Возвращает True, если что-то изменилось в локальной базе."""
+        if not self.service or not self.calendar_id:
+            return False
+
+        changed = False
+        token = self.store.get_sync_token()
+
+        params = dict(
+            calendarId=self.calendar_id,
+            singleEvents=True,
+            showDeleted=True,
+            maxResults=250,
+        )
+        if token:
+            # инкрементальные изменения
+            params["syncToken"] = token
+        else:
+            # первичная выгрузка за последние 6 мес.
+            params["timeMin"] = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
+
+        while True:
+            resp = self.service.events().list(**params).execute()
+            items = resp.get("items", [])
+
+            for ev in items:
+                ev_id = ev.get("id")
+                status = ev.get("status")
+                summary = ev.get("summary") or "Без названия"
+                description = ev.get("description") or ""
+
+                # cancelled -> снять расписание у связанной задачи (если есть)
+                if status == "cancelled":
+                    tid = _parse_marker(description)
+                    target_task = self.svc.get(tid) if tid else self.svc.get_by_event_id(ev_id)
+                    if target_task:
+                        if DELETE_ON_GOOGLE_CANCEL:
+                            self.svc.delete(target_task.id)
+                        else:
+                            self.svc.unschedule(target_task.id)
+                        changed = True
+                    continue
+
+                # обычное событие
+                dt_start = _parse_g_datetime(ev.get("start"))
+                dt_end   = _parse_g_datetime(ev.get("end"))
+                duration = None
+                if dt_start and dt_end and dt_end > dt_start:
+                    duration = int((dt_end - dt_start).total_seconds() // 60)
+
+                # ищем задачу
+                task = None
+                tid = _parse_marker(description)
+                if tid:
+                    task = self.svc.get(tid)
+                if task is None:
+                    task = self.svc.get_by_event_id(ev_id)
+
+                # текст заметок без служебного маркера
+                notes = _strip_marker(description)
+
+                if task:
+                    # обновляем локально
+                    self.svc.update(task.id, title=summary, notes=notes, start=dt_start, duration_minutes=duration)
+                    if task.gcal_event_id != ev_id:
+                        self.svc.set_event_id(task.id, ev_id)
+                    changed = True
+
+                    # убедимся, что в событии есть marker
+                    if tid != task.id:
+                        # аккуратно дописываем marker в описание, не трогая время
+                        try:
+                            new_desc = (notes + ("\n" if notes else "") + f"planner_task_id:{task.id}").strip()
+                            self.service.events().patch(
+                                calendarId=self.calendar_id,
+                                eventId=ev_id,
+                                body={"description": new_desc},
+                            ).execute()
+                        except Exception:
+                            pass
+                else:
+                    # это новое событие «со стороны Google» — создаём задачу
+                    new_task = self.svc.add(title=summary, start=dt_start, duration_minutes=duration, notes=notes)
+                    self.svc.set_event_id(new_task.id, ev_id)
+                    changed = True
+
+                    # и проставим marker обратно в событии
+                    try:
+                        new_desc = (notes + ("\n" if notes else "") + f"planner_task_id:{new_task.id}").strip()
+                        self.service.events().patch(
+                            calendarId=self.calendar_id,
+                            eventId=ev_id,
+                            body={"description": new_desc},
+                        ).execute()
+                    except Exception:
+                        pass
+
+            # пагинация + syncToken
+            if "nextPageToken" in resp:
+                params["pageToken"] = resp["nextPageToken"]
+                # не нужна timeMin/syncToken при пагинации
+                params.pop("timeMin", None)
+                params.pop("syncToken", None)
+                continue
+
+            if "nextSyncToken" in resp:
+                self.store.set_sync_token(resp["nextSyncToken"])
+            break
+
+        return changed
+
+```
+
+### services/tasks.py
+```python
+# planner/services/tasks.py
+from typing import Iterable, Optional
+from datetime import datetime, date, timedelta
+from sqlmodel import select
+from sqlalchemy import and_
+from storage.db import get_session
+from models.task import Task
+
+class TaskService:
+    def add(self, title: str, notes: Optional[str]=None,
+            start: Optional[datetime]=None, duration_minutes: Optional[int]=None) -> Task:
+        with get_session() as s:
+            t = Task(title=title.strip(), notes=notes or None,
+                     start=start, duration_minutes=duration_minutes or None)
+            s.add(t)
+            s.commit()
+            s.refresh(t)
+            return t
+
+    def get(self, task_id: int) -> Optional[Task]:
+        with get_session() as s:
+            return s.get(Task, task_id)
+
+    def update(self, task_id: int, *,
+               title: Optional[str]=None,
+               notes: Optional[str]=None,
+               start: Optional[datetime]=None,
+               duration_minutes: Optional[int]=None) -> Optional[Task]:
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            if not t:
+                return None
+            if title is not None:
+                t.title = title.strip()
+            if notes is not None:
+                t.notes = (notes or None)
+            if start is not None or start is None:
+                t.start = start
+            if duration_minutes is not None or duration_minutes is None:
+                t.duration_minutes = duration_minutes
+            t.updated_at = datetime.utcnow()
+            s.add(t)
+            s.commit()
+            s.refresh(t)
+            return t
+
+    def set_event_id(self, task_id: int, event_id: Optional[str]):
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            if t:
+                t.gcal_event_id = event_id
+                t.updated_at = datetime.utcnow()
+                s.add(t)
+                s.commit()
+
+    def set_status(self, task_id: int, status: str):
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            if t:
+                t.status = status
+                t.updated_at = datetime.utcnow()
+                s.add(t)
+                s.commit()
+
+    def delete(self, task_id: int):
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            if t:
+                s.delete(t)
+                s.commit()
+
+    def list_for_day(self, d: date) -> Iterable[Task]:
+        start = datetime(d.year, d.month, d.day, 0, 0, 0)
+        end = start + timedelta(days=1)
+        with get_session() as s:
+            stmt = select(Task).where(
+                and_(Task.status != "done", Task.start >= start, Task.start < end)
+            ).order_by(Task.start.asc(), Task.created_at.desc())
+            return list(s.exec(stmt))
+
+    def list_unscheduled(self) -> Iterable[Task]:
+        with get_session() as s:
+            stmt = select(Task).where(
+                and_(Task.status != "done", Task.start == None)  # noqa: E711
+            ).order_by(Task.created_at.desc())
+            return list(s.exec(stmt))
+    def get_by_event_id(self, gcal_event_id: str | None):
+        if not gcal_event_id:
+            return None
+        with get_session() as s:
+            stmt = select(Task).where(Task.gcal_event_id == gcal_event_id)
+            return s.exec(stmt).first()
+
+    def unschedule(self, task_id: int):
+        """Снять расписание и отвязать от Google-события (но задачу не удалять)."""
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            if not t:
+                return None
+            t.start = None
+            t.duration_minutes = None
+            t.gcal_event_id = None
+            s.add(t)
+            s.commit()
+            s.refresh(t)
+            return t
+
+```
+
+### storage/__init__.py
+```python
+
+```
+
+### storage/db.py
+```python
+# planner/storage/db.py
+from sqlmodel import SQLModel, create_engine, Session
+
+_engine = create_engine("sqlite:///app.db", echo=False)
+
+def init_db():
+    SQLModel.metadata.create_all(_engine)
+
+def get_engine():
+    return _engine
+
+def get_session() -> Session:
+    return Session(_engine)
+
+```
+
+### ui/__init__.py
+```python
+
+```
+
+### ui/app_shell.py
+```python
+# ui/app_shell.py
+from __future__ import annotations
+
+import asyncio
+import flet as ft
+
+# страницы
+from .pages.today import TodayPage
+from .pages.calendar import CalendarPage
+from .pages.settings import SettingsPage
+
+# Google
+from services.google_auth import GoogleAuth
+from services.google_calendar import GoogleCalendar
+from googleapiclient.discovery import build
+
+# Pull-синхронизация Google -> локально
+from services.sync import GoogleSync, JsonTokenStore
+
+SAFE_SURFACE_BG = "#F1F5F9"  # вместо ft.Colors.SURFACE_VARIANT (его нет в 0.28.3)
+
+
+class AppShell:
+    def __init__(self, page: ft.Page):
+        self.page = page
+
+        # базовые настройки окна
+        self.page.title = "Planner"
+        self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
+        self.page.vertical_alignment = ft.MainAxisAlignment.START
+
+        # --- Google Auth + Calendar (важно: до создания страниц) ---
+        # при необходимости можно передать пути: GoogleAuth(secrets_path=..., token_path=...)
+        self.auth = GoogleAuth()
+        self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
+
+        # --- страницы ---
+        self._today = TodayPage(self)
+        self._calendar = CalendarPage(self)
+        self._settings = SettingsPage(self)  # использует self.gcal
+
+        # контейнер контента
+        self.content = ft.Container(expand=True)
+
+        # левое меню
+        self.nav = ft.NavigationRail(
+            selected_index=0,
+            label_type=ft.NavigationRailLabelType.ALL,
+            min_width=90,
+            min_extended_width=200,
+            group_alignment=-0.9,
+            on_change=self.on_nav_change,
+            destinations=[
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
+                    selected_icon=ft.Icons.CHECK_CIRCLE,
+                    label="Сегодня",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.CALENDAR_MONTH_OUTLINED,
+                    selected_icon=ft.Icons.CALENDAR_MONTH,
+                    label="Календарь",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.SETTINGS_OUTLINED,
+                    selected_icon=ft.Icons.SETTINGS,
+                    label="Настройки",
+                ),
+            ],
+        )
+
+        # корневой лэйаут
+        self.root = ft.Row(
+            controls=[
+                ft.Container(self.nav, width=88, bgcolor=SAFE_SURFACE_BG),
+                ft.VerticalDivider(width=1),
+                self.content,
+            ],
+            expand=True,
+            spacing=0,
+        )
+
+        # автообновление активной страницы
+        self._auto_task: asyncio.Task | None = None
+        self._active_view: str | None = None  # "today" | "calendar" | "settings"
+
+    # ---------- утилиты ----------
+    def _has_open_overlay(self) -> bool:
+        """Если открыт любой диалог/оверлей — пропускаем автообновление."""
+        try:
+            if getattr(self.page, "dialog", None) and getattr(self.page.dialog, "open", False):
+                return True
+        except Exception:
+            pass
+        try:
+            return any(getattr(c, "open", False) for c in (self.page.overlay or []))
+        except Exception:
+            return False
+
+    def _pull_from_google(self) -> bool:
+        """
+        Подтягиваем изменения из Google -> локально.
+        Возвращает True, если локальная база изменилась (для логов/отладки).
+        """
+        try:
+            if not self.gcal or not getattr(self.gcal, "service", None) or not getattr(self.gcal, "calendar_id", None):
+                return False
+            sync = GoogleSync(self.gcal.service, self.gcal.calendar_id, JsonTokenStore())
+            return sync.pull()
+        except Exception as e:
+            print("Google pull sync error:", e)
+            return False
+
+    def _start_auto_refresh(self, view_name: str, refresh_fn, period_sec: int = 60):
+        """Периодически дергаем pull + refresh_fn, пока активен указанный view."""
+        self._stop_auto_refresh()
+        self._active_view = view_name
+
+        async def _loop():
+            # первый прогон — сразу: подтянуть изменения и перерисовать
+            try:
+                self._pull_from_google()
+                refresh_fn()
+            except Exception as e:
+                print("auto refresh (initial):", e)
+
+            while self._active_view == view_name:
+                await asyncio.sleep(period_sec)
+                if self._active_view != view_name:
+                    break
+                if self._has_open_overlay():
+                    continue
+                try:
+                    self._pull_from_google()
+                    refresh_fn()
+                except Exception as e:
+                    print("auto refresh:", e)
+
+        self._auto_task = self.page.run_task(_loop)
+
+    def _stop_auto_refresh(self):
+        try:
+            if self._auto_task:
+                self._auto_task.cancel()
+        except Exception:
+            pass
+        self._auto_task = None
+        self._active_view = None
+
+    # ---------- монтаж ----------
+    def mount(self):
+        self.page.controls.clear()
+        self.page.add(self.root)
+
+        # стартуем со «Сегодня»
+        self.content.content = self._today.view
+        self.page.update()
+
+        # 1) Подтянуть последние изменения из Google,
+        # 2) отрисовать страницу,
+        # 3) запустить автообновление.
+        self._pull_from_google()
+        self._today.activate_from_menu()
+        self._start_auto_refresh("today", self._today.load)
+
+    # ---------- переключение вкладок ----------
+    def on_nav_change(self, e: ft.ControlEvent):
+        idx = int(e.control.selected_index)
+
+        if idx == 0:  # Сегодня
+            self.content.content = self._today.view
+            self._pull_from_google()
+            self._today.activate_from_menu()
+            self._start_auto_refresh("today", self._today.load)
+
+        elif idx == 1:  # Календарь
+            self.content.content = self._calendar.view
+            self._pull_from_google()
+            self._calendar.activate_from_menu()
+            try:
+                self._calendar.scroll_to_now()  # к текущему часу
+            except Exception:
+                pass
+            self._start_auto_refresh("calendar", self._calendar.load)
+
+        else:  # Настройки (используем полноценную страницу настроек)
+            self.content.content = self._settings.view
+            self._stop_auto_refresh()
+
+        self.page.update()
+
+    # ---------- ручной вызов синка (если где-то используете) ----------
+    def current_page_auto_sync(self):
+        if self._has_open_overlay():
+            return
+        self._pull_from_google()
+        if self._active_view == "calendar":
+            self._calendar.load()
+        elif self._active_view == "today":
+            self._today.load()
+
+```
+
+### ui/pages/__init__.py
+```python
+
+```
+
+### ui/pages/calendar.py
+```python
+# ui/pages/calendar.py
+from __future__ import annotations
+import re
+
+import json
+import flet as ft
+from datetime import datetime, date, timedelta
+from typing import Dict, Tuple, List, Optional
+
+from services.tasks import TaskService
+
+# ===== настройки =====
+DAY_START = 0
+DAY_END   = 23
+
+ROW_MIN_H        = 36          # минимальная высота строки часа
+DAY_COL_W        = 160
+HOURS_COL_W      = 76
+SIDE_PANEL_W     = 240
+HEADER_H         = 54
+
+CHIP_EST_H       = 26          # ожидаемая высота «чипа»
+CELL_VPAD        = 8
+CHIPS_SPACING    = 4
+
+IMPORT_NEW_GCAL = True
+
+def _c(name: str, default: str):
+    try:
+        return getattr(ft.Colors, name)
+    except Exception:
+        return default
+
+CLR_OUTLINE  = _c("OUTLINE_VARIANT",    "#E5E7EB")
+CLR_SURFVAR  = _c("SURFACE_VARIANT",    "#F1F5F9")
+CLR_TEXTSUB  = _c("ON_SURFACE_VARIANT", "#6B7280")
+CLR_TODAY_BG = "#EEF2FF"
+CLR_NOW_LINE = "#EF4444"
+CLR_CHIP     = "#E0E7FF"
+CLR_CHIP_TXT = "#1F2937"
+CLR_UNS_BG   = "#FFF59D"
+CLR_BACKDROP = "#000000"  # для клика-вне
+
+NOW_ANCHOR_KEY = "now-anchor"
+
+
+class CalendarPage:
+    """
+    - Один тип сущности: задача.
+    - Ячейки часа растягиваются по содержимому.
+    - Вертикальный скролл только у тела; шапка закреплена.
+    - Горизонтальный скролл синхронный (шапка↔тело), левый столбец времени закреплён.
+    - ESC и клик мимо окна закрывают диалог. Никаких «призраков» в overlay.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.svc = TaskService()
+
+        self.week_start: date = self._monday_of(date.today())
+
+        # индекс задач: (day_idx, hour) -> [task dicts]
+        self.idx: Dict[Tuple[int, int], List[dict]] = {}
+        # рассчитанные высоты строк по каждому часу
+        self.row_h: Dict[int, int] = {}
+
+        # DnD
+        self.current_drag_task_id: Optional[int] = None
+
+        # автопрокрутка к «сейчас» после построения
+        self._need_scroll_now = True
+
+        # ссылки для синхронизации скролла
+        self._hrow_header_ref: ft.Ref[ft.Row] = ft.Ref[ft.Row]()
+        self._hrow_body_ref: ft.Ref[ft.Row]   = ft.Ref[ft.Row]()
+        self._vcol_ref: ft.Ref[ft.Column]     = ft.Ref[ft.Column]()
+
+        # защита от петель при синхронизации скролла
+        self._syncing_hscroll = False
+
+        # текущая подложка (чтобы клик-вне закрывал окно и не оставался «призрак»)
+        self._backdrop: Optional[ft.Control] = None
+
+        # ---------- Шапка экрана ----------
+        self.title_text = ft.Text("", size=24, weight=ft.FontWeight.BOLD)
+        self.home_btn   = ft.IconButton(icon=ft.Icons.HOME,          tooltip="Текущая неделя",  on_click=lambda e: self.go_home())
+        self.prev_btn   = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT,  tooltip="Назад на неделю", on_click=lambda e: self.shift_week(-1))
+        self.next_btn   = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, tooltip="Вперёд на неделю",on_click=lambda e: self.shift_week(1))
+
+        header = ft.Row(
+            controls=[ft.Row([self.prev_btn, self.home_btn, self.next_btn], spacing=6),
+                      self.title_text,
+                      ft.Container()],  # пустой правый край
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        )
+
+        # ---------- Без даты ----------
+        self.unscheduled_list = ft.ListView(expand=True, spacing=6)
+        self.side_panel = ft.Container(
+            width=SIDE_PANEL_W,
+            content=ft.Column(
+                [ft.Text("Без даты", size=16, weight=ft.FontWeight.W_600),
+                 ft.Divider(height=1),
+                 self.unscheduled_list],
+                expand=True, spacing=8),
+            padding=10,
+            border=ft.border.all(0.5, CLR_OUTLINE),
+            border_radius=8,
+        )
+
+        # ---------- Область сетки ----------
+        self.grid = ft.Container(expand=True)
+
+        self.view = ft.Container(
+            content=ft.Column(
+                [header, ft.Divider(height=1), ft.Row([self.side_panel, self.grid], expand=True, spacing=12)],
+                spacing=12, expand=True),
+            expand=True, padding=20,
+        )
+
+        self.load()
+
+    # ===== публичное: вызывать из бокового меню =====
+    def activate_from_menu(self):
+        self._close_any_dialog()
+        self.week_start = self._monday_of(date.today())
+        self._need_scroll_now = True
+        self.load()
+
+    # ===== Диалоги через overlay (как у тебя раньше) =====
+    def _cleanup_backdrop(self):
+        try:
+            if self._backdrop and self._backdrop in self.app.page.overlay:
+                self.app.page.overlay.remove(self._backdrop)
+        except Exception:
+            pass
+        self._backdrop = None
+
+    def _open_dialog(self, dlg: ft.AlertDialog):
+        self._cleanup_backdrop()
+        self._backdrop = ft.Container(
+            expand=True,
+            bgcolor=ft.Colors.with_opacity(0.001, CLR_BACKDROP),
+            on_click=lambda e, d=dlg: self._close_dialog(d),
+            data="backdrop",   # <<< метка, чтобы потом удалить
+        )
+        self.app.page.overlay.append(self._backdrop)
+
+        dlg.modal = False
+        dlg.on_dismiss = lambda e, d=dlg: self._close_dialog(d)
+        if dlg not in self.app.page.overlay:
+            self.app.page.overlay.append(dlg)
+        dlg.open = True
+        self.app.page.update()
+        self._sweep_overlay()  # <<< сразу подчистить
+
+    def _close_dialog(self, dlg: ft.AlertDialog | None):
+        if not dlg:
+            return
+        try:
+            dlg.open = False
+        except Exception:
+            pass
+        try:
+            if dlg in self.app.page.overlay:
+                self.app.page.overlay.remove(dlg)
+        except Exception:
+            pass
+        self._cleanup_backdrop()
+        self._sweep_overlay()
+        self.app.page.update()
+
+    def _close_any_dialog(self):
+        # на всякий случай закрыть всё
+        try:
+            for c in list(self.app.page.overlay):
+                if isinstance(c, ft.AlertDialog):
+                    c.open = False
+                    self.app.page.overlay.remove(c)
+        except Exception:
+            pass
+        self._cleanup_backdrop()
+        self.app.page.update()
+    def _delete_task(self, task_id: int):
+        t = self.svc.get(task_id)
+        if not t:
+            return self._toast("Задача не найдена")
+        # удаляем событие в Google, если привязано
+        if getattr(t, "gcal_event_id", None):
+            try:
+                self.app.gcal.delete_event_by_id(t.gcal_event_id)
+            except Exception:
+                pass
+        self.svc.delete(task_id)
+        self.load()
+        self._toast("Удалено")
+
+
+    # ===== Даты / навигация =====
+    def _monday_of(self, d: date) -> date:
+        return d - timedelta(days=d.weekday())
+
+    def _week_days(self) -> List[date]:
+        return [self.week_start + timedelta(days=i) for i in range(7)]
+
+    def go_home(self):
+        self.week_start = self._monday_of(date.today())
+        self._need_scroll_now = True
+        self.load()
+
+    def shift_week(self, delta_weeks: int):
+        self.week_start = self.week_start + timedelta(days=7 * delta_weeks)
+        self._need_scroll_now = True
+        self.load()
+    
+    def _sweep_overlay(self):
+        # убираем закрытые диалоги и осиротевшие подложки
+        ov = self.app.page.overlay or []
+        changed = False
+        for c in list(ov):
+            if isinstance(c, ft.AlertDialog) and not getattr(c, "open", False):
+                try:
+                    ov.remove(c); changed = True
+                except Exception:
+                    pass
+            elif isinstance(c, ft.Container) and getattr(c, "data", None) == "backdrop":
+                # оставляем подложку только если есть открытый AlertDialog
+                if not any(getattr(d, "open", False) for d in ov if isinstance(d, ft.AlertDialog)):
+                    try:
+                        ov.remove(c); changed = True
+                    except Exception:
+                        pass
+        if changed:
+            self.app.page.update()
+
+    # ===== Загрузка =====
+    def load(self):
+        ws = self.week_start
+        we = ws + timedelta(days=6)
+        self.title_text.value = f"Неделя {ws.strftime('%d.%m')} — {we.strftime('%d.%m.%Y')}"
+        self._sync_from_google(ws, we)
+
+
+        # индекс задач за неделю
+        self.idx.clear()
+        for i in range(7):
+            d = ws + timedelta(days=i)
+            for t in self.svc.list_for_day(d):
+                st = getattr(t, "start", None)
+                if not isinstance(st, datetime):
+                    continue
+                dur = getattr(t, "duration_minutes", None) or 30
+                di = (st.date() - ws).days
+                if 0 <= di < 7:
+                    self.idx.setdefault((di, st.hour), []).append(
+                        {"title": t.title, "task_id": t.id, "duration": dur, "gcal_event_id": getattr(t, "gcal_event_id", None)}
+                    )
+
+        # высоты строк
+        self.row_h = {}
+        for h in range(DAY_START, DAY_END + 1):
+            max_n = 0
+            for di in range(7):
+                max_n = max(max_n, len(self.idx.get((di, h), [])))
+            height = ROW_MIN_H if max_n <= 0 else max(ROW_MIN_H, CELL_VPAD + max_n * CHIP_EST_H + (max_n - 1) * CHIPS_SPACING)
+            self.row_h[h] = height
+
+        self._build_unscheduled()
+        self.grid.content = self._build_week_grid()
+        self.app.page.update()
+
+        if self._need_scroll_now:
+            self._need_scroll_now = False
+            self._scroll_to_now()
+    def _sync_from_google(self, ws: date, we: date):
+        """Подтягивает изменения из Google за окно недели (с небольшим буфером)
+        и обновляет/создаёт/отвязывает локальные задачи.
+        """
+        g = getattr(self.app, "gcal", None)
+        if not g or not getattr(g, "calendar_id", None):
+            return
+
+        # Берём окно чуть шире текущей недели
+        rng_start = ws - timedelta(days=3)
+        rng_end   = we + timedelta(days=3)
+
+        try:
+            # ожидаем, что list_range(start_dt, end_dt, show_deleted=True) у тебя есть
+            events = g.list_range(
+                datetime(rng_start.year, rng_start.month, rng_start.day, 0, 0, 0),
+                datetime(rng_end.year, rng_end.month, rng_end.day, 23, 59, 59),
+                show_deleted=True  # важно для отслеживания удалений
+            )
+        except Exception as ex:
+            self._toast(f"Google sync: {ex}")
+            return
+
+        # --- утилита парсинга дат ---
+        def _parse_ev_datetime(s: str | None):
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        # карты по id событий
+        ev_map = {}
+        for ev in events or []:
+            eid = ev.get("id")
+            if not eid:
+                continue
+            status = ev.get("status", "confirmed")
+            if status == "cancelled":
+                ev_map[eid] = {"deleted": True}
+                continue
+
+            st = ev.get("start") or {}
+            en = ev.get("end") or {}
+
+            # all-day: Google присылает "date" вместо "dateTime"
+            if "dateTime" in st and "dateTime" in en:
+                dt_start = _parse_ev_datetime(st.get("dateTime"))
+                dt_end   = _parse_ev_datetime(en.get("dateTime"))
+                dur = None
+                if dt_start and dt_end:
+                    dur = int((dt_end - dt_start).total_seconds() // 60)
+                ev_map[eid] = {
+                    "title": ev.get("summary") or "",
+                    "start": dt_start,
+                    "duration": dur,
+                    "allday": False,
+                }
+            else:
+                # all-day -> ставим дату без времени (твой Today/Календарь понимают это как "без времени")
+                try:
+                    d = date.fromisoformat((st.get("date") or "").strip())
+                    dt_start = datetime(d.year, d.month, d.day)
+                except Exception:
+                    dt_start = None
+                ev_map[eid] = {
+                    "title": ev.get("summary") or "",
+                    "start": dt_start,
+                    "duration": None,
+                    "allday": True,
+                }
+
+        # --- Собираем локальные связанные задачи в нашем окне + «без даты» ---
+        linked_tasks: list = []
+        for i in range((rng_end - rng_start).days + 1):
+            d = rng_start + timedelta(days=i)
+            for t in self.svc.list_for_day(d):
+                if getattr(t, "gcal_event_id", None):
+                    linked_tasks.append(t)
+        for t in self.svc.list_unscheduled():
+            if getattr(t, "gcal_event_id", None):
+                linked_tasks.append(t)
+
+        # --- Обновляем связанные задачи по данным из Google ---
+        seen_event_ids = set()
+        for t in linked_tasks:
+            eid = getattr(t, "gcal_event_id", None)
+            info = ev_map.get(eid)
+            if not eid:
+                continue
+            seen_event_ids.add(eid)
+
+            # Событие удалили со стороны Google
+            if not info or info.get("deleted"):
+                try:
+                    # по умолчанию — не удаляем задачу, а отвязываем и убираем расписание
+                    self.svc.update(t.id, start=None)
+                    self.svc.set_event_id(t.id, None)
+                except Exception:
+                    pass
+                continue
+
+            # Обновления полей
+            upd = {}
+            if (t.title or "") != (info["title"] or ""):
+                upd["title"] = info["title"] or ""
+
+            if info["allday"]:
+                # день без времени
+                if not t.start or t.start.date() != info["start"].date() or (t.start.hour != 0 or t.start.minute != 0):
+                    upd["start"] = datetime(info["start"].year, info["start"].month, info["start"].day)
+                if getattr(t, "duration_minutes", None) is not None:
+                    upd["duration_minutes"] = None
+            else:
+                if not t.start or t.start != info["start"]:
+                    upd["start"] = info["start"]
+                if getattr(t, "duration_minutes", None) != info["duration"]:
+                    upd["duration_minutes"] = info["duration"]
+
+            if upd:
+                try:
+                    self.svc.update(t.id, **upd)
+                except Exception:
+                    pass
+
+        # --- (опционально) импорт новых событий как задач ---
+        if IMPORT_NEW_GCAL:
+            for eid, info in ev_map.items():
+                if eid in seen_event_ids:
+                    continue
+                if info.get("deleted"):
+                    continue
+                try:
+                    # создаём новую задачу, сразу привязываем eid
+                    new_task = self.svc.add(
+                        title=info.get("title") or "(без названия)",
+                        start=info.get("start"),
+                        duration_minutes=info.get("duration"),
+                    )
+                    self.svc.set_event_id(new_task.id, eid)
+                except Exception:
+                    pass
+
+
+    # ===== Без даты =====
+    def _build_unscheduled(self):
+        self.unscheduled_list.controls.clear()
+        for t in self.svc.list_unscheduled():
+            chip = ft.Container(
+                content=ft.Text(t.title, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, color=CLR_CHIP_TXT),
+                padding=8, bgcolor=CLR_UNS_BG,
+                border=ft.border.all(0.5, CLR_OUTLINE), border_radius=8,
+                width=SIDE_PANEL_W - 20,
+            )
+            drag = ft.Draggable(
+                group="task",
+                data=str(t.id),
+                on_drag_start=lambda e, tid=t.id: self._remember_drag(tid),
+                content=chip,
+                content_feedback=ft.Container(
+                    content=ft.Text(t.title, size=12),
+                    padding=8, bgcolor="#ffffff", border_radius=6,
+                    border=ft.border.all(0.5, CLR_OUTLINE),
+                ),
+            )
+            self.unscheduled_list.controls.append(drag)
+
+    def _remember_drag(self, task_id: int):
+        self.current_drag_task_id = task_id
+        self.app.page.update()
+
+    # ===== Сетка =====
+    def _build_week_grid(self) -> ft.Control:
+        days = self._week_days()
+        today = date.today()
+        now = datetime.now()
+
+        # --- Шапка дней (в собственном viewport) ---
+        header_cells: List[ft.Control] = []
+        for i, d in enumerate(days):
+            header_cells.append(
+                ft.Container(
+                    width=DAY_COL_W, height=HEADER_H,
+                    content=ft.Column(
+                        [ft.Text(d.strftime("%a"), size=14, weight=ft.FontWeight.W_600),
+                         ft.Text(d.strftime("%d.%m"), size=12, color=CLR_TEXTSUB)],
+                        spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    alignment=ft.alignment.center,
+                    bgcolor=CLR_TODAY_BG if d == today else None,
+                    border=ft.border.only(right=ft.BorderSide(0.5, CLR_OUTLINE)) if i < 6 else None,
+                )
+            )
+        hrow_header = ft.Row(controls=header_cells, spacing=0, ref=self._hrow_header_ref, scroll=ft.ScrollMode.ALWAYS)
+        header_viewport = ft.Container(  # ограничиваем ширину, чтобы работал скролл
+            height=HEADER_H, expand=True, content=hrow_header, clip_behavior=ft.ClipBehavior.HARD_EDGE
+        )
+
+        # --- Левый столбец часов (закреплён) ---
+        hours_controls: List[ft.Control] = []
+        for h in range(DAY_START, DAY_END + 1):
+            hours_controls.append(
+                ft.Container(
+                    content=ft.Text(f"{h:02d}:00", size=12, color=CLR_TEXTSUB),
+                    width=HOURS_COL_W, height=self.row_h[h],
+                    alignment=ft.alignment.center_right,
+                    padding=ft.padding.only(right=8),
+                    border=ft.border.only(bottom=ft.BorderSide(0.6, CLR_OUTLINE)),
+                )
+            )
+        hours_col = ft.Column(controls=hours_controls, spacing=0, width=HOURS_COL_W)
+
+        # --- Колонки дней (тело), тоже в viewport по X ---
+        day_cols: List[ft.Control] = []
+        for di, d in enumerate(days):
+            is_today_col = (d == today)
+            col_rows: List[ft.Control] = []
+            for h in range(DAY_START, DAY_END + 1):
+                tasks = self.idx.get((di, h), [])
+                is_now = is_today_col and (h == now.hour)
+                slot = self._slot_body(tasks, is_now, d, h)
+                drop = ft.DragTarget(group="task", content=slot,
+                                     on_accept=lambda e, _d=d, _h=h: self._on_drop_accept(_d, _h, e))
+                cell = ft.Container(
+                    content=drop, width=DAY_COL_W, height=self.row_h[h],
+                    bgcolor=CLR_TODAY_BG if is_today_col else None,
+                    border=ft.border.only(
+                        right=ft.BorderSide(0.5, CLR_OUTLINE) if di < 6 else None,
+                        bottom=ft.BorderSide(0.6, CLR_OUTLINE),
+                    ),
+                )
+                col_rows.append(cell)
+            day_cols.append(ft.Container(content=ft.Column(col_rows, spacing=0), width=DAY_COL_W))
+
+        hrow_body = ft.Row(controls=day_cols, spacing=0, ref=self._hrow_body_ref, scroll=ft.ScrollMode.ALWAYS)
+        body_viewport = ft.Container(expand=True, content=hrow_body, clip_behavior=ft.ClipBehavior.HARD_EDGE)
+
+        # --- синхронизация скролла шапки и тела ---
+        hrow_header.on_scroll = self._on_header_hscroll
+        hrow_body.on_scroll   = self._on_body_hscroll
+
+        # --- вертикальный скролл: часы слева (фикс), тело справа (viewport по X) ---
+        vscroll_body = ft.Column(
+            controls=[ft.Row([hours_col, body_viewport], spacing=0)],
+            spacing=0, expand=True, scroll=ft.ScrollMode.ALWAYS, ref=self._vcol_ref
+        )
+
+        # --- финальная сборка ---
+        top_header = ft.Row(
+            controls=[ft.Container(width=HOURS_COL_W, height=HEADER_H), header_viewport],
+            spacing=0,
+        )
+
+        return ft.Container(
+            content=ft.Column(
+                controls=[top_header, ft.Divider(height=1, color=CLR_OUTLINE), vscroll_body],
+                spacing=0, expand=True),
+            expand=True,
+            border_radius=8,
+            border=ft.border.all(0.5, CLR_OUTLINE),
+            padding=8,
+            bgcolor="#fff",
+        )
+
+    # синхронизация горизонтального скролла (без «рывков»)
+    def _on_body_hscroll(self, e: ft.OnScrollEvent):
+        if self._syncing_hscroll:
+            return
+        try:
+            self._syncing_hscroll = True
+            hdr = self._hrow_header_ref.current
+            if hdr:
+                hdr.scroll_to(offset=e.pixels, duration=0)
+        finally:
+            self._syncing_hscroll = False
+
+    def _on_header_hscroll(self, e: ft.OnScrollEvent):
+        if self._syncing_hscroll:
+            return
+        try:
+            self._syncing_hscroll = True
+            body = self._hrow_body_ref.current
+            if body:
+                body.scroll_to(offset=e.pixels, duration=0)
+        finally:
+            self._syncing_hscroll = False
+
+    def _slot_body(self, tasks: List[dict], is_now_hour: bool, day: date, hour: int) -> ft.Control:
+        chips: List[ft.Control] = []
+        if is_now_hour:
+            chips.append(ft.Container(key=NOW_ANCHOR_KEY, height=1, width=1))
+            chips.append(ft.Container(height=2, bgcolor=CLR_NOW_LINE))
+
+        if tasks:
+            for t in tasks:
+                chips.append(self._build_chip(t, day, hour))
+        else:
+            # кликабельная площадь заполняет весь слот по высоте
+            chips.append(
+                ft.Container(
+                    on_click=lambda e, d=day, h=hour: self.open_quick_add(d, h),
+                    width=DAY_COL_W,
+                    height=max(8, self.row_h.get(hour, ROW_MIN_H) - 8),
+                )
+            )
+
+        return ft.Container(
+            content=ft.Column(chips, spacing=CHIPS_SPACING),
+            padding=ft.padding.only(left=6, right=6, top=4, bottom=4),
+            width=DAY_COL_W, expand=True,
+            bgcolor=CLR_SURFVAR if tasks else None,
+        )
+
+    def _build_chip(self, t: dict, day: date, hour: int) -> ft.Control:
+        title = t.get("title", "")
+        tid = t.get("task_id")
+        dur = t.get("duration", 30)
+
+        chip_body = ft.Container(
+            content=ft.Text(title, size=11, color=CLR_CHIP_TXT,
+                            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
+            bgcolor=CLR_CHIP, border=ft.border.all(0.5, CLR_OUTLINE), border_radius=8,
+            padding=6, width=DAY_COL_W-12,
+        )
+        gd = ft.GestureDetector(
+            content=chip_body,
+            on_tap=lambda e, _tid=tid: self._open_edit_dialog(_tid, title, dur),
+            on_secondary_tap=lambda e, _tid=tid, _title=title, _dur=dur, _d=day, _h=hour:
+                self._open_chip_menu(_tid, _title, _dur, _d, _h),
+        )
+        return ft.Draggable(
+            group="task",
+            data=str(tid),
+            on_drag_start=lambda e, t_id=tid: self._remember_drag(t_id),
+            content=gd,
+            content_feedback=ft.Container(
+                content=ft.Text(title, size=12),
+                padding=8, bgcolor="#ffffff", border_radius=6, border=ft.border.all(0.5, CLR_OUTLINE),
+            ),
+        )
+
+    # ===== Контекстное меню чипа =====
+    def _open_chip_menu(self, task_id: int, title: str, duration: int, day: date, hour: int):
+        dlg = None
+
+        def close(_=None):
+            self._close_dialog(dlg)
+            self._sweep_overlay()  
+
+        def act_edit(_):
+            close(); self._open_edit_dialog(task_id, title, duration)
+
+        def act_move(_):
+            close(); self._schedule_task(task_id, day, hour)
+
+        def act_snooze30(_):
+            close(); self._snooze_minutes(task_id, day, hour, duration, 30)
+
+        def act_evening(_):
+            close(); self._snooze_evening(task_id)
+
+        def act_tomorrow(_):
+            close(); self._snooze_tomorrow(task_id)
+
+        def act_delete(_):
+            close(); self._delete_task(task_id)
+
+        content = ft.Column(
+            controls=[
+                ft.TextButton("Редактировать", on_click=act_edit),
+                ft.TextButton("Перенести…", on_click=act_move),
+                ft.Divider(height=1),
+                ft.TextButton("Snooze +30 мин", on_click=act_snooze30),
+                ft.TextButton("Сегодня вечером", on_click=act_evening),
+                ft.TextButton("Завтра 10:00", on_click=act_tomorrow),
+                ft.Divider(height=1),
+                ft.TextButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=act_delete),
+            ],
+            tight=True, spacing=4, width=240,
+        )
+        dlg = ft.AlertDialog(modal=False, title=ft.Text(title), content=content)
+        self._open_dialog(dlg)
+
+    # ===== DnD =====
+    def _on_drop_accept(self, day: date, hour: int, e):
+        task_id = self.current_drag_task_id
+        if task_id is None:
+            s = str(e.data or "").strip()
+            if s.isdigit():
+                task_id = int(s)
+            else:
+                try:
+                    payload = json.loads(s)
+                    if isinstance(payload, dict) and "task_id" in payload:
+                        task_id = int(payload["task_id"])
+                except Exception:
+                    task_id = None
+        self.current_drag_task_id = None
+        if task_id is None:
+            return self._toast("Не удалось определить задачу")
+        self._schedule_task(task_id, day, hour)
+
+    # ===== Планирование и быстрый блок =====
+    def _schedule_task(self, task_id: int, day: date, hour: int):
+        start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
+        dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
+        dlg = None
+
+        def on_save(_):
+            try:
+                duration = int(dur_tf.value)
+                if duration <= 0:
+                    raise ValueError
+            except Exception:
+                return self._toast("Длительность должна быть > 0")
+
+            t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
+            try:
+                if t and getattr(t, "gcal_event_id", None):
+                    self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
+                elif t:
+                    ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
+                    self.svc.set_event_id(task_id, ev["id"])
+            except Exception as ex:
+                self._toast(f"Google недоступен: {ex}")
+
+            self._close_dialog(dlg)
+            self._sweep_overlay()
+            self.load()
+
+        def on_cancel(_):
+            self._close_dialog(dlg)
+            self._sweep_overlay()
+
+        dlg = ft.AlertDialog(
+            modal=False,
+            inset_padding=ft.padding.all(16),
+            content_padding=ft.padding.all(12),
+            title=ft.Text(f"Запланировать — {start_dt.strftime('%a, %d.%m %H:00')}"),
+            content=ft.Column([dur_tf], spacing=10, tight=True),  # без Container и width
+            actions=[
+                ft.TextButton("Отмена", on_click=on_cancel),
+                ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        self._open_dialog(dlg)
+
+    def open_quick_add(self, day: date, hour: int):
+        start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
+        title_tf = ft.TextField(label="Название", expand=True)
+        dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
+        dlg = None
+
+        def on_save(_):
+            title = (title_tf.value or "").strip()
+            if not title:
+                return self._toast("Введите название")
+            try:
+                duration = int(dur_tf.value)
+                if duration <= 0:
+                    raise ValueError
+            except Exception:
+                return self._toast("Длительность должна быть > 0")
+
+            task = self.svc.add(title=title, start=start_dt, duration_minutes=duration)
+            try:
+                ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
+                self.svc.set_event_id(task.id, ev["id"])
+                self._toast("Создано и в календаре")
+            except Exception as ex:
+                self._toast(f"Создано локально (Google недоступен): {ex}")
+
+            self._close_dialog(dlg)
+            self._sweep_overlay()
+            self.load()
+
+        def on_cancel(_):
+            self._close_dialog(dlg)
+            self._sweep_overlay()
+
+        dlg = ft.AlertDialog(
+            modal=False,
+            inset_padding=ft.padding.all(16),
+            content_padding=ft.padding.all(12),
+            title=ft.Text(f"Быстрый блок — {start_dt.strftime('%a, %d.%m %H:00')}"),
+            content=ft.Column([title_tf, dur_tf], spacing=10, tight=True),
+            actions=[
+                ft.TextButton("Отмена", on_click=on_cancel),
+                ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dlg)
+
+    # ===== Редактирование / Snooze / Удаление =====
+    # ui/pages/calendar.py  (внутри класса CalendarPage)
+    def _open_edit_dialog(
+        self,
+        task_id: int,
+        current_title: str | None = None,
+        current_duration: int | None = None,
+    ):
+        # --- берём актуальные данные задачи ---
+        t = None
+        try:
+            t = self.svc.get(task_id)
+        except Exception:
+            pass
+        if t is None:
+            return self._toast("Задача не найдена")
+
+        title_init = current_title if current_title is not None else (t.title or "")
+        dur_init   = current_duration if current_duration is not None else (t.duration_minutes or 30)
+        start_init = getattr(t, "start", None)
+
+        date_str = start_init.strftime("%d.%m.%Y") if isinstance(start_init, datetime) else ""
+        time_str = start_init.strftime("%H:%M")     if isinstance(start_init, datetime) else ""
+
+        # --- поля формы (без expand) ---
+        DATE_W, TIME_W, DUR_W = 140, 100, 120
+
+        title_tf = ft.TextField(label="Название", value=title_init)
+        date_tf  = ft.TextField(label="Дата",  value=date_str, width=DATE_W, read_only=True)
+        time_tf  = ft.TextField(label="Время", value=time_str, width=TIME_W, read_only=True)
+        dur_tf   = ft.TextField(label="Длительность, мин", value=str(dur_init), width=DUR_W)
+
+        # заметки (авто-увеличение по числу строк)
+        notes_tf = ft.TextField(
+            label="Заметки",
+            value=(t.notes or ""),
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+        )
+        def _autogrow(_=None):
+            s = notes_tf.value or ""
+            # считаем количество визуальных строк (по \n)
+            lines = max(3, min(12, s.count("\n") + 1))
+            if notes_tf.max_lines != lines:
+                notes_tf.max_lines = lines
+                self.app.page.update()
+        notes_tf.on_change = _autogrow
+        _autogrow()  # подстроиться под начальный текст
+
+        # --- пикеры ---
+        dp = ft.DatePicker(
+            first_date=date(2000, 1, 1),
+            last_date=date(2100, 12, 31),
+            on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
+        )
+        tp = ft.TimePicker(
+            help_text="Выберите время",
+            on_change=lambda e: self._set_tf_time(time_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_time(time_tf, e.control.value),
+        )
+        for p in (dp, tp):
+            if p not in self.app.page.overlay:
+                self.app.page.overlay.append(p)
+
+        date_btn = ft.IconButton(
+            icon=ft.Icons.CALENDAR_MONTH,
+            tooltip="Выбрать дату",
+            icon_size=18,
+            on_click=lambda e, _dp=dp: self.app.page.open(_dp),
+        )
+        time_btn = ft.IconButton(
+            icon=ft.Icons.SCHEDULE,
+            tooltip="Выбрать время",
+            icon_size=18,
+            on_click=lambda e, _tp=tp: self.app.page.open(_tp),
+        )
+
+        # --- сохранение / отмена ---
+        dlg = None
+
+        def on_save(_):
+            new_title = (title_tf.value or "").strip()
+            if not new_title:
+                return self._toast("Введите название")
+
+            if date_tf.value and self._parse_date_tf(date_tf.value) is None:
+                return self._toast("Неверный формат даты. Пример: 10.10.2025")
+            if time_tf.value and self._parse_time_tf(time_tf.value) is None:
+                return self._toast("Неверный формат времени. Пример: 09:30")
+
+            new_start = self._combine_dt(date_tf.value, time_tf.value)
+            try:
+                new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
+            except ValueError:
+                return self._toast("Длительность должна быть числом (мин)")
+
+            updated = self.svc.update(
+                task_id,
+                title=new_title,
+                notes=notes_tf.value,
+                start=new_start,
+                duration_minutes=new_dur,
+            )
+
+            # --- Google Calendar sync ---
+            if new_start is not None and new_dur is not None:
+                if updated.gcal_event_id:
+                    try:
+                        self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
+                    except Exception as e:
+                        self._toast(f"Google: не удалось обновить: {e}")
+                else:
+                    try:
+                        ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
+                        self.svc.set_event_id(task_id, ev["id"])
+                    except Exception as e:
+                        self._toast(f"Google: не удалось создать: {e}")
+            else:
+                # если дата/время/длительность очищены — удаляем привязанное событие
+                if updated.gcal_event_id:
+                    try:
+                        self.app.gcal.delete_event_by_id(updated.gcal_event_id)
+                    finally:
+                        self.svc.set_event_id(task_id, None)
+
+            self._close_dialog(dlg)
+            self._sweep_overlay()
+            self.load()
+            self._toast("Сохранено")
+
+        def on_cancel(_):
+            self._close_dialog(dlg)
+            self._sweep_overlay()
+
+        # --- компактная вёрстка (без Wrap) ---
+        utils_row = ft.Row(
+            [date_tf, date_btn, time_tf, time_btn, dur_tf],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.END,
+        )
+        buttons_row = ft.Row(
+            [ft.TextButton("Отмена", on_click=on_cancel),
+            ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save)],
+            alignment=ft.MainAxisAlignment.END,
+        )
+
+        dlg = ft.AlertDialog(
+            modal=False,
+            inset_padding=ft.padding.all(16),
+            content_padding=ft.padding.all(12),
+            title=ft.Text("Редактировать задачу"),
+            content=ft.Container(
+                width=480,
+                content=ft.Column(
+                    [title_tf, utils_row, notes_tf, buttons_row],
+                    spacing=10,
+                    tight=True,
+                    scroll=ft.ScrollMode.ADAPTIVE,
+                ),
+            ),
+        )
+
+        self._open_dialog(dlg)
+
+
+
+    def _snooze_minutes(self, task_id: int, day: date, hour: int, duration: int, add_minutes: int):
+        base = datetime(day.year, day.month, day.day, hour, 0, 0) + timedelta(minutes=add_minutes)
+        self._reschedule(task_id, base, duration)
+
+    def _snooze_evening(self, task_id: int):
+        now = datetime.now().astimezone()
+        base = now.replace(hour=19, minute=0, second=0, microsecond=0)
+        if base < now:
+            base = base + timedelta(days=1)
+        self._reschedule(task_id, base, 30)
+
+    def _snooze_tomorrow(self, task_id: int):
+        base = (datetime.now().astimezone() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+        self._reschedule(task_id, base, 30)
+
+    def _reschedule(self, task_id: int, start_dt: datetime, duration: int):
+        t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
+        try:
+            if t and getattr(t, "gcal_event_id", None):
+                self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
+            elif t:
+                ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
+                self.svc.set_event_id(task_id, ev["id"])
+        except Exception as ex:
+            self._toast(f"Google недоступен: {ex}")
+        self.load()
+
+    # ===== автопрокрутка к сегодняшнему дню и текущему часу =====
+    def _scroll_to_now(self):
+        # вертикаль
+        try:
+            now = datetime.now()
+            top_offset = 0
+            for h in range(DAY_START, min(now.hour, DAY_END + 1)):
+                top_offset += self.row_h.get(h, 0)
+            if self._vcol_ref.current:
+                self._vcol_ref.current.scroll_to(offset=top_offset, duration=300)
+        except Exception:
+            pass
+
+        # горизонталь
+        try:
+            day_idx = (date.today() - self.week_start).days
+            if 0 <= day_idx < 7:
+                offset_x = DAY_COL_W * day_idx
+                if self._hrow_body_ref.current:
+                    self._hrow_body_ref.current.scroll_to(offset=offset_x, duration=300)
+                if self._hrow_header_ref.current:
+                    self._hrow_header_ref.current.scroll_to(offset=offset_x, duration=300)
+        except Exception:
+            pass
+
+    # публичная обёртка, чтобы дергать из AppShell    
+    def scroll_to_now(self):
+        self._scroll_to_now()
+
+    # авто-увеличение высоты многострочного TextField
+    def _autogrow_textfield(self, tf: ft.TextField, *, min_lines=2, max_lines=14, wrap_at=60):
+        text = tf.value or ""
+        # грубо оцениваем количество строк с учётом переносов
+        lines = text.splitlines() or [""]
+        est = sum((len(l) // wrap_at) + 1 for l in lines)
+        h = max(min_lines, min(est, max_lines))
+        tf.min_lines = h
+        tf.max_lines = h
+
+
+    # ===== сервис =====
+    def _toast(self, text: str):
+        self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
+        self.app.page.snack_bar.open = True
+        self.app.page.update()
+    
+
+```
+
+### ui/pages/settings.py
+```python
+# ui/pages/settings.py
+import flet as ft
+
+class SettingsPage:
+    def __init__(self, app):
+        self.app = app
+        self.status = ft.Text("Google: не подключено")
+        if getattr(self.app.gcal, "calendar_id", None):
+            self.status.value = f"Google: подключено (календарь: {self.app.gcal.calendar_id})"
+
+        self.connect_btn = ft.ElevatedButton(
+            "Подключить Google",
+            icon=ft.Icons.LINK,          # в Flet 0.28+: ft.Icons.*
+            on_click=self.connect_google
+        )
+
+        content = ft.Column(
+            controls=[
+                ft.Text("Настройки", size=24, weight=ft.FontWeight.BOLD),
+                self.status,
+                self.connect_btn,
+            ],
+            expand=True,
+            spacing=16,
+        )
+
+        # В Flet 0.28 отступы задаём контейнером:
+        self.view = ft.Container(content=content, expand=True, padding=20)
+
+    def connect_google(self, _):
+        try:
+            self.app.gcal.connect()
+            self.status.value = f"Google: подключено (календарь: {self.app.gcal.calendar_id})"
+            self.app.page.snack_bar = ft.SnackBar(ft.Text("Google подключён"))
+            self.app.page.snack_bar.open = True
+            self.app.page.update()
+        except Exception as e:
+            self.status.value = f"Ошибка: {e}"
+            self.app.page.update()
+
+```
+
+### ui/pages/today.py
+```python
+# planner/ui/pages/today.py
+import re
+from datetime import datetime, date, timedelta
+import flet as ft
+
+from services.tasks import TaskService
+
+
+class TodayPage:
+    def __init__(self, app):
+        self.app = app
+        self.svc = TaskService()
+        self.edit_dialog: ft.AlertDialog | None = None
+
+        # ---------- Быстрый ввод ----------
+        self.title_tf = ft.TextField(
+            label="Название задачи",
+            hint_text="Например: Позвонить Ивану",
+            expand=True,
+            prefix=ft.Icon(ft.Icons.TASK_ALT),
+        )
+
+        self.date_tf = ft.TextField(
+            label="Дата", hint_text="напр.: 10.10.2025", width=160
+        )
+        self.time_tf = ft.TextField(
+            label="Время", hint_text="чч:мм", width=120
+        )
+
+
+        # В 0.28.3 дата надёжно приходит через control.value, иногда только в on_dismiss
+        self.date_picker_add = ft.DatePicker(
+            first_date=date(2000, 1, 1),
+            last_date=date(2100, 12, 31),
+            on_change=lambda e: self._set_tf_date(self.date_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_date(self.date_tf, e.control.value),
+        )
+
+        # TimePicker
+        self.time_picker_add = ft.TimePicker(
+            help_text="Выберите время",
+            on_change=lambda e: self._set_tf_time(self.time_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_time(self.time_tf, e.control.value),
+        )
+
+        for p in (self.date_picker_add, self.time_picker_add):
+            if p not in self.app.page.overlay:
+                self.app.page.overlay.append(p)
+
+        self.date_btn = ft.IconButton(
+            icon=ft.Icons.CALENDAR_MONTH, tooltip="Календарь",
+            on_click=lambda e: self.app.page.open(self.date_picker_add)
+        )
+        self.time_btn = ft.IconButton(
+            icon=ft.Icons.SCHEDULE, tooltip="Выбрать время",
+            on_click=lambda e: self.app.page.open(self.time_picker_add)
+        )
+
+        self.dur_tf = ft.TextField(label="Длительность, мин", value="30", width=160, prefix=ft.Icon(ft.Icons.TIMER))
+        self.to_calendar_cb = ft.Checkbox(label="Сразу в календарь", value=True)
+        self.add_btn = ft.FilledButton("Добавить", icon=ft.Icons.ADD, on_click=self.on_add)
+
+        quick_add = ft.Card(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text("Быстрый ввод", size=18, weight=ft.FontWeight.W_600),
+                        ft.Row(
+                            [
+                                self.title_tf,
+                                ft.Row([self.date_tf, self.date_btn], spacing=6),
+                                ft.Row([self.time_tf, self.time_btn], spacing=6),
+                                self.dur_tf,
+                                self.to_calendar_cb,
+                                self.add_btn,
+                            ],
+                            alignment=ft.MainAxisAlignment.START,
+                            vertical_alignment=ft.CrossAxisAlignment.END,
+                        ),
+                    ],
+                    spacing=12,
+                ),
+                padding=16,
+            )
+        )
+
+        self.today_list = ft.ListView(expand=False, spacing=8)
+        self.unscheduled_list = ft.ListView(expand=False, spacing=8)
+
+        today_card = ft.Card(
+            content=ft.Container(
+                content=ft.Column([ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600), self.today_list], spacing=12),
+                padding=16,
+            )
+        )
+        unscheduled_card = ft.Card(
+            content=ft.Container(
+                content=ft.Column([ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600), self.unscheduled_list], spacing=12),
+                padding=16,
+            )
+        )
+
+        self.view = ft.Container(
+            content=ft.Column(
+                [ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD), quick_add, today_card, unscheduled_card],
+                spacing=16, expand=True,
+            ),
+            expand=True, padding=20,
+        )
+
+        self.refresh_lists()
+    
+    # --- вызов из меню/автообновления ---
+    def activate_from_menu(self):
+        self.load()
+
+    def load(self):
+        # алиас для унификации с календарём
+        self.refresh_lists()
+
+    # ---------- Утилиты ----------
+    def _set_tf_date(self, tf: ft.TextField, value):
+        from datetime import date as _date, datetime
+
+        v = value  # сюда вы передаёте e.data or e.control.value
+
+        # Если пришёл объект date
+        if isinstance(v, _date):
+            tf.value = v.strftime("%d.%m.%Y")
+
+        # Если пришла строка
+        elif isinstance(v, str) and v.strip():
+            s = v.strip()
+
+            # 1) ISO 'YYYY-MM-DD'
+            try:
+                tf.value = datetime.strptime(s, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except ValueError:
+                # 2) 'YYYY-MM-DDTHH:MM:SS...' -> берём дату до 'T'
+                if "T" in s:
+                    try:
+                        tf.value = datetime.strptime(s.split("T")[0], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except ValueError:
+                        pass
+                else:
+                    # 3) уже 'DD.MM.YYYY' — оставляем как есть, если валидно
+                    try:
+                        datetime.strptime(s, "%d.%m.%Y")
+                        tf.value = s
+                    except ValueError:
+                        # не распознали — ничего не меняем
+                        return
+
+        # Обновляем UI
+        self.app.page.update()
+
+    def _set_tf_time(self, tf: ft.TextField, value):
+        """
+        Унифицирует значение из TimePicker в формат HH:MM.
+        Поддерживает: datetime.time, "HH:MM", "HH:MM:SS".
+        """
+        # если пришёл time-объект
+        try:
+            tf.value = value.strftime("%H:%M")
+            self.app.page.update()
+            return
+        except Exception:
+            pass
+
+        # строковые варианты
+        s = str(value or "").strip()
+        m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", s)
+        if m:
+            h = int(m.group(1))
+            mm = int(m.group(2))
+            if 0 <= h <= 23 and 0 <= mm <= 59:
+                tf.value = f"{h:02d}:{mm:02d}"
+        self.app.page.update()
+
+
+    def _parse_date_tf(self, s: str):
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$", s)
+        if not m:
+            return None
+        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mth, d)
+        except ValueError:
+            return None
+
+    def _parse_time_tf(self, s: str):
+        """
+        Возвращает (hour, minute) или None. Допускает секунды.
+        """
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", s)
+        if not m:
+            return None
+        h, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= minute <= 59:
+            return h, minute
+        return None
+
+    def _combine_dt(self, date_str: str, time_str: str):
+        d = self._parse_date_tf(date_str)
+        t = self._parse_time_tf(time_str)
+        if d and t:
+            return datetime(d.year, d.month, d.day, t[0], t[1])
+        if d and not t:
+            return datetime(d.year, d.month, d.day)  # без времени
+        if not d and t:
+            now = datetime.now()
+            cand = datetime(now.year, now.month, now.day, t[0], t[1])
+            if cand < now - timedelta(minutes=1):
+                cand += timedelta(days=1)
+            return cand
+        return None
+
+    # ---------- CRUD ----------
+    def on_add(self, _):
+        title = (self.title_tf.value or "").strip()
+        if not title:
+            return self._toast("Введите название задачи")
+
+        if self.date_tf.value and self._parse_date_tf(self.date_tf.value) is None:
+            return self._toast("Неверный формат даты. Пример: 10.10.2025")
+        if self.time_tf.value and self._parse_time_tf(self.time_tf.value) is None:
+            return self._toast("Неверный формат времени. Пример: 09:30")
+
+        start_dt = self._combine_dt(self.date_tf.value, self.time_tf.value)
+
+        try:
+            duration = int(self.dur_tf.value) if self.dur_tf.value else None
+        except ValueError:
+            return self._toast("Длительность должна быть числом (мин)")
+
+        task = self.svc.add(title=title, start=start_dt, duration_minutes=duration)
+
+        msg = "Задача добавлена"
+        if self.to_calendar_cb.value and start_dt and duration:
+            try:
+                ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
+                self.svc.set_event_id(task.id, ev["id"])
+                msg = "Задача добавлена и запланирована в Google"
+            except Exception as e:
+                msg = f"Создана локально, Google недоступен: {e}"
+
+        self.title_tf.value = ""
+        self.date_tf.value = ""
+        self.time_tf.value = ""
+        self.dur_tf.value = "30"
+        self.refresh_lists()
+        self._toast(msg)
+
+    def on_toggle_done(self, task_id: int, checked: bool):
+        self.svc.set_status(task_id, "done" if checked else "todo")
+        self.refresh_lists()
+
+    def on_delete(self, task_id: int, gcal_event_id: str | None):
+        if gcal_event_id:
+            try:
+                self.app.gcal.delete_event_by_id(gcal_event_id)
+            except Exception:
+                pass
+        self.svc.delete(task_id)
+        self.refresh_lists()
+        self._toast("Задача удалена")
+
+    def on_edit_click(self, e: ft.ControlEvent):
+        self.open_edit_dialog(int(e.control.data))
+
+    # ---------- Рендер ----------
+    def refresh_lists(self):
+        from datetime import date as _date
+        self.today_list.controls.clear()
+        for t in self.svc.list_for_day(_date.today()):
+            self.today_list.controls.append(self._row_for_task(t))
+        self.unscheduled_list.controls.clear()
+        for t in self.svc.list_unscheduled():
+            self.unscheduled_list.controls.append(self._row_for_task(t))
+        self.app.page.update()
+
+    def _row_for_task(self, t):
+        meta = self._human_time(t)
+        right = ft.Row(
+            controls=[
+                ft.Text(meta, italic=True),
+                ft.Icon(ft.Icons.LINK) if t.gcal_event_id else ft.Container(),
+                ft.IconButton(icon=ft.Icons.EDIT_OUTLINED, tooltip="Редактировать", data=t.id, on_click=self.on_edit_click),
+                ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Удалить",
+                              on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev)),
+            ],
+            spacing=8, alignment=ft.MainAxisAlignment.END,
+        )
+        return ft.Row(
+            controls=[
+                ft.Checkbox(label=t.title, value=(t.status == "done"),
+                            on_change=lambda e, tid=t.id: self.on_toggle_done(tid, e.control.value)),
+                right,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        )
+
+    # ---------- Диалог редактирования ----------
+    def open_edit_dialog(self, task_id: int):
+        t = self.svc.get(task_id)
+        if not t:
+            return self._toast("Задача не найдена")
+
+        # --- поля без expand, фикс-ширины только там, где нужно ---
+        title_tf = ft.TextField(label="Название", value=t.title)
+
+        date_val = t.start.strftime("%d.%m.%Y") if t.start else ""
+        time_val = t.start.strftime("%H:%M") if (t.start and t.start.time() != datetime.min.time()) else ""
+
+        date_tf = ft.TextField(label="Дата", value=date_val, width=160)
+        time_tf = ft.TextField(label="Время", value=time_val, width=120)
+
+
+        # Пикеры (значения забираем из e.data или control.value)
+        dp = ft.DatePicker(
+            first_date=date(2000, 1, 1),
+            last_date=date(2100, 12, 31),
+            on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
+        )
+        tp = ft.TimePicker(
+            help_text="Выберите время",
+            on_change=lambda e: self._set_tf_time(time_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_time(time_tf, e.control.value),
+        )
+        for p in (dp, tp):
+            if p not in self.app.page.overlay:
+                self.app.page.overlay.append(p)
+
+        date_btn = ft.IconButton(icon=ft.Icons.CALENDAR_MONTH, tooltip="Календарь",
+                                on_click=lambda e, _dp=dp: self.app.page.open(_dp))
+        time_btn = ft.IconButton(icon=ft.Icons.SCHEDULE, tooltip="Выбрать время",
+                                on_click=lambda e, _tp=tp: self.app.page.open(_tp))
+
+        dur_tf = ft.TextField(
+            label="Длительность, мин",
+            value=(str(t.duration_minutes) if t.duration_minutes else ""),
+            width=140
+        )
+        notes_tf = ft.TextField(
+            label="Заметки", value=(t.notes or ""),
+            multiline=True, min_lines=3, max_lines=6
+        )
+
+        def on_save(_):
+            new_title = (title_tf.value or "").strip()
+            if not new_title:
+                return self._toast("Введите название")
+            if date_tf.value and self._parse_date_tf(date_tf.value) is None:
+                return self._toast("Неверный формат даты. Пример: 10.10.2025")
+            if time_tf.value and self._parse_time_tf(time_tf.value) is None:
+                return self._toast("Неверный формат времени. Пример: 09:30")
+
+            new_start = self._combine_dt(date_tf.value, time_tf.value)
+            try:
+                new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
+            except ValueError:
+                return self._toast("Длительность должна быть числом (мин)")
+
+            updated = self.svc.update(
+                task_id,
+                title=new_title,
+                notes=notes_tf.value,
+                start=new_start,
+                duration_minutes=new_dur
+            )
+
+            # gcal-sync
+            if new_start is not None and new_dur is not None:
+                if updated.gcal_event_id:
+                    try:
+                        self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
+                    except Exception as e:
+                        self._toast(f"Google: не удалось обновить: {e}")
+                else:
+                    try:
+                        ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
+                        self.svc.set_event_id(task_id, ev["id"])
+                    except Exception as e:
+                        self._toast(f"Google: не удалось создать: {e}")
+            else:
+                if updated.gcal_event_id:
+                    try:
+                        self.app.gcal.delete_event_by_id(updated.gcal_event_id)
+                    finally:
+                        self.svc.set_event_id(task_id, None)
+
+            self.edit_dialog.open = False
+            if self.edit_dialog in self.app.page.overlay:
+                self.app.page.overlay.remove(self.edit_dialog)
+            self.edit_dialog = None
+            self.app.page.update()
+            self.refresh_lists()
+            self._toast("Сохранено")
+
+        def on_cancel(_):
+            self.edit_dialog.open = False
+            if self.edit_dialog in self.app.page.overlay:
+                self.app.page.overlay.remove(self.edit_dialog)
+            self.edit_dialog = None
+            self.app.page.update()
+
+        # --- КОМПАКТНАЯ ВЁРСТКА ---
+
+        # ... всё, что выше (поля, пикеры, on_save/on_cancel) оставь как есть ...
+
+        # компактная разметка без Wrap
+        DATE_W, TIME_W, DUR_W = 140, 100, 120
+        date_tf.width = DATE_W
+        time_tf.width = TIME_W
+        dur_tf.width  = DUR_W
+
+        date_btn.icon_size = 18
+        time_btn.icon_size = 18
+
+        utils_row = ft.Row(
+            [date_tf, date_btn, time_tf, time_btn, dur_tf],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.END,
+        )
+        buttons_row = ft.Row(
+            [ft.TextButton("Отмена", on_click=on_cancel),
+            ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save)],
+            alignment=ft.MainAxisAlignment.END,
+        )
+
+        MAX_W = 480
+        self.edit_dialog = ft.AlertDialog(
+            modal=False,
+            inset_padding=ft.padding.all(16),
+            content_padding=ft.padding.all(12),
+            title=ft.Text("Редактировать задачу"),
+            content=ft.Container(
+                width=MAX_W,  # вместо constraints
+                content=ft.Column(
+                    [title_tf, utils_row, notes_tf, buttons_row],
+                    spacing=10,
+                    tight=True,
+                ),
+            ),
+        )
+
+        if self.edit_dialog not in self.app.page.overlay:
+            self.app.page.overlay.append(self.edit_dialog)
+        self.edit_dialog.open = True
+        self.app.page.update()
+
+
+
+    # ---------- Вспомогательное ----------
+    def _human_time(self, t):
+        if t.start and t.duration_minutes:
+            return f"{t.start.strftime('%d.%m %H:%M')} · {t.duration_minutes} мин"
+        if t.start:
+            if t.start.time() == datetime.min.time():
+                return "без времени"
+            return t.start.strftime("%d.%m %H:%M")
+        return "без времени"
+
+    def _toast(self, text: str):
+        self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
+        self.app.page.snack_bar.open = True
+        self.app.page.update()
+
+```
+

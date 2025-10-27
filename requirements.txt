@@ -1,0 +1,19 @@
+# UI
+flet
+
+# База/модели
+sqlmodel
+sqlalchemy
+
+# Google OAuth + Calendar API
+google-auth
+google-auth-oauthlib
+google-api-python-client
+
+# Даты/повторы/расписания
+python-dateutil
+dateparser
+apscheduler
+
+# (опционально для сборки в .exe/.app)
+# pyinstaller
