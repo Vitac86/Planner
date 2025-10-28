@@ -627,11 +627,13 @@ class TodayPage:
         date_btn.icon_size = 18
         time_btn.icon_size = 18
 
-        utils_row = ft.Wrap(
+        utils_row = ft.Row(
             controls=[date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
             spacing=8,
             run_spacing=12,
-            alignment=ft.WrapAlignment.START,
+            wrap=True,
+            alignment=ft.MainAxisAlignment.START,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         buttons_row = ft.Row(
             [ft.TextButton("Отмена", on_click=on_cancel),
