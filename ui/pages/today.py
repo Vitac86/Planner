@@ -13,7 +13,7 @@ from core.priorities import (
 
 
 class TodayPage:
-    LIST_SECTION_HEIGHT = 340
+    LIST_SECTION_HEIGHT = 240
 
     def __init__(self, app):
         self.app = app
