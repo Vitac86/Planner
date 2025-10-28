@@ -94,8 +94,8 @@ class TodayPage:
             )
         )
 
-        self.today_list = ft.ListView(expand=False, spacing=8)
-        self.unscheduled_list = ft.ListView(expand=False, spacing=8)
+        self.today_list = ft.ListView(expand=False, spacing=12)
+        self.unscheduled_list = ft.ListView(expand=False, spacing=12)
 
         today_card = ft.Card(
             content=ft.Container(
@@ -354,37 +354,107 @@ class TodayPage:
 
     def _row_for_task(self, t):
         meta = self._human_time(t)
-        priority_text = (
-            ft.Text(priority_label(t.priority, short=True), color=priority_color(t.priority), weight=ft.FontWeight.W_500)
-            if getattr(t, "priority", 0) > 0
-            else ft.Container()
-        )
-        right = ft.Row(
-            controls=[
-                priority_text,
-                ft.Text(meta, italic=True),
-                ft.Icon(ft.Icons.LINK) if t.gcal_event_id else ft.Container(),
-                ft.IconButton(icon=ft.Icons.EDIT_OUTLINED, tooltip="Редактировать", data=t.id, on_click=self.on_edit_click),
-                ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Удалить",
-                              on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev)),
-            ],
-            spacing=8, alignment=ft.MainAxisAlignment.END,
-        )
         checkbox = ft.Checkbox(
-            label=t.title,
             value=(t.status == "done"),
             on_change=lambda e, tid=t.id: self.on_toggle_done(tid, e.control.value),
         )
-        return ft.Row(
+
+        checkbox_holder = ft.Container(
+            width=52,
+            alignment=ft.alignment.center,
+            content=checkbox,
+        )
+
+        priority_marker = self._priority_marker(t.priority)
+
+        title_text = ft.Text(
+            t.title,
+            weight=ft.FontWeight.W_600,
+            size=15,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+
+        meta_items = []
+        if getattr(t, "priority", 0) > 0:
+            meta_items.append(
+                ft.Container(
+                    content=ft.Text(
+                        priority_label(t.priority, short=True),
+                        size=12,
+                        weight=ft.FontWeight.W_500,
+                        color=ft.colors.WHITE,
+                    ),
+                    bgcolor=priority_color(t.priority),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                    border_radius=999,
+                )
+            )
+        meta_items.append(
+            ft.Text(
+                meta,
+                color=ft.colors.BLUE_GREY_400,
+                size=12,
+            )
+        )
+        if t.gcal_event_id:
+            meta_items.append(
+                ft.Row(
+                    controls=[
+                        ft.Icon(ft.Icons.LINK, size=14),
+                        ft.Text("Google", size=12, color=ft.colors.BLUE_GREY_400),
+                    ],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+
+        info_column = ft.Column(
             controls=[
                 ft.Row(
-                    [self._priority_icon(t.priority), checkbox],
-                    spacing=8,
+                    controls=[priority_marker, title_text],
+                    spacing=12,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                right,
+                ft.Row(meta_items, spacing=12, wrap=True),
             ],
+            spacing=6,
+            alignment=ft.MainAxisAlignment.CENTER,
+            expand=True,
+        )
+
+        actions = ft.Row(
+            controls=[
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_OUTLINED,
+                    tooltip="Редактировать",
+                    data=t.id,
+                    on_click=self.on_edit_click,
+                    style=ft.ButtonStyle(padding=ft.padding.all(8)),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    tooltip="Удалить",
+                    on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev),
+                    style=ft.ButtonStyle(padding=ft.padding.all(8)),
+                ),
+            ],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        content_row = ft.Row(
+            controls=[checkbox_holder, info_column, actions],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        return ft.Container(
+            content=content_row,
+            padding=ft.padding.symmetric(horizontal=16, vertical=12),
+            border_radius=12,
+            bgcolor=ft.colors.SURFACE,
+            border=ft.border.all(1, ft.colors.with_opacity(0.08, ft.colors.ON_SURFACE)),
         )
 
     # ---------- Диалог редактирования ----------
@@ -454,20 +524,9 @@ class TodayPage:
                     pass
 
         def _finalize_dialog():
-            if not self.edit_dialog:
-                return
-            try:
-                self.edit_dialog.open = False
-            except Exception:
-                pass
-            try:
-                if self.edit_dialog in self.app.page.overlay:
-                    self.app.page.overlay.remove(self.edit_dialog)
-            except Exception:
-                pass
+            dlg = self.edit_dialog
             self.edit_dialog = None
-            self.app.page.update()
-            self.app.cleanup_overlays()
+            self._close_alert_dialog(dlg)
 
         def on_save(_):
             new_title = (title_tf.value or "").strip()
@@ -581,13 +640,14 @@ class TodayPage:
             return t.start.strftime("%d.%m %H:%M")
         return "без времени"
 
-    def _priority_icon(self, priority: int) -> ft.Control:
+    def _priority_marker(self, priority: int) -> ft.Control:
         if priority <= 0:
-            return ft.Container(width=0)
-        return ft.Icon(
-            ft.Icons.FLAG,
-            size=18,
-            color=priority_color(priority),
+            return ft.Container(width=12)
+        return ft.Container(
+            width=12,
+            height=12,
+            border_radius=6,
+            bgcolor=priority_color(priority),
             tooltip=priority_label(priority),
         )
 
@@ -595,3 +655,18 @@ class TodayPage:
         self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
         self.app.page.snack_bar.open = True
         self.app.page.update()
+
+    def _close_alert_dialog(self, dlg: ft.AlertDialog | None):
+        if not dlg:
+            return
+        try:
+            dlg.open = False
+        except Exception:
+            pass
+        try:
+            if dlg in self.app.page.overlay:
+                self.app.page.overlay.remove(dlg)
+        except Exception:
+            pass
+        self.app.page.update()
+        self.app.cleanup_overlays()
