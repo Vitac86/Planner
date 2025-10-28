@@ -126,8 +126,8 @@ class TodayPage:
 
         lists_row = ft.Row(
             [
-                ft.Expanded(today_card),
-                ft.Expanded(unscheduled_card),
+                ft.Container(content=today_card, expand=True),
+                ft.Container(content=unscheduled_card, expand=True),
             ],
             spacing=16,
             vertical_alignment=ft.CrossAxisAlignment.START,
