@@ -124,12 +124,27 @@ class TodayPage:
             )
         )
 
+        lists_row = ft.Row(
+            [
+                ft.Expanded(today_card),
+                ft.Expanded(unscheduled_card),
+            ],
+            spacing=16,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+
         self.view = ft.Container(
             content=ft.Column(
-                [ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD), quick_add, today_card, unscheduled_card],
-                spacing=16, expand=True,
+                [
+                    ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD),
+                    quick_add,
+                    lists_row,
+                ],
+                spacing=16,
+                expand=True,
             ),
-            expand=True, padding=20,
+            expand=True,
+            padding=20,
         )
 
         self.refresh_lists()
