@@ -92,16 +92,37 @@ class AppShell:
         self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
 
     def cleanup_overlays(self):
-        """Remove closed AlertDialogs from the overlay to avoid "ghost" windows."""
+        """Remove closed overlays (dialogs, pickers, backdrops) to avoid "ghost" windows."""
         overlays = getattr(self.page, "overlay", None) or []
         changed = False
+
+        def _close_and_remove(ctrl):
+            nonlocal changed
+            try:
+                if hasattr(ctrl, "open"):
+                    ctrl.open = False
+            except Exception:
+                pass
+            try:
+                overlays.remove(ctrl)
+                changed = True
+            except Exception:
+                pass
+
         for ctrl in list(overlays):
-            if isinstance(ctrl, ft.AlertDialog) and not getattr(ctrl, "open", False):
-                try:
-                    overlays.remove(ctrl)
-                    changed = True
-                except Exception:
-                    pass
+            if isinstance(ctrl, (ft.AlertDialog, ft.DatePicker, ft.TimePicker)):
+                if not getattr(ctrl, "open", False):
+                    _close_and_remove(ctrl)
+
+        has_dialog = any(
+            getattr(ctrl, "open", False) for ctrl in overlays if isinstance(ctrl, ft.AlertDialog)
+        )
+
+        if not has_dialog:
+            for ctrl in list(overlays):
+                if getattr(ctrl, "data", None) == "backdrop":
+                    _close_and_remove(ctrl)
+
         if changed:
             self.page.update()
 
