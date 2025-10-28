@@ -32,8 +32,8 @@ CHIPS_SPACING    = 4
 
 IMPORT_NEW_GCAL = True
 
-DIALOG_WIDTH_NARROW = 420
-DIALOG_WIDTH_WIDE   = 540
+DIALOG_WIDTH_NARROW = 460
+DIALOG_WIDTH_WIDE   = 680
 
 def _c(name: str, default: str):
     try:
@@ -193,13 +193,16 @@ class CalendarPage:
     def _close_any_dialog(self):
         # на всякий случай закрыть всё
         try:
-            for c in list(self.app.page.overlay):
-                if isinstance(c, ft.AlertDialog):
-                    c.open = False
-                    self.app.page.overlay.remove(c)
+            overlays = list(self.app.page.overlay)
         except Exception:
-            pass
+            overlays = []
+
+        for ctrl in overlays:
+            if isinstance(ctrl, ft.AlertDialog):
+                self._close_dialog(ctrl)
+
         self._cleanup_backdrop()
+        self._sweep_overlay()
         self.app.page.update()
         self.app.cleanup_overlays()
     def _delete_task(self, task_id: int):
@@ -740,7 +743,7 @@ class CalendarPage:
         dur_tf = ft.TextField(label="Длительность, мин", value=str(dur_value), width=140)
         priority_dd = ft.Dropdown(
             label="Приоритет",
-            width=180,
+            width=220,
             value=str(getattr(task, "priority", 0)),
             options=self._priority_options,
         )
@@ -887,7 +890,7 @@ class CalendarPage:
         dur_tf   = ft.TextField(label="Длительность, мин", value=str(dur_init), width=DUR_W)
         priority_dd = ft.Dropdown(
             label="Приоритет",
-            width=160,
+            width=200,
             value=str(getattr(t, "priority", 0)),
             options=self._priority_options,
         )
