@@ -13,6 +13,8 @@ from core.priorities import (
 
 
 class TodayPage:
+    LIST_SECTION_HEIGHT = 340
+
     def __init__(self, app):
         self.app = app
         self.svc = TaskService()
@@ -94,19 +96,31 @@ class TodayPage:
             )
         )
 
-        self.today_list = ft.ListView(expand=False, spacing=12)
-        self.unscheduled_list = ft.ListView(expand=False, spacing=12)
+        self.today_list = ft.ListView(expand=True, spacing=12)
+        self.unscheduled_list = ft.ListView(expand=True, spacing=12)
 
         today_card = ft.Card(
             content=ft.Container(
-                content=ft.Column([ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600), self.today_list], spacing=12),
                 padding=16,
+                content=ft.Column(
+                    [
+                        ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600),
+                        ft.Container(content=self.today_list, height=self.LIST_SECTION_HEIGHT),
+                    ],
+                    spacing=12,
+                ),
             )
         )
         unscheduled_card = ft.Card(
             content=ft.Container(
-                content=ft.Column([ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600), self.unscheduled_list], spacing=12),
                 padding=16,
+                content=ft.Column(
+                    [
+                        ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600),
+                        ft.Container(content=self.unscheduled_list, height=self.LIST_SECTION_HEIGHT),
+                    ],
+                    spacing=12,
+                ),
             )
         )
 
@@ -383,7 +397,7 @@ class TodayPage:
                         priority_label(t.priority, short=True),
                         size=12,
                         weight=ft.FontWeight.W_500,
-                        color=ft.colors.WHITE,
+                        color=ft.Colors.WHITE,
                     ),
                     bgcolor=priority_color(t.priority),
                     padding=ft.padding.symmetric(horizontal=10, vertical=4),
@@ -393,7 +407,7 @@ class TodayPage:
         meta_items.append(
             ft.Text(
                 meta,
-                color=ft.colors.BLUE_GREY_400,
+                color=ft.Colors.BLUE_GREY_400,
                 size=12,
             )
         )
@@ -402,7 +416,7 @@ class TodayPage:
                 ft.Row(
                     controls=[
                         ft.Icon(ft.Icons.LINK, size=14),
-                        ft.Text("Google", size=12, color=ft.colors.BLUE_GREY_400),
+                        ft.Text("Google", size=12, color=ft.Colors.BLUE_GREY_400),
                     ],
                     spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -453,8 +467,8 @@ class TodayPage:
             content=content_row,
             padding=ft.padding.symmetric(horizontal=16, vertical=12),
             border_radius=12,
-            bgcolor=ft.colors.SURFACE,
-            border=ft.border.all(1, ft.colors.with_opacity(0.08, ft.colors.ON_SURFACE)),
+            bgcolor=ft.Colors.SURFACE,
+            border=ft.border.all(1, ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
         )
 
     # ---------- Диалог редактирования ----------
@@ -517,6 +531,10 @@ class TodayPage:
 
         def _remove_pickers():
             for ctrl in (dp, tp):
+                try:
+                    ctrl.open = False
+                except Exception:
+                    pass
                 try:
                     if ctrl in self.app.page.overlay:
                         self.app.page.overlay.remove(ctrl)
@@ -594,10 +612,11 @@ class TodayPage:
         date_btn.icon_size = 18
         time_btn.icon_size = 18
 
-        utils_row = ft.Row(
-            [date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
+        utils_row = ft.Wrap(
+            controls=[date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
             spacing=8,
-            vertical_alignment=ft.CrossAxisAlignment.END,
+            run_spacing=12,
+            alignment=ft.WrapAlignment.START,
         )
         buttons_row = ft.Row(
             [ft.TextButton("Отмена", on_click=on_cancel),

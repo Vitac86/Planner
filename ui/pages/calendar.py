@@ -944,6 +944,10 @@ class CalendarPage:
         def _remove_pickers():
             for ctrl in (dp, tp):
                 try:
+                    ctrl.open = False
+                except Exception:
+                    pass
+                try:
                     if ctrl in self.app.page.overlay:
                         self.app.page.overlay.remove(ctrl)
                 except Exception:
