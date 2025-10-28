@@ -107,10 +107,17 @@ class TaskService:
 
     def list_unscheduled(self) -> Iterable[Task]:
         with get_session() as s:
+            status_order = case(
+                (Task.status == "todo", 0),
+                (Task.status == "doing", 1),
+                (Task.status == None, 2),  # noqa: E711
+                (Task.status == "", 2),
+                else_=3,
+            )
             stmt = (
                 select(Task)
                 .where(and_(Task.status != "done", Task.start == None))  # noqa: E711
-                .order_by(Task.priority.desc(), Task.created_at.desc())
+                .order_by(Task.priority.desc(), status_order, Task.created_at.desc())
             )
             return list(s.exec(stmt))
 

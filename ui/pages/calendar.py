@@ -4,7 +4,7 @@ import re
 
 import json
 import flet as ft
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dt_time
 from typing import Dict, Tuple, List, Optional
 
 from services.tasks import TaskService
@@ -31,6 +31,9 @@ CELL_VPAD        = 8
 CHIPS_SPACING    = 4
 
 IMPORT_NEW_GCAL = True
+
+DIALOG_WIDTH_NARROW = 420
+DIALOG_WIDTH_WIDE   = 540
 
 def _c(name: str, default: str):
     try:
@@ -165,6 +168,14 @@ class CalendarPage:
     def _close_dialog(self, dlg: ft.AlertDialog | None):
         if not dlg:
             return
+        cleanup_meta = getattr(dlg, "data", None)
+        if isinstance(cleanup_meta, dict):
+            fn = cleanup_meta.get("on_close")
+            if callable(fn):
+                try:
+                    fn()
+                finally:
+                    cleanup_meta["on_close"] = None
         try:
             dlg.open = False
         except Exception:
@@ -773,7 +784,10 @@ class CalendarPage:
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Запланировать — {start_dt.strftime('%a, %d.%m %H:00')}"),
-            content=ft.Column([dur_tf, priority_dd], spacing=10, tight=True),  # без Container и width
+            content=ft.Container(
+                width=DIALOG_WIDTH_NARROW,
+                content=ft.Column([dur_tf, priority_dd], spacing=12, tight=True),
+            ),
             actions=[
                 ft.TextButton("Отмена", on_click=on_cancel),
                 ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
@@ -785,7 +799,7 @@ class CalendarPage:
 
     def open_quick_add(self, day: date, hour: int):
         start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
-        title_tf = ft.TextField(label="Название", expand=True)
+        title_tf = ft.TextField(label="Название", width=DIALOG_WIDTH_NARROW - 40)
         dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
         priority_dd = ft.Dropdown(
             label="Приоритет",
@@ -828,7 +842,10 @@ class CalendarPage:
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Быстрый блок — {start_dt.strftime('%a, %d.%m %H:00')}"),
-            content=ft.Column([title_tf, dur_tf, priority_dd], spacing=10, tight=True),
+            content=ft.Container(
+                width=DIALOG_WIDTH_NARROW,
+                content=ft.Column([title_tf, dur_tf, priority_dd], spacing=12, tight=True),
+            ),
             actions=[
                 ft.TextButton("Отмена", on_click=on_cancel),
                 ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
@@ -864,7 +881,7 @@ class CalendarPage:
         # --- поля формы (без expand) ---
         DATE_W, TIME_W, DUR_W = 140, 100, 120
 
-        title_tf = ft.TextField(label="Название", value=title_init)
+        title_tf = ft.TextField(label="Название", value=title_init, width=DIALOG_WIDTH_WIDE - 80)
         date_tf  = ft.TextField(label="Дата",  value=date_str, width=DATE_W, read_only=True)
         time_tf  = ft.TextField(label="Время", value=time_str, width=TIME_W, read_only=True)
         dur_tf   = ft.TextField(label="Длительность, мин", value=str(dur_init), width=DUR_W)
@@ -900,11 +917,7 @@ class CalendarPage:
             on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
             on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
         )
-        tp = ft.TimePicker(
-            help_text="Выберите время",
-            on_change=lambda e: self._set_tf_time(time_tf, e.data or e.control.value),
-            on_dismiss=lambda e: self._set_tf_time(time_tf, e.control.value),
-        )
+        tp = self._new_time_picker()
         for p in (dp, tp):
             if p not in self.app.page.overlay:
                 self.app.page.overlay.append(p)
@@ -919,11 +932,19 @@ class CalendarPage:
             icon=ft.Icons.SCHEDULE,
             tooltip="Выбрать время",
             icon_size=18,
-            on_click=lambda e, _tp=tp: self.app.page.open(_tp),
+            on_click=lambda e, _tp=tp: self._open_time_picker(_tp, time_tf),
         )
 
         # --- сохранение / отмена ---
         dlg = None
+
+        def _remove_pickers():
+            for ctrl in (dp, tp):
+                try:
+                    if ctrl in self.app.page.overlay:
+                        self.app.page.overlay.remove(ctrl)
+                except Exception:
+                    pass
 
         def on_save(_):
             new_title = (title_tf.value or "").strip()
@@ -971,12 +992,14 @@ class CalendarPage:
                     finally:
                         self.svc.set_event_id(task_id, None)
 
+            _remove_pickers()
             self._close_dialog(dlg)
             self._sweep_overlay()
             self.load()
             self._toast("Сохранено")
 
-        def on_cancel(_):
+        def on_cancel(_=None):
+            _remove_pickers()
             self._close_dialog(dlg)
             self._sweep_overlay()
 
@@ -998,7 +1021,7 @@ class CalendarPage:
             content_padding=ft.padding.all(12),
             title=ft.Text("Редактировать задачу"),
             content=ft.Container(
-                width=480,
+                width=DIALOG_WIDTH_WIDE,
                 content=ft.Column(
                     [title_tf, utils_row, notes_tf, buttons_row],
                     spacing=10,
@@ -1008,6 +1031,7 @@ class CalendarPage:
             ),
         )
 
+        dlg.data = {"on_close": _remove_pickers}
         self._open_dialog(dlg)
 
 
@@ -1067,6 +1091,132 @@ class CalendarPage:
     # публичная обёртка, чтобы дергать из AppShell    
     def scroll_to_now(self):
         self._scroll_to_now()
+
+    # ===== Вспомогательное для форм =====
+    def _new_time_picker(self) -> ft.TimePicker:
+        picker = ft.TimePicker(help_text="Выберите время")
+        picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
+        picker.on_dismiss = lambda e, _picker=picker: self._time_picker_on_dismiss(_picker, e)
+        return picker
+
+    def _open_time_picker(self, picker: ft.TimePicker, tf: ft.TextField):
+        prev = tf.value
+        parsed = self._parse_time_tf(tf.value)
+        if parsed:
+            base_time = dt_time(parsed[0], parsed[1])
+        else:
+            now = datetime.now()
+            base_time = dt_time(now.hour, now.minute)
+        try:
+            picker.value = base_time
+        except Exception:
+            pass
+        picker.data = {"tf": tf, "prev": prev, "applied": False}
+        if picker not in self.app.page.overlay:
+            self.app.page.overlay.append(picker)
+        self.app.page.open(picker)
+
+    def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            return
+        value = e.data or picker.value
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+            picker.data = data
+
+    def _time_picker_on_dismiss(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            picker.data = None
+            return
+        value = e.data
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+        elif not data.get("applied"):
+            tf.value = data.get("prev", tf.value)
+            self.app.page.update()
+        picker.data = None
+
+    def _set_tf_date(self, tf: ft.TextField, value):
+        from datetime import date as _date, datetime as _dt
+
+        v = value
+        if isinstance(v, _date):
+            tf.value = v.strftime("%d.%m.%Y")
+        elif isinstance(v, str) and v.strip():
+            s = v.strip()
+            try:
+                tf.value = _dt.strptime(s, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except ValueError:
+                if "T" in s:
+                    try:
+                        tf.value = _dt.strptime(s.split("T")[0], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except ValueError:
+                        pass
+                else:
+                    try:
+                        _dt.strptime(s, "%d.%m.%Y")
+                        tf.value = s
+                    except ValueError:
+                        return
+        self.app.page.update()
+
+    def _set_tf_time(self, tf: ft.TextField, value):
+        if value in (None, ""):
+            return
+        try:
+            tf.value = value.strftime("%H:%M")
+            self.app.page.update()
+            return
+        except Exception:
+            pass
+
+        s = str(value or "").strip()
+        m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", s)
+        if m:
+            h = int(m.group(1))
+            mm = int(m.group(2))
+            if 0 <= h <= 23 and 0 <= mm <= 59:
+                tf.value = f"{h:02d}:{mm:02d}"
+        self.app.page.update()
+
+    def _parse_date_tf(self, s: str):
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$", s)
+        if not m:
+            return None
+        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mth, d)
+        except ValueError:
+            return None
+
+    def _parse_time_tf(self, s: str):
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", s)
+        if not m:
+            return None
+        h, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= minute <= 59:
+            return h, minute
+        return None
+
+    def _combine_dt(self, date_str: str, time_str: str):
+        d = self._parse_date_tf(date_str)
+        t = self._parse_time_tf(time_str)
+        if d and t:
+            return datetime(d.year, d.month, d.day, t[0], t[1])
+        if d and not t:
+            return datetime(d.year, d.month, d.day)
+        if t and not d:
+            today = date.today()
+            return datetime(today.year, today.month, today.day, t[0], t[1])
+        return None
 
     # авто-увеличение высоты многострочного TextField
     def _autogrow_textfield(self, tf: ft.TextField, *, min_lines=2, max_lines=14, wrap_at=60):

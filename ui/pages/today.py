@@ -1,6 +1,6 @@
 # planner/ui/pages/today.py
 import re
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dt_time
 import flet as ft
 
 from services.tasks import TaskService
@@ -43,11 +43,7 @@ class TodayPage:
         )
 
         # TimePicker
-        self.time_picker_add = ft.TimePicker(
-            help_text="Выберите время",
-            on_change=lambda e: self._set_tf_time(self.time_tf, e.data or e.control.value),
-            on_dismiss=lambda e: self._set_tf_time(self.time_tf, e.control.value),
-        )
+        self.time_picker_add = self._new_time_picker()
 
         for p in (self.date_picker_add, self.time_picker_add):
             if p not in self.app.page.overlay:
@@ -58,8 +54,9 @@ class TodayPage:
             on_click=lambda e: self.app.page.open(self.date_picker_add)
         )
         self.time_btn = ft.IconButton(
-            icon=ft.Icons.SCHEDULE, tooltip="Выбрать время",
-            on_click=lambda e: self.app.page.open(self.time_picker_add)
+            icon=ft.Icons.SCHEDULE,
+            tooltip="Выбрать время",
+            on_click=lambda e: self._open_time_picker(self.time_picker_add, self.time_tf),
         )
 
         self.dur_tf = ft.TextField(label="Длительность, мин", value="30", width=160, prefix=ft.Icon(ft.Icons.TIMER))
@@ -132,6 +129,55 @@ class TodayPage:
         self.refresh_lists()
 
     # ---------- Утилиты ----------
+    def _new_time_picker(self) -> ft.TimePicker:
+        picker = ft.TimePicker(help_text="Выберите время")
+        picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
+        picker.on_dismiss = lambda e, _picker=picker: self._time_picker_on_dismiss(_picker, e)
+        return picker
+
+    def _open_time_picker(self, picker: ft.TimePicker, tf: ft.TextField):
+        prev = tf.value
+        parsed = self._parse_time_tf(tf.value)
+        if parsed:
+            base_time = dt_time(parsed[0], parsed[1])
+        else:
+            now = datetime.now()
+            base_time = dt_time(now.hour, now.minute)
+        try:
+            picker.value = base_time
+        except Exception:
+            pass
+        picker.data = {"tf": tf, "prev": prev, "applied": False}
+        if picker not in self.app.page.overlay:
+            self.app.page.overlay.append(picker)
+        self.app.page.open(picker)
+
+    def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            return
+        value = e.data or picker.value
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+            picker.data = data
+
+    def _time_picker_on_dismiss(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            picker.data = None
+            return
+        value = e.data
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+        elif not data.get("applied"):
+            tf.value = data.get("prev", tf.value)
+            self.app.page.update()
+        picker.data = None
+
     def _set_tf_date(self, tf: ft.TextField, value):
         from datetime import date as _date, datetime
 
@@ -172,6 +218,9 @@ class TodayPage:
         Унифицирует значение из TimePicker в формат HH:MM.
         Поддерживает: datetime.time, "HH:MM", "HH:MM:SS".
         """
+        if value in (None, ""):
+            return
+
         # если пришёл time-объект
         try:
             tf.value = value.strftime("%H:%M")
@@ -345,7 +394,7 @@ class TodayPage:
             return self._toast("Задача не найдена")
 
         # --- поля без expand, фикс-ширины только там, где нужно ---
-        title_tf = ft.TextField(label="Название", value=t.title)
+        title_tf = ft.TextField(label="Название", value=t.title, width=420)
 
         date_val = t.start.strftime("%d.%m.%Y") if t.start else ""
         time_val = t.start.strftime("%H:%M") if (t.start and t.start.time() != datetime.min.time()) else ""
@@ -361,19 +410,21 @@ class TodayPage:
             on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
             on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
         )
-        tp = ft.TimePicker(
-            help_text="Выберите время",
-            on_change=lambda e: self._set_tf_time(time_tf, e.data or e.control.value),
-            on_dismiss=lambda e: self._set_tf_time(time_tf, e.control.value),
-        )
+        tp = self._new_time_picker()
         for p in (dp, tp):
             if p not in self.app.page.overlay:
                 self.app.page.overlay.append(p)
 
-        date_btn = ft.IconButton(icon=ft.Icons.CALENDAR_MONTH, tooltip="Календарь",
-                                on_click=lambda e, _dp=dp: self.app.page.open(_dp))
-        time_btn = ft.IconButton(icon=ft.Icons.SCHEDULE, tooltip="Выбрать время",
-                                on_click=lambda e, _tp=tp: self.app.page.open(_tp))
+        date_btn = ft.IconButton(
+            icon=ft.Icons.CALENDAR_MONTH,
+            tooltip="Календарь",
+            on_click=lambda e, _dp=dp: self.app.page.open(_dp),
+        )
+        time_btn = ft.IconButton(
+            icon=ft.Icons.SCHEDULE,
+            tooltip="Выбрать время",
+            on_click=lambda e, _tp=tp: self._open_time_picker(_tp, time_tf),
+        )
 
         dur_tf = ft.TextField(
             label="Длительность, мин",
@@ -387,9 +438,36 @@ class TodayPage:
             options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
         )
         notes_tf = ft.TextField(
-            label="Заметки", value=(t.notes or ""),
-            multiline=True, min_lines=3, max_lines=6
+            label="Заметки",
+            value=(t.notes or ""),
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
         )
+
+        def _remove_pickers():
+            for ctrl in (dp, tp):
+                try:
+                    if ctrl in self.app.page.overlay:
+                        self.app.page.overlay.remove(ctrl)
+                except Exception:
+                    pass
+
+        def _finalize_dialog():
+            if not self.edit_dialog:
+                return
+            try:
+                self.edit_dialog.open = False
+            except Exception:
+                pass
+            try:
+                if self.edit_dialog in self.app.page.overlay:
+                    self.app.page.overlay.remove(self.edit_dialog)
+            except Exception:
+                pass
+            self.edit_dialog = None
+            self.app.page.update()
+            self.app.cleanup_overlays()
 
         def on_save(_):
             new_title = (title_tf.value or "").strip()
@@ -435,22 +513,14 @@ class TodayPage:
                     finally:
                         self.svc.set_event_id(task_id, None)
 
-            self.edit_dialog.open = False
-            if self.edit_dialog in self.app.page.overlay:
-                self.app.page.overlay.remove(self.edit_dialog)
-            self.edit_dialog = None
-            self.app.page.update()
-            self.app.cleanup_overlays()
+            _remove_pickers()
+            _finalize_dialog()
             self.refresh_lists()
             self._toast("Сохранено")
 
-        def on_cancel(_):
-            self.edit_dialog.open = False
-            if self.edit_dialog in self.app.page.overlay:
-                self.app.page.overlay.remove(self.edit_dialog)
-            self.edit_dialog = None
-            self.app.page.update()
-            self.app.cleanup_overlays()
+        def on_cancel(_=None):
+            _remove_pickers()
+            _finalize_dialog()
 
         # --- КОМПАКТНАЯ ВЁРСТКА ---
 
@@ -476,7 +546,7 @@ class TodayPage:
             alignment=ft.MainAxisAlignment.END,
         )
 
-        MAX_W = 480
+        MAX_W = 520
         self.edit_dialog = ft.AlertDialog(
             modal=False,
             inset_padding=ft.padding.all(16),
@@ -488,6 +558,7 @@ class TodayPage:
                     [title_tf, utils_row, notes_tf, buttons_row],
                     spacing=10,
                     tight=True,
+                    scroll=ft.ScrollMode.ADAPTIVE,
                 ),
             ),
         )
@@ -495,6 +566,7 @@ class TodayPage:
         if self.edit_dialog not in self.app.page.overlay:
             self.app.page.overlay.append(self.edit_dialog)
         self.edit_dialog.open = True
+        self.edit_dialog.on_dismiss = on_cancel
         self.app.page.update()
 
 
