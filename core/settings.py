@@ -69,6 +69,9 @@ class ThemeColors:
 class CalendarUISettings:
     day_start: int = 0
     day_end: int = 23
+    grid_step_minutes: int = 30
+    min_block_duration_minutes: int = 15
+    drag_magnet_margin_minutes: int = 5
     row_min_height: int = 36
     day_column_width: int = 160
     hours_column_width: int = 76
@@ -90,6 +93,14 @@ class TodayUISettings:
 
 
 @dataclass(frozen=True)
+class SnoozeSettings:
+    evening_hour: int = 20
+    evening_minute: int = 0
+    tomorrow_hour: int = 9
+    tomorrow_minute: int = 0
+
+
+@dataclass(frozen=True)
 class AutoRefreshSettings:
     enabled: bool = True
     interval_sec: int = 60
@@ -106,6 +117,7 @@ class UISettings:
     theme: ThemeColors = ThemeColors()
     calendar: CalendarUISettings = CalendarUISettings()
     today: TodayUISettings = TodayUISettings()
+    snooze: SnoozeSettings = SnoozeSettings()
     auto_refresh: AutoRefreshSettings = AutoRefreshSettings()
 
 
