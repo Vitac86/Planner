@@ -5,6 +5,7 @@ import flet as ft
 
 from services.tasks import TaskService
 from core.priorities import (
+    DEFAULT_PRIORITY,
     priority_options,
     priority_label,
     priority_color,
@@ -16,7 +17,6 @@ from helpers.datetime_utils import (
     build_start_datetime,
     parse_date_input,
     parse_time_input,
-    smart_defaults,
     snap_minutes,
 )
 
@@ -82,7 +82,7 @@ class TodayPage:
         self.priority_dd = ft.Dropdown(
             label="Приоритет",
             width=160,
-            value=str(0),
+            value=str(DEFAULT_PRIORITY),
             options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
         )
         self.to_calendar_cb = ft.Checkbox(
@@ -324,50 +324,44 @@ class TodayPage:
             self.app.page.update()
             return
 
-        # авто-подстановка дефолтных значений
-        if not self.date_tf.value or not self.time_tf.value or not self.dur_tf.value:
-            d, t, dur = smart_defaults(
-                raw_date=self.date_tf.value,
-                raw_time=self.time_tf.value,
-                raw_duration=self.dur_tf.value,
-                default_duration=UI.today.default_duration_minutes,
-                step_minutes=GRID_STEP,
-            )
-            if not self.date_tf.value:
-                self.date_tf.value = d.strftime("%d.%m.%Y")
-            if not self.time_tf.value:
-                self.time_tf.value = t.strftime("%H:%M")
-            if not self.dur_tf.value:
-                self.dur_tf.value = str(dur)
-            self.app.page.update()
+        raw_date = (self.date_tf.value or "").strip()
+        raw_time = (self.time_tf.value or "").strip()
+        raw_duration = (self.dur_tf.value or "").strip()
 
-        parsed_date = parse_date_input(self.date_tf.value)
-        if not parsed_date:
+        parsed_date = parse_date_input(raw_date) if raw_date else None
+        if raw_date and not parsed_date:
             self._mark_error(self.date_tf, "Неверная дата. Пример: 10.10.2025")
             self.app.page.update()
             return
 
-        parsed_time = parse_time_input(self.time_tf.value)
-        if not parsed_time:
+        parsed_time = parse_time_input(raw_time) if raw_time else None
+        if raw_time and not parsed_time:
             self._mark_error(self.time_tf, "Неверное время. Пример: 09:30")
             self.app.page.update()
             return
 
-        start_dt = self._combine_dt(self.date_tf.value, self.time_tf.value)
-        if not start_dt:
-            self._mark_error(self.time_tf, "Не удалось определить время задачи")
-            self.app.page.update()
-            return
+        start_dt = None
+        duration = None
 
-        try:
-            duration = int(self.dur_tf.value)
-        except (TypeError, ValueError):
-            self._mark_error(self.dur_tf, "Введите длительность в минутах")
-            self.app.page.update()
-            return
+        if parsed_date or parsed_time:
+            start_dt = self._combine_dt(raw_date if parsed_date else None, raw_time if parsed_time else None)
+            if not start_dt:
+                self._mark_error(self.time_tf, "Не удалось определить время задачи")
+                self.app.page.update()
+                return
 
-        duration = max(duration, MIN_DURATION)
-        duration = snap_minutes(duration, step=GRID_STEP, direction="nearest")
+            if raw_duration:
+                try:
+                    duration = int(raw_duration)
+                except (TypeError, ValueError):
+                    self._mark_error(self.dur_tf, "Введите длительность в минутах")
+                    self.app.page.update()
+                    return
+            else:
+                duration = UI.today.default_duration_minutes
+
+            duration = max(duration or MIN_DURATION, MIN_DURATION)
+            duration = snap_minutes(duration, step=GRID_STEP, direction="nearest")
 
         priority = normalize_priority(self.priority_dd.value)
 
@@ -391,7 +385,7 @@ class TodayPage:
         self.date_tf.value = ""
         self.time_tf.value = ""
         self.dur_tf.value = str(UI.today.default_duration_minutes)
-        self.priority_dd.value = str(priority)
+        self.priority_dd.value = str(DEFAULT_PRIORITY)
         self.refresh_lists()
         self._toast(msg)
 
