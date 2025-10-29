@@ -4,20 +4,20 @@ from __future__ import annotations
 import asyncio
 import flet as ft
 
+from core.settings import UI, GOOGLE_SYNC
+
 # страницы
 from .pages.today import TodayPage
 from .pages.calendar import CalendarPage
 from .pages.settings import SettingsPage
+from .pages.history import HistoryPage
 
 # Google
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
-from googleapiclient.discovery import build
 
 # Pull-синхронизация Google -> локально
 from services.sync import GoogleSync, JsonTokenStore
-
-SAFE_SURFACE_BG = "#F1F5F9"  # вместо ft.Colors.SURFACE_VARIANT (его нет в 0.28.3)
 
 
 class AppShell:
@@ -25,7 +25,7 @@ class AppShell:
         self.page = page
 
         # базовые настройки окна
-        self.page.title = "Planner"
+        self.page.title = UI.app_title
         self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
         self.page.vertical_alignment = ft.MainAxisAlignment.START
 
@@ -37,6 +37,7 @@ class AppShell:
         # --- страницы ---
         self._today = TodayPage(self)
         self._calendar = CalendarPage(self)
+        self._history = HistoryPage(self)
         self._settings = SettingsPage(self)  # использует self.gcal
 
         # контейнер контента
@@ -62,6 +63,11 @@ class AppShell:
                     label="Календарь",
                 ),
                 ft.NavigationRailDestination(
+                    icon=ft.Icons.HISTORY_EDU_OUTLINED,
+                    selected_icon=ft.Icons.HISTORY,
+                    label="История",
+                ),
+                ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED,
                     selected_icon=ft.Icons.SETTINGS,
                     label="Настройки",
@@ -72,7 +78,7 @@ class AppShell:
         # корневой лэйаут
         self.root = ft.Row(
             controls=[
-                ft.Container(self.nav, width=88, bgcolor=SAFE_SURFACE_BG),
+                ft.Container(self.nav, width=88, bgcolor=UI.theme.safe_surface_bg),
                 ft.VerticalDivider(width=1),
                 self.content,
             ],
@@ -82,7 +88,42 @@ class AppShell:
 
         # автообновление активной страницы
         self._auto_task: asyncio.Task | None = None
-        self._active_view: str | None = None  # "today" | "calendar" | "settings"
+        self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
+
+    def cleanup_overlays(self):
+        """Remove closed overlays (dialogs, pickers, backdrops) to avoid "ghost" windows."""
+        overlays = getattr(self.page, "overlay", None) or []
+        changed = False
+
+        def _close_and_remove(ctrl):
+            nonlocal changed
+            try:
+                if hasattr(ctrl, "open"):
+                    ctrl.open = False
+            except Exception:
+                pass
+            try:
+                overlays.remove(ctrl)
+                changed = True
+            except Exception:
+                pass
+
+        for ctrl in list(overlays):
+            if isinstance(ctrl, (ft.AlertDialog, ft.DatePicker, ft.TimePicker)):
+                if not getattr(ctrl, "open", False):
+                    _close_and_remove(ctrl)
+
+        has_dialog = any(
+            getattr(ctrl, "open", False) for ctrl in overlays if isinstance(ctrl, ft.AlertDialog)
+        )
+
+        if not has_dialog:
+            for ctrl in list(overlays):
+                if getattr(ctrl, "data", None) == "backdrop":
+                    _close_and_remove(ctrl)
+
+        if changed:
+            self.page.update()
 
     # ---------- утилиты ----------
     def _has_open_overlay(self) -> bool:
@@ -111,10 +152,17 @@ class AppShell:
             print("Google pull sync error:", e)
             return False
 
-    def _start_auto_refresh(self, view_name: str, refresh_fn, period_sec: int = 60):
+    def _start_auto_refresh(
+        self, view_name: str, refresh_fn, period_sec: int | None = None
+    ):
         """Периодически дергаем pull + refresh_fn, пока активен указанный view."""
+        if not GOOGLE_SYNC.enabled or not UI.auto_refresh.enabled:
+            refresh_fn()
+            return
         self._stop_auto_refresh()
         self._active_view = view_name
+
+        interval = period_sec or GOOGLE_SYNC.auto_pull_interval_sec or UI.auto_refresh.interval_sec
 
         async def _loop():
             # первый прогон — сразу: подтянуть изменения и перерисовать
@@ -125,7 +173,7 @@ class AppShell:
                 print("auto refresh (initial):", e)
 
             while self._active_view == view_name:
-                await asyncio.sleep(period_sec)
+                await asyncio.sleep(interval)
                 if self._active_view != view_name:
                     break
                 if self._has_open_overlay():
@@ -182,6 +230,11 @@ class AppShell:
             except Exception:
                 pass
             self._start_auto_refresh("calendar", self._calendar.load)
+
+        elif idx == 2:  # История
+            self.content.content = self._history.view
+            self._stop_auto_refresh()
+            self._history.activate_from_menu()
 
         else:  # Настройки (используем полноценную страницу настроек)
             self.content.content = self._settings.view

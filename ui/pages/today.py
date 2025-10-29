@@ -1,12 +1,21 @@
 # planner/ui/pages/today.py
 import re
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dt_time
 import flet as ft
 
 from services.tasks import TaskService
+from core.priorities import (
+    priority_options,
+    priority_label,
+    priority_color,
+    normalize_priority,
+)
+from core.settings import UI
 
 
 class TodayPage:
+    LIST_SECTION_HEIGHT = UI.today.list_section_height
+
     def __init__(self, app):
         self.app = app
         self.svc = TaskService()
@@ -37,11 +46,7 @@ class TodayPage:
         )
 
         # TimePicker
-        self.time_picker_add = ft.TimePicker(
-            help_text="Выберите время",
-            on_change=lambda e: self._set_tf_time(self.time_tf, e.data or e.control.value),
-            on_dismiss=lambda e: self._set_tf_time(self.time_tf, e.control.value),
-        )
+        self.time_picker_add = self._new_time_picker()
 
         for p in (self.date_picker_add, self.time_picker_add):
             if p not in self.app.page.overlay:
@@ -52,12 +57,27 @@ class TodayPage:
             on_click=lambda e: self.app.page.open(self.date_picker_add)
         )
         self.time_btn = ft.IconButton(
-            icon=ft.Icons.SCHEDULE, tooltip="Выбрать время",
-            on_click=lambda e: self.app.page.open(self.time_picker_add)
+            icon=ft.Icons.SCHEDULE,
+            tooltip="Выбрать время",
+            on_click=lambda e: self._open_time_picker(self.time_picker_add, self.time_tf),
         )
 
-        self.dur_tf = ft.TextField(label="Длительность, мин", value="30", width=160, prefix=ft.Icon(ft.Icons.TIMER))
-        self.to_calendar_cb = ft.Checkbox(label="Сразу в календарь", value=True)
+        self.dur_tf = ft.TextField(
+            label="Длительность, мин",
+            value=str(UI.today.default_duration_minutes),
+            width=160,
+            prefix=ft.Icon(ft.Icons.TIMER),
+        )
+        self.priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=160,
+            value=str(0),
+            options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
+        )
+        self.to_calendar_cb = ft.Checkbox(
+            label="Сразу в календарь",
+            value=UI.today.add_to_calendar_by_default,
+        )
         self.add_btn = ft.FilledButton("Добавить", icon=ft.Icons.ADD, on_click=self.on_add)
 
         quick_add = ft.Card(
@@ -71,6 +91,7 @@ class TodayPage:
                                 ft.Row([self.date_tf, self.date_btn], spacing=6),
                                 ft.Row([self.time_tf, self.time_btn], spacing=6),
                                 self.dur_tf,
+                                self.priority_dd,
                                 self.to_calendar_cb,
                                 self.add_btn,
                             ],
@@ -84,28 +105,55 @@ class TodayPage:
             )
         )
 
-        self.today_list = ft.ListView(expand=False, spacing=8)
-        self.unscheduled_list = ft.ListView(expand=False, spacing=8)
+        self.today_list = ft.ListView(expand=True, spacing=12)
+        self.unscheduled_list = ft.ListView(expand=True, spacing=12)
 
         today_card = ft.Card(
             content=ft.Container(
-                content=ft.Column([ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600), self.today_list], spacing=12),
                 padding=16,
+                content=ft.Column(
+                    [
+                        ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600),
+                        ft.Container(content=self.today_list, height=self.LIST_SECTION_HEIGHT),
+                    ],
+                    spacing=12,
+                ),
             )
         )
         unscheduled_card = ft.Card(
             content=ft.Container(
-                content=ft.Column([ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600), self.unscheduled_list], spacing=12),
                 padding=16,
+                content=ft.Column(
+                    [
+                        ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600),
+                        ft.Container(content=self.unscheduled_list, height=self.LIST_SECTION_HEIGHT),
+                    ],
+                    spacing=12,
+                ),
             )
+        )
+
+        lists_row = ft.Row(
+            [
+                ft.Container(content=today_card, expand=True),
+                ft.Container(content=unscheduled_card, expand=True),
+            ],
+            spacing=16,
+            vertical_alignment=ft.CrossAxisAlignment.START,
         )
 
         self.view = ft.Container(
             content=ft.Column(
-                [ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD), quick_add, today_card, unscheduled_card],
-                spacing=16, expand=True,
+                [
+                    ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD),
+                    quick_add,
+                    lists_row,
+                ],
+                spacing=16,
+                expand=True,
             ),
-            expand=True, padding=20,
+            expand=True,
+            padding=20,
         )
 
         self.refresh_lists()
@@ -119,6 +167,55 @@ class TodayPage:
         self.refresh_lists()
 
     # ---------- Утилиты ----------
+    def _new_time_picker(self) -> ft.TimePicker:
+        picker = ft.TimePicker(help_text="Выберите время")
+        picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
+        picker.on_dismiss = lambda e, _picker=picker: self._time_picker_on_dismiss(_picker, e)
+        return picker
+
+    def _open_time_picker(self, picker: ft.TimePicker, tf: ft.TextField):
+        prev = tf.value
+        parsed = self._parse_time_tf(tf.value)
+        if parsed:
+            base_time = dt_time(parsed[0], parsed[1])
+        else:
+            now = datetime.now()
+            base_time = dt_time(now.hour, now.minute)
+        try:
+            picker.value = base_time
+        except Exception:
+            pass
+        picker.data = {"tf": tf, "prev": prev, "applied": False}
+        if picker not in self.app.page.overlay:
+            self.app.page.overlay.append(picker)
+        self.app.page.open(picker)
+
+    def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            return
+        value = e.data or picker.value
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+            picker.data = data
+
+    def _time_picker_on_dismiss(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            picker.data = None
+            return
+        value = e.data
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+        elif not data.get("applied"):
+            tf.value = data.get("prev", tf.value)
+            self.app.page.update()
+        picker.data = None
+
     def _set_tf_date(self, tf: ft.TextField, value):
         from datetime import date as _date, datetime
 
@@ -159,6 +256,9 @@ class TodayPage:
         Унифицирует значение из TimePicker в формат HH:MM.
         Поддерживает: datetime.time, "HH:MM", "HH:MM:SS".
         """
+        if value in (None, ""):
+            return
+
         # если пришёл time-объект
         try:
             tf.value = value.strftime("%H:%M")
@@ -235,7 +335,14 @@ class TodayPage:
         except ValueError:
             return self._toast("Длительность должна быть числом (мин)")
 
-        task = self.svc.add(title=title, start=start_dt, duration_minutes=duration)
+        priority = normalize_priority(self.priority_dd.value)
+
+        task = self.svc.add(
+            title=title,
+            start=start_dt,
+            duration_minutes=duration,
+            priority=priority,
+        )
 
         msg = "Задача добавлена"
         if self.to_calendar_cb.value and start_dt and duration:
@@ -250,6 +357,7 @@ class TodayPage:
         self.date_tf.value = ""
         self.time_tf.value = ""
         self.dur_tf.value = "30"
+        self.priority_dd.value = str(priority)
         self.refresh_lists()
         self._toast(msg)
 
@@ -279,27 +387,112 @@ class TodayPage:
         self.unscheduled_list.controls.clear()
         for t in self.svc.list_unscheduled():
             self.unscheduled_list.controls.append(self._row_for_task(t))
+        self.app.cleanup_overlays()
         self.app.page.update()
 
     def _row_for_task(self, t):
         meta = self._human_time(t)
-        right = ft.Row(
-            controls=[
-                ft.Text(meta, italic=True),
-                ft.Icon(ft.Icons.LINK) if t.gcal_event_id else ft.Container(),
-                ft.IconButton(icon=ft.Icons.EDIT_OUTLINED, tooltip="Редактировать", data=t.id, on_click=self.on_edit_click),
-                ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Удалить",
-                              on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev)),
-            ],
-            spacing=8, alignment=ft.MainAxisAlignment.END,
+        checkbox = ft.Checkbox(
+            value=(t.status == "done"),
+            on_change=lambda e, tid=t.id: self.on_toggle_done(tid, e.control.value),
         )
-        return ft.Row(
+
+        checkbox_holder = ft.Container(
+            width=52,
+            alignment=ft.alignment.center,
+            content=checkbox,
+        )
+
+        priority_marker = self._priority_marker(t.priority)
+
+        title_text = ft.Text(
+            t.title,
+            weight=ft.FontWeight.W_600,
+            size=15,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+
+        meta_items = []
+        if getattr(t, "priority", 0) > 0:
+            meta_items.append(
+                ft.Container(
+                    content=ft.Text(
+                        priority_label(t.priority, short=True),
+                        size=12,
+                        weight=ft.FontWeight.W_500,
+                        color=ft.Colors.WHITE,
+                    ),
+                    bgcolor=priority_color(t.priority),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                    border_radius=999,
+                )
+            )
+        meta_items.append(
+            ft.Text(
+                meta,
+                color=ft.Colors.BLUE_GREY_400,
+                size=12,
+            )
+        )
+        if t.gcal_event_id:
+            meta_items.append(
+                ft.Row(
+                    controls=[
+                        ft.Icon(ft.Icons.LINK, size=14),
+                        ft.Text("Google", size=12, color=ft.Colors.BLUE_GREY_400),
+                    ],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+
+        info_column = ft.Column(
             controls=[
-                ft.Checkbox(label=t.title, value=(t.status == "done"),
-                            on_change=lambda e, tid=t.id: self.on_toggle_done(tid, e.control.value)),
-                right,
+                ft.Row(
+                    controls=[priority_marker, title_text],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(meta_items, spacing=12, wrap=True),
             ],
+            spacing=6,
+            alignment=ft.MainAxisAlignment.CENTER,
+            expand=True,
+        )
+
+        actions = ft.Row(
+            controls=[
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_OUTLINED,
+                    tooltip="Редактировать",
+                    data=t.id,
+                    on_click=self.on_edit_click,
+                    style=ft.ButtonStyle(padding=ft.padding.all(8)),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    tooltip="Удалить",
+                    on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev),
+                    style=ft.ButtonStyle(padding=ft.padding.all(8)),
+                ),
+            ],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        content_row = ft.Row(
+            controls=[checkbox_holder, info_column, actions],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        return ft.Container(
+            content=content_row,
+            padding=ft.padding.symmetric(horizontal=16, vertical=12),
+            border_radius=12,
+            bgcolor=ft.Colors.SURFACE,
+            border=ft.border.all(1, ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
         )
 
     # ---------- Диалог редактирования ----------
@@ -309,7 +502,7 @@ class TodayPage:
             return self._toast("Задача не найдена")
 
         # --- поля без expand, фикс-ширины только там, где нужно ---
-        title_tf = ft.TextField(label="Название", value=t.title)
+        title_tf = ft.TextField(label="Название", value=t.title, width=420)
 
         date_val = t.start.strftime("%d.%m.%Y") if t.start else ""
         time_val = t.start.strftime("%H:%M") if (t.start and t.start.time() != datetime.min.time()) else ""
@@ -325,29 +518,57 @@ class TodayPage:
             on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
             on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
         )
-        tp = ft.TimePicker(
-            help_text="Выберите время",
-            on_change=lambda e: self._set_tf_time(time_tf, e.data or e.control.value),
-            on_dismiss=lambda e: self._set_tf_time(time_tf, e.control.value),
-        )
+        tp = self._new_time_picker()
         for p in (dp, tp):
             if p not in self.app.page.overlay:
                 self.app.page.overlay.append(p)
 
-        date_btn = ft.IconButton(icon=ft.Icons.CALENDAR_MONTH, tooltip="Календарь",
-                                on_click=lambda e, _dp=dp: self.app.page.open(_dp))
-        time_btn = ft.IconButton(icon=ft.Icons.SCHEDULE, tooltip="Выбрать время",
-                                on_click=lambda e, _tp=tp: self.app.page.open(_tp))
+        date_btn = ft.IconButton(
+            icon=ft.Icons.CALENDAR_MONTH,
+            tooltip="Календарь",
+            on_click=lambda e, _dp=dp: self.app.page.open(_dp),
+        )
+        time_btn = ft.IconButton(
+            icon=ft.Icons.SCHEDULE,
+            tooltip="Выбрать время",
+            on_click=lambda e, _tp=tp: self._open_time_picker(_tp, time_tf),
+        )
 
         dur_tf = ft.TextField(
             label="Длительность, мин",
             value=(str(t.duration_minutes) if t.duration_minutes else ""),
             width=140
         )
-        notes_tf = ft.TextField(
-            label="Заметки", value=(t.notes or ""),
-            multiline=True, min_lines=3, max_lines=6
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=160,
+            value=str(getattr(t, "priority", 0)),
+            options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
         )
+        notes_tf = ft.TextField(
+            label="Заметки",
+            value=(t.notes or ""),
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+        )
+
+        def _remove_pickers():
+            for ctrl in (dp, tp):
+                try:
+                    ctrl.open = False
+                except Exception:
+                    pass
+                try:
+                    if ctrl in self.app.page.overlay:
+                        self.app.page.overlay.remove(ctrl)
+                except Exception:
+                    pass
+
+        def _finalize_dialog():
+            dlg = self.edit_dialog
+            self.edit_dialog = None
+            self._close_alert_dialog(dlg)
 
         def on_save(_):
             new_title = (title_tf.value or "").strip()
@@ -369,7 +590,8 @@ class TodayPage:
                 title=new_title,
                 notes=notes_tf.value,
                 start=new_start,
-                duration_minutes=new_dur
+                duration_minutes=new_dur,
+                priority=normalize_priority(priority_dd.value),
             )
 
             # gcal-sync
@@ -392,20 +614,14 @@ class TodayPage:
                     finally:
                         self.svc.set_event_id(task_id, None)
 
-            self.edit_dialog.open = False
-            if self.edit_dialog in self.app.page.overlay:
-                self.app.page.overlay.remove(self.edit_dialog)
-            self.edit_dialog = None
-            self.app.page.update()
+            _remove_pickers()
+            _finalize_dialog()
             self.refresh_lists()
             self._toast("Сохранено")
 
-        def on_cancel(_):
-            self.edit_dialog.open = False
-            if self.edit_dialog in self.app.page.overlay:
-                self.app.page.overlay.remove(self.edit_dialog)
-            self.edit_dialog = None
-            self.app.page.update()
+        def on_cancel(_=None):
+            _remove_pickers()
+            _finalize_dialog()
 
         # --- КОМПАКТНАЯ ВЁРСТКА ---
 
@@ -421,9 +637,12 @@ class TodayPage:
         time_btn.icon_size = 18
 
         utils_row = ft.Row(
-            [date_tf, date_btn, time_tf, time_btn, dur_tf],
+            controls=[date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
             spacing=8,
-            vertical_alignment=ft.CrossAxisAlignment.END,
+            run_spacing=12,
+            wrap=True,
+            alignment=ft.MainAxisAlignment.START,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         buttons_row = ft.Row(
             [ft.TextButton("Отмена", on_click=on_cancel),
@@ -431,7 +650,7 @@ class TodayPage:
             alignment=ft.MainAxisAlignment.END,
         )
 
-        MAX_W = 480
+        MAX_W = 520
         self.edit_dialog = ft.AlertDialog(
             modal=False,
             inset_padding=ft.padding.all(16),
@@ -443,6 +662,7 @@ class TodayPage:
                     [title_tf, utils_row, notes_tf, buttons_row],
                     spacing=10,
                     tight=True,
+                    scroll=ft.ScrollMode.ADAPTIVE,
                 ),
             ),
         )
@@ -450,6 +670,7 @@ class TodayPage:
         if self.edit_dialog not in self.app.page.overlay:
             self.app.page.overlay.append(self.edit_dialog)
         self.edit_dialog.open = True
+        self.edit_dialog.on_dismiss = on_cancel
         self.app.page.update()
 
 
@@ -464,7 +685,33 @@ class TodayPage:
             return t.start.strftime("%d.%m %H:%M")
         return "без времени"
 
+    def _priority_marker(self, priority: int) -> ft.Control:
+        if priority <= 0:
+            return ft.Container(width=12)
+        return ft.Container(
+            width=12,
+            height=12,
+            border_radius=6,
+            bgcolor=priority_color(priority),
+            tooltip=priority_label(priority),
+        )
+
     def _toast(self, text: str):
         self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
         self.app.page.snack_bar.open = True
         self.app.page.update()
+
+    def _close_alert_dialog(self, dlg: ft.AlertDialog | None):
+        if not dlg:
+            return
+        try:
+            dlg.open = False
+        except Exception:
+            pass
+        try:
+            if dlg in self.app.page.overlay:
+                self.app.page.overlay.remove(dlg)
+        except Exception:
+            pass
+        self.app.page.update()
+        self.app.cleanup_overlays()

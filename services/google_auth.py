@@ -5,13 +5,21 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+from core.settings import CLIENT_SECRET_PATH, TOKEN_PATH, GOOGLE_SYNC
+
+SCOPES = list(GOOGLE_SYNC.scopes)
+
 
 class GoogleAuth:
-    def __init__(self, secrets_path: str | Path = "client_secret_321977136899-7lmhos5q0dntmob4ehjg28cu2gfs7q3m.apps.googleusercontent.com.json",
-                 token_path: str | Path = "token.json"):
+    def __init__(
+        self,
+        secrets_path: str | Path = CLIENT_SECRET_PATH,
+        token_path: str | Path = TOKEN_PATH,
+    ):
         self.secrets_path = Path(secrets_path)
         self.token_path = Path(token_path)
+        self.secrets_path.parent.mkdir(parents=True, exist_ok=True)
+        self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self.creds: Optional[Credentials] = None
 
     def ensure_credentials(self) -> bool:
@@ -39,6 +47,7 @@ class GoogleAuth:
                 self.creds = flow.run_local_server(port=0)
 
             # Сохраняем полученный токен
+            self.token_path.parent.mkdir(parents=True, exist_ok=True)
             self.token_path.write_text(self.creds.to_json(), encoding="utf-8")
 
         return True

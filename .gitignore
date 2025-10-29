@@ -32,3 +32,9 @@ data/*.db
 *.tsv
 *.csv
 *.tmp
+
+# Secrets and runtime state
+secrets/*
+token.json
+*.db
+storage/*.json

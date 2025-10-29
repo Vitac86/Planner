@@ -8,14 +8,15 @@ from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from services.tasks import TaskService
+from core.settings import GOOGLE_SYNC
 
-DELETE_ON_GOOGLE_CANCEL = False  # True — удалять задачу; False — только снимать расписание (как сейчас)
+DELETE_ON_GOOGLE_CANCEL = GOOGLE_SYNC.delete_on_google_cancel  # True — удалять задачу; False — только снимать расписание (как сейчас)
 _MARKER_RE = re.compile(r"planner_task_id\s*:\s*(\d+)", re.I)
 
 
 class JsonTokenStore:
     """Простейшее хранение syncToken в файле (чтобы получать только изменения)."""
-    def __init__(self, path: str | Path = "storage/gcal_sync_token.json"):
+    def __init__(self, path: str | Path = GOOGLE_SYNC.sync_token_path):
         self.path = Path(path)
 
     def get_sync_token(self) -> Optional[str]:

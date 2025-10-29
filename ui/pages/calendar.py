@@ -4,42 +4,58 @@ import re
 
 import json
 import flet as ft
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dt_time
 from typing import Dict, Tuple, List, Optional
 
 from services.tasks import TaskService
+from core.priorities import (
+    priority_options,
+    priority_label,
+    priority_color,
+    priority_bgcolor,
+    normalize_priority,
+)
+from core.settings import UI
 
 # ===== настройки =====
-DAY_START = 0
-DAY_END   = 23
+CAL_UI = UI.calendar
+THEME = UI.theme
 
-ROW_MIN_H        = 36          # минимальная высота строки часа
-DAY_COL_W        = 160
-HOURS_COL_W      = 76
-SIDE_PANEL_W     = 240
-HEADER_H         = 54
+DAY_START = CAL_UI.day_start
+DAY_END = CAL_UI.day_end
 
-CHIP_EST_H       = 26          # ожидаемая высота «чипа»
-CELL_VPAD        = 8
-CHIPS_SPACING    = 4
+ROW_MIN_H = CAL_UI.row_min_height  # минимальная высота строки часа
+DAY_COL_W = CAL_UI.day_column_width
+HOURS_COL_W = CAL_UI.hours_column_width
+SIDE_PANEL_W = CAL_UI.side_panel_width
+HEADER_H = CAL_UI.header_height
 
-IMPORT_NEW_GCAL = True
+CHIP_EST_H = CAL_UI.chip_estimated_height  # ожидаемая высота «чипа»
+CELL_VPAD = CAL_UI.cell_vertical_padding
+CHIPS_SPACING = CAL_UI.chips_spacing
 
-def _c(name: str, default: str):
+IMPORT_NEW_GCAL = CAL_UI.import_new_from_google
+
+DIALOG_WIDTH_NARROW = CAL_UI.dialog_width_narrow
+DIALOG_WIDTH_WIDE = CAL_UI.dialog_width_wide
+
+
+def _color(value: str, fallback: str = "") -> str:
     try:
-        return getattr(ft.Colors, name)
+        return getattr(ft.Colors, value)
     except Exception:
-        return default
+        return value or fallback
 
-CLR_OUTLINE  = _c("OUTLINE_VARIANT",    "#E5E7EB")
-CLR_SURFVAR  = _c("SURFACE_VARIANT",    "#F1F5F9")
-CLR_TEXTSUB  = _c("ON_SURFACE_VARIANT", "#6B7280")
-CLR_TODAY_BG = "#EEF2FF"
-CLR_NOW_LINE = "#EF4444"
-CLR_CHIP     = "#E0E7FF"
-CLR_CHIP_TXT = "#1F2937"
-CLR_UNS_BG   = "#FFF59D"
-CLR_BACKDROP = "#000000"  # для клика-вне
+
+CLR_OUTLINE = _color(THEME.outline, "#E5E7EB")
+CLR_SURFVAR = _color(THEME.surface_variant, "#F1F5F9")
+CLR_TEXTSUB = _color(THEME.text_subtle, "#6B7280")
+CLR_TODAY_BG = THEME.today_bg
+CLR_NOW_LINE = THEME.now_line
+CLR_CHIP = THEME.chip
+CLR_CHIP_TXT = THEME.chip_text
+CLR_UNS_BG = THEME.unscheduled_bg
+CLR_BACKDROP = THEME.backdrop  # для клика-вне
 
 NOW_ANCHOR_KEY = "now-anchor"
 
@@ -56,6 +72,7 @@ class CalendarPage:
     def __init__(self, app):
         self.app = app
         self.svc = TaskService()
+        self._priority_options = [ft.dropdown.Option(key, label) for key, label in priority_options().items()]
 
         self.week_start: date = self._monday_of(date.today())
 
@@ -157,6 +174,14 @@ class CalendarPage:
     def _close_dialog(self, dlg: ft.AlertDialog | None):
         if not dlg:
             return
+        cleanup_meta = getattr(dlg, "data", None)
+        if isinstance(cleanup_meta, dict):
+            fn = cleanup_meta.get("on_close")
+            if callable(fn):
+                try:
+                    fn()
+                finally:
+                    cleanup_meta["on_close"] = None
         try:
             dlg.open = False
         except Exception:
@@ -169,18 +194,23 @@ class CalendarPage:
         self._cleanup_backdrop()
         self._sweep_overlay()
         self.app.page.update()
+        self.app.cleanup_overlays()
 
     def _close_any_dialog(self):
         # на всякий случай закрыть всё
         try:
-            for c in list(self.app.page.overlay):
-                if isinstance(c, ft.AlertDialog):
-                    c.open = False
-                    self.app.page.overlay.remove(c)
+            overlays = list(self.app.page.overlay)
         except Exception:
-            pass
+            overlays = []
+
+        for ctrl in overlays:
+            if isinstance(ctrl, ft.AlertDialog):
+                self._close_dialog(ctrl)
+
         self._cleanup_backdrop()
+        self._sweep_overlay()
         self.app.page.update()
+        self.app.cleanup_overlays()
     def _delete_task(self, task_id: int):
         t = self.svc.get(task_id)
         if not t:
@@ -204,12 +234,15 @@ class CalendarPage:
         return [self.week_start + timedelta(days=i) for i in range(7)]
 
     def go_home(self):
+        self._close_any_dialog()
         self.week_start = self._monday_of(date.today())
         self._need_scroll_now = True
         self.load()
 
     def shift_week(self, delta_weeks: int):
-        self.week_start = self.week_start + timedelta(days=7 * delta_weeks)
+        self._close_any_dialog()
+        base = self.week_start or self._monday_of(date.today())
+        self.week_start = self._monday_of(base + timedelta(days=7 * delta_weeks))
         self._need_scroll_now = True
         self.load()
     
@@ -232,6 +265,7 @@ class CalendarPage:
                         pass
         if changed:
             self.app.page.update()
+            self.app.cleanup_overlays()
 
     # ===== Загрузка =====
     def load(self):
@@ -253,7 +287,13 @@ class CalendarPage:
                 di = (st.date() - ws).days
                 if 0 <= di < 7:
                     self.idx.setdefault((di, st.hour), []).append(
-                        {"title": t.title, "task_id": t.id, "duration": dur, "gcal_event_id": getattr(t, "gcal_event_id", None)}
+                        {
+                            "title": t.title,
+                            "task_id": t.id,
+                            "duration": dur,
+                            "gcal_event_id": getattr(t, "gcal_event_id", None),
+                            "priority": getattr(t, "priority", 0),
+                        }
                     )
 
         # высоты строк
@@ -265,6 +305,9 @@ class CalendarPage:
             height = ROW_MIN_H if max_n <= 0 else max(ROW_MIN_H, CELL_VPAD + max_n * CHIP_EST_H + (max_n - 1) * CHIPS_SPACING)
             self.row_h[h] = height
 
+        for key, tasks in self.idx.items():
+            tasks.sort(key=lambda item: (-item.get("priority", 0), item.get("title", "").lower()))
+
         self._build_unscheduled()
         self.grid.content = self._build_week_grid()
         self.app.page.update()
@@ -272,6 +315,7 @@ class CalendarPage:
         if self._need_scroll_now:
             self._need_scroll_now = False
             self._scroll_to_now()
+        self.app.cleanup_overlays()
     def _sync_from_google(self, ws: date, we: date):
         """Подтягивает изменения из Google за окно недели (с небольшим буфером)
         и обновляет/создаёт/отвязывает локальные задачи.
@@ -421,9 +465,15 @@ class CalendarPage:
     def _build_unscheduled(self):
         self.unscheduled_list.controls.clear()
         for t in self.svc.list_unscheduled():
+            badge = self._priority_badge(t.priority)
             chip = ft.Container(
-                content=ft.Text(t.title, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, color=CLR_CHIP_TXT),
-                padding=8, bgcolor=CLR_UNS_BG,
+                content=ft.Row(
+                    [badge, ft.Text(t.title, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, color=CLR_CHIP_TXT)],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=8,
+                bgcolor=priority_bgcolor(t.priority) if t.priority else CLR_UNS_BG,
                 border=ft.border.all(0.5, CLR_OUTLINE), border_radius=8,
                 width=SIDE_PANEL_W - 20,
             )
@@ -589,11 +639,26 @@ class CalendarPage:
         title = t.get("title", "")
         tid = t.get("task_id")
         dur = t.get("duration", 30)
+        priority = t.get("priority", 0)
 
         chip_body = ft.Container(
-            content=ft.Text(title, size=11, color=CLR_CHIP_TXT,
-                            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
-            bgcolor=CLR_CHIP, border=ft.border.all(0.5, CLR_OUTLINE), border_radius=8,
+            content=ft.Row(
+                [
+                    self._priority_badge(priority),
+                    ft.Text(
+                        title,
+                        size=11,
+                        color=CLR_CHIP_TXT,
+                        no_wrap=True,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=priority_bgcolor(priority) if priority else CLR_CHIP,
+            border=ft.border.all(0.5, CLR_OUTLINE),
+            border_radius=8,
             padding=6, width=DAY_COL_W-12,
         )
         gd = ft.GestureDetector(
@@ -677,7 +742,17 @@ class CalendarPage:
     # ===== Планирование и быстрый блок =====
     def _schedule_task(self, task_id: int, day: date, hour: int):
         start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
-        dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
+        task = self.svc.get(task_id)
+        if not task:
+            return self._toast("Задача не найдена")
+        dur_value = task.duration_minutes or 30
+        dur_tf = ft.TextField(label="Длительность, мин", value=str(dur_value), width=140)
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=220,
+            value=str(getattr(task, "priority", 0)),
+            options=self._priority_options,
+        )
         dlg = None
 
         def on_save(_):
@@ -688,7 +763,14 @@ class CalendarPage:
             except Exception:
                 return self._toast("Длительность должна быть > 0")
 
-            t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
+            priority = normalize_priority(priority_dd.value)
+
+            t = self.svc.update(
+                task_id,
+                start=start_dt,
+                duration_minutes=duration,
+                priority=priority,
+            )
             try:
                 if t and getattr(t, "gcal_event_id", None):
                     self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
@@ -711,7 +793,10 @@ class CalendarPage:
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Запланировать — {start_dt.strftime('%a, %d.%m %H:00')}"),
-            content=ft.Column([dur_tf], spacing=10, tight=True),  # без Container и width
+            content=ft.Container(
+                width=DIALOG_WIDTH_NARROW,
+                content=ft.Column([dur_tf, priority_dd], spacing=12, tight=True),
+            ),
             actions=[
                 ft.TextButton("Отмена", on_click=on_cancel),
                 ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
@@ -723,8 +808,14 @@ class CalendarPage:
 
     def open_quick_add(self, day: date, hour: int):
         start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
-        title_tf = ft.TextField(label="Название", expand=True)
+        title_tf = ft.TextField(label="Название", width=DIALOG_WIDTH_NARROW - 40)
         dur_tf = ft.TextField(label="Длительность, мин", value="30", width=140)
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=180,
+            value=str(0),
+            options=self._priority_options,
+        )
         dlg = None
 
         def on_save(_):
@@ -737,8 +828,9 @@ class CalendarPage:
                     raise ValueError
             except Exception:
                 return self._toast("Длительность должна быть > 0")
+            priority = normalize_priority(priority_dd.value)
 
-            task = self.svc.add(title=title, start=start_dt, duration_minutes=duration)
+            task = self.svc.add(title=title, start=start_dt, duration_minutes=duration, priority=priority)
             try:
                 ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
                 self.svc.set_event_id(task.id, ev["id"])
@@ -759,7 +851,10 @@ class CalendarPage:
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Быстрый блок — {start_dt.strftime('%a, %d.%m %H:00')}"),
-            content=ft.Column([title_tf, dur_tf], spacing=10, tight=True),
+            content=ft.Container(
+                width=DIALOG_WIDTH_NARROW,
+                content=ft.Column([title_tf, dur_tf, priority_dd], spacing=12, tight=True),
+            ),
             actions=[
                 ft.TextButton("Отмена", on_click=on_cancel),
                 ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
@@ -795,10 +890,16 @@ class CalendarPage:
         # --- поля формы (без expand) ---
         DATE_W, TIME_W, DUR_W = 140, 100, 120
 
-        title_tf = ft.TextField(label="Название", value=title_init)
+        title_tf = ft.TextField(label="Название", value=title_init, width=DIALOG_WIDTH_WIDE - 80)
         date_tf  = ft.TextField(label="Дата",  value=date_str, width=DATE_W, read_only=True)
         time_tf  = ft.TextField(label="Время", value=time_str, width=TIME_W, read_only=True)
         dur_tf   = ft.TextField(label="Длительность, мин", value=str(dur_init), width=DUR_W)
+        priority_dd = ft.Dropdown(
+            label="Приоритет",
+            width=200,
+            value=str(getattr(t, "priority", 0)),
+            options=self._priority_options,
+        )
 
         # заметки (авто-увеличение по числу строк)
         notes_tf = ft.TextField(
@@ -825,11 +926,7 @@ class CalendarPage:
             on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
             on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
         )
-        tp = ft.TimePicker(
-            help_text="Выберите время",
-            on_change=lambda e: self._set_tf_time(time_tf, e.data or e.control.value),
-            on_dismiss=lambda e: self._set_tf_time(time_tf, e.control.value),
-        )
+        tp = self._new_time_picker()
         for p in (dp, tp):
             if p not in self.app.page.overlay:
                 self.app.page.overlay.append(p)
@@ -844,11 +941,23 @@ class CalendarPage:
             icon=ft.Icons.SCHEDULE,
             tooltip="Выбрать время",
             icon_size=18,
-            on_click=lambda e, _tp=tp: self.app.page.open(_tp),
+            on_click=lambda e, _tp=tp: self._open_time_picker(_tp, time_tf),
         )
 
         # --- сохранение / отмена ---
         dlg = None
+
+        def _remove_pickers():
+            for ctrl in (dp, tp):
+                try:
+                    ctrl.open = False
+                except Exception:
+                    pass
+                try:
+                    if ctrl in self.app.page.overlay:
+                        self.app.page.overlay.remove(ctrl)
+                except Exception:
+                    pass
 
         def on_save(_):
             new_title = (title_tf.value or "").strip()
@@ -872,6 +981,7 @@ class CalendarPage:
                 notes=notes_tf.value,
                 start=new_start,
                 duration_minutes=new_dur,
+                priority=normalize_priority(priority_dd.value),
             )
 
             # --- Google Calendar sync ---
@@ -895,18 +1005,20 @@ class CalendarPage:
                     finally:
                         self.svc.set_event_id(task_id, None)
 
+            _remove_pickers()
             self._close_dialog(dlg)
             self._sweep_overlay()
             self.load()
             self._toast("Сохранено")
 
-        def on_cancel(_):
+        def on_cancel(_=None):
+            _remove_pickers()
             self._close_dialog(dlg)
             self._sweep_overlay()
 
         # --- компактная вёрстка (без Wrap) ---
         utils_row = ft.Row(
-            [date_tf, date_btn, time_tf, time_btn, dur_tf],
+            [date_tf, date_btn, time_tf, time_btn, dur_tf, priority_dd],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.END,
         )
@@ -922,7 +1034,7 @@ class CalendarPage:
             content_padding=ft.padding.all(12),
             title=ft.Text("Редактировать задачу"),
             content=ft.Container(
-                width=480,
+                width=DIALOG_WIDTH_WIDE,
                 content=ft.Column(
                     [title_tf, utils_row, notes_tf, buttons_row],
                     spacing=10,
@@ -932,6 +1044,7 @@ class CalendarPage:
             ),
         )
 
+        dlg.data = {"on_close": _remove_pickers}
         self._open_dialog(dlg)
 
 
@@ -992,6 +1105,132 @@ class CalendarPage:
     def scroll_to_now(self):
         self._scroll_to_now()
 
+    # ===== Вспомогательное для форм =====
+    def _new_time_picker(self) -> ft.TimePicker:
+        picker = ft.TimePicker(help_text="Выберите время")
+        picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
+        picker.on_dismiss = lambda e, _picker=picker: self._time_picker_on_dismiss(_picker, e)
+        return picker
+
+    def _open_time_picker(self, picker: ft.TimePicker, tf: ft.TextField):
+        prev = tf.value
+        parsed = self._parse_time_tf(tf.value)
+        if parsed:
+            base_time = dt_time(parsed[0], parsed[1])
+        else:
+            now = datetime.now()
+            base_time = dt_time(now.hour, now.minute)
+        try:
+            picker.value = base_time
+        except Exception:
+            pass
+        picker.data = {"tf": tf, "prev": prev, "applied": False}
+        if picker not in self.app.page.overlay:
+            self.app.page.overlay.append(picker)
+        self.app.page.open(picker)
+
+    def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            return
+        value = e.data or picker.value
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+            picker.data = data
+
+    def _time_picker_on_dismiss(self, picker: ft.TimePicker, e: ft.ControlEvent):
+        data = picker.data or {}
+        tf = data.get("tf")
+        if not tf:
+            picker.data = None
+            return
+        value = e.data
+        if value:
+            self._set_tf_time(tf, value)
+            data["applied"] = True
+        elif not data.get("applied"):
+            tf.value = data.get("prev", tf.value)
+            self.app.page.update()
+        picker.data = None
+
+    def _set_tf_date(self, tf: ft.TextField, value):
+        from datetime import date as _date, datetime as _dt
+
+        v = value
+        if isinstance(v, _date):
+            tf.value = v.strftime("%d.%m.%Y")
+        elif isinstance(v, str) and v.strip():
+            s = v.strip()
+            try:
+                tf.value = _dt.strptime(s, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except ValueError:
+                if "T" in s:
+                    try:
+                        tf.value = _dt.strptime(s.split("T")[0], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except ValueError:
+                        pass
+                else:
+                    try:
+                        _dt.strptime(s, "%d.%m.%Y")
+                        tf.value = s
+                    except ValueError:
+                        return
+        self.app.page.update()
+
+    def _set_tf_time(self, tf: ft.TextField, value):
+        if value in (None, ""):
+            return
+        try:
+            tf.value = value.strftime("%H:%M")
+            self.app.page.update()
+            return
+        except Exception:
+            pass
+
+        s = str(value or "").strip()
+        m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", s)
+        if m:
+            h = int(m.group(1))
+            mm = int(m.group(2))
+            if 0 <= h <= 23 and 0 <= mm <= 59:
+                tf.value = f"{h:02d}:{mm:02d}"
+        self.app.page.update()
+
+    def _parse_date_tf(self, s: str):
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$", s)
+        if not m:
+            return None
+        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mth, d)
+        except ValueError:
+            return None
+
+    def _parse_time_tf(self, s: str):
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", s)
+        if not m:
+            return None
+        h, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= minute <= 59:
+            return h, minute
+        return None
+
+    def _combine_dt(self, date_str: str, time_str: str):
+        d = self._parse_date_tf(date_str)
+        t = self._parse_time_tf(time_str)
+        if d and t:
+            return datetime(d.year, d.month, d.day, t[0], t[1])
+        if d and not t:
+            return datetime(d.year, d.month, d.day)
+        if t and not d:
+            today = date.today()
+            return datetime(today.year, today.month, today.day, t[0], t[1])
+        return None
+
     # авто-увеличение высоты многострочного TextField
     def _autogrow_textfield(self, tf: ft.TextField, *, min_lines=2, max_lines=14, wrap_at=60):
         text = tf.value or ""
@@ -1004,6 +1243,21 @@ class CalendarPage:
 
 
     # ===== сервис =====
+    def _priority_badge(self, priority: int) -> ft.Control:
+        if priority <= 0:
+            return ft.Container(width=0)
+        return ft.Container(
+            content=ft.Text(
+                priority_label(priority, short=True),
+                size=10,
+                weight=ft.FontWeight.W_500,
+                color=priority_color(priority),
+            ),
+            bgcolor=priority_bgcolor(priority),
+            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+            border_radius=ft.border_radius.all(6),
+        )
+
     def _toast(self, text: str):
         self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
         self.app.page.snack_bar.open = True
