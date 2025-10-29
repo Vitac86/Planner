@@ -11,6 +11,17 @@ from core.priorities import (
     normalize_priority,
 )
 from core.settings import UI
+from helpers import snooze
+from helpers.datetime_utils import (
+    build_start_datetime,
+    parse_date_input,
+    parse_time_input,
+    smart_defaults,
+    snap_minutes,
+)
+
+GRID_STEP = UI.calendar.grid_step_minutes
+MIN_DURATION = UI.calendar.min_block_duration_minutes
 
 
 class TodayPage:
@@ -167,6 +178,15 @@ class TodayPage:
         self.refresh_lists()
 
     # ---------- Утилиты ----------
+    def _clear_errors(self):
+        for ctrl in (self.title_tf, self.date_tf, self.time_tf, self.dur_tf):
+            ctrl.error_text = None
+            ctrl.border_color = None
+
+    def _mark_error(self, ctrl: ft.TextField, message: str):
+        ctrl.error_text = message
+        ctrl.border_color = ft.Colors.RED_400
+
     def _new_time_picker(self) -> ft.TimePicker:
         picker = ft.TimePicker(help_text="Выберите время")
         picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
@@ -279,61 +299,75 @@ class TodayPage:
 
 
     def _parse_date_tf(self, s: str):
-        s = (s or "").strip()
-        m = re.match(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$", s)
-        if not m:
-            return None
-        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return date(y, mth, d)
-        except ValueError:
-            return None
+        return parse_date_input(s)
 
     def _parse_time_tf(self, s: str):
-        """
-        Возвращает (hour, minute) или None. Допускает секунды.
-        """
-        s = (s or "").strip()
-        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", s)
-        if not m:
+        t = parse_time_input(s)
+        if not t:
             return None
-        h, minute = int(m.group(1)), int(m.group(2))
-        if 0 <= h <= 23 and 0 <= minute <= 59:
-            return h, minute
-        return None
+        return t.hour, t.minute
 
     def _combine_dt(self, date_str: str, time_str: str):
-        d = self._parse_date_tf(date_str)
-        t = self._parse_time_tf(time_str)
-        if d and t:
-            return datetime(d.year, d.month, d.day, t[0], t[1])
-        if d and not t:
-            return datetime(d.year, d.month, d.day)  # без времени
-        if not d and t:
-            now = datetime.now()
-            cand = datetime(now.year, now.month, now.day, t[0], t[1])
-            if cand < now - timedelta(minutes=1):
-                cand += timedelta(days=1)
-            return cand
-        return None
+        return build_start_datetime(
+            date_str,
+            time_str,
+            step_minutes=GRID_STEP,
+            default_to_future=True,
+        )
 
     # ---------- CRUD ----------
     def on_add(self, _):
+        self._clear_errors()
         title = (self.title_tf.value or "").strip()
         if not title:
-            return self._toast("Введите название задачи")
+            self._mark_error(self.title_tf, "Введите название задачи")
+            self.app.page.update()
+            return
 
-        if self.date_tf.value and self._parse_date_tf(self.date_tf.value) is None:
-            return self._toast("Неверный формат даты. Пример: 10.10.2025")
-        if self.time_tf.value and self._parse_time_tf(self.time_tf.value) is None:
-            return self._toast("Неверный формат времени. Пример: 09:30")
+        # авто-подстановка дефолтных значений
+        if not self.date_tf.value or not self.time_tf.value or not self.dur_tf.value:
+            d, t, dur = smart_defaults(
+                raw_date=self.date_tf.value,
+                raw_time=self.time_tf.value,
+                raw_duration=self.dur_tf.value,
+                default_duration=UI.today.default_duration_minutes,
+                step_minutes=GRID_STEP,
+            )
+            if not self.date_tf.value:
+                self.date_tf.value = d.strftime("%d.%m.%Y")
+            if not self.time_tf.value:
+                self.time_tf.value = t.strftime("%H:%M")
+            if not self.dur_tf.value:
+                self.dur_tf.value = str(dur)
+            self.app.page.update()
+
+        parsed_date = parse_date_input(self.date_tf.value)
+        if not parsed_date:
+            self._mark_error(self.date_tf, "Неверная дата. Пример: 10.10.2025")
+            self.app.page.update()
+            return
+
+        parsed_time = parse_time_input(self.time_tf.value)
+        if not parsed_time:
+            self._mark_error(self.time_tf, "Неверное время. Пример: 09:30")
+            self.app.page.update()
+            return
 
         start_dt = self._combine_dt(self.date_tf.value, self.time_tf.value)
+        if not start_dt:
+            self._mark_error(self.time_tf, "Не удалось определить время задачи")
+            self.app.page.update()
+            return
 
         try:
-            duration = int(self.dur_tf.value) if self.dur_tf.value else None
-        except ValueError:
-            return self._toast("Длительность должна быть числом (мин)")
+            duration = int(self.dur_tf.value)
+        except (TypeError, ValueError):
+            self._mark_error(self.dur_tf, "Введите длительность в минутах")
+            self.app.page.update()
+            return
+
+        duration = max(duration, MIN_DURATION)
+        duration = snap_minutes(duration, step=GRID_STEP, direction="nearest")
 
         priority = normalize_priority(self.priority_dd.value)
 
@@ -356,7 +390,7 @@ class TodayPage:
         self.title_tf.value = ""
         self.date_tf.value = ""
         self.time_tf.value = ""
-        self.dur_tf.value = "30"
+        self.dur_tf.value = str(UI.today.default_duration_minutes)
         self.priority_dd.value = str(priority)
         self.refresh_lists()
         self._toast(msg)
@@ -377,6 +411,25 @@ class TodayPage:
 
     def on_edit_click(self, e: ft.ControlEvent):
         self.open_edit_dialog(int(e.control.data))
+
+    def _apply_snooze(self, task_id: int, preset, toast_message: str):
+        task = self.svc.get(task_id)
+        if not task:
+            return self._toast("Задача не найдена")
+        result = preset(task)
+        updated = self.svc.update(task_id, start=result.start, duration_minutes=result.duration_minutes)
+        if updated and getattr(updated, "gcal_event_id", None):
+            try:
+                self.app.gcal.update_event_for_task(
+                    updated.gcal_event_id,
+                    updated,
+                    result.start,
+                    result.duration_minutes,
+                )
+            except Exception as ex:
+                self._toast(f"Google недоступен: {ex}")
+        self.refresh_lists()
+        self._toast(toast_message)
 
     # ---------- Рендер ----------
     def refresh_lists(self):
@@ -463,6 +516,18 @@ class TodayPage:
 
         actions = ft.Row(
             controls=[
+                ft.PopupMenuButton(
+                    icon=ft.Icons.SNOOZE,
+                    tooltip="Snooze",
+                    items=[
+                        ft.PopupMenuItem("Snooze +15 мин", on_click=lambda e, tid=t.id: self._apply_snooze(tid, lambda task: snooze.minutes(task, 15), "Перенесено на +15 мин")),
+                        ft.PopupMenuItem("Snooze +30 мин", on_click=lambda e, tid=t.id: self._apply_snooze(tid, lambda task: snooze.minutes(task, 30), "Перенесено на +30 мин")),
+                        ft.PopupMenuItem("Snooze +60 мин", on_click=lambda e, tid=t.id: self._apply_snooze(tid, lambda task: snooze.minutes(task, 60), "Перенесено на +60 мин")),
+                        ft.PopupMenuItem(text="—", enabled=False),
+                        ft.PopupMenuItem("Сегодня вечером", on_click=lambda e, tid=t.id: self._apply_snooze(tid, snooze.tonight, "Перенесено на вечер")),
+                        ft.PopupMenuItem("Завтра утром", on_click=lambda e, tid=t.id: self._apply_snooze(tid, snooze.tomorrow_morning, "Перенесено на завтра утром")),
+                    ],
+                ),
                 ft.IconButton(
                     icon=ft.Icons.EDIT_OUTLINED,
                     tooltip="Редактировать",

@@ -16,6 +16,7 @@ from core.priorities import (
     normalize_priority,
 )
 from core.settings import UI
+from helpers import snooze
 
 # ===== настройки =====
 CAL_UI = UI.calendar
@@ -692,14 +693,29 @@ class CalendarPage:
         def act_move(_):
             close(); self._schedule_task(task_id, day, hour)
 
+        def _apply_snooze(action, success_message: str):
+            close()
+            task = self.svc.get(task_id)
+            if not task:
+                return self._toast("Задача не найдена")
+            result = action(task)
+            self._reschedule(task_id, result.start, result.duration_minutes)
+            self._toast(success_message)
+
+        def act_snooze15(_):
+            _apply_snooze(lambda task: snooze.minutes(task, 15), "Перенесено на +15 мин")
+
         def act_snooze30(_):
-            close(); self._snooze_minutes(task_id, day, hour, duration, 30)
+            _apply_snooze(lambda task: snooze.minutes(task, 30), "Перенесено на +30 мин")
+
+        def act_snooze60(_):
+            _apply_snooze(lambda task: snooze.minutes(task, 60), "Перенесено на +60 мин")
 
         def act_evening(_):
-            close(); self._snooze_evening(task_id)
+            _apply_snooze(snooze.tonight, "Перенесено на вечер")
 
         def act_tomorrow(_):
-            close(); self._snooze_tomorrow(task_id)
+            _apply_snooze(snooze.tomorrow_morning, "Перенесено на завтра утром")
 
         def act_delete(_):
             close(); self._delete_task(task_id)
@@ -709,9 +725,11 @@ class CalendarPage:
                 ft.TextButton("Редактировать", on_click=act_edit),
                 ft.TextButton("Перенести…", on_click=act_move),
                 ft.Divider(height=1),
+                ft.TextButton("Snooze +15 мин", on_click=act_snooze15),
                 ft.TextButton("Snooze +30 мин", on_click=act_snooze30),
+                ft.TextButton("Snooze +60 мин", on_click=act_snooze60),
                 ft.TextButton("Сегодня вечером", on_click=act_evening),
-                ft.TextButton("Завтра 10:00", on_click=act_tomorrow),
+                ft.TextButton("Завтра утром", on_click=act_tomorrow),
                 ft.Divider(height=1),
                 ft.TextButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=act_delete),
             ],
@@ -1048,21 +1066,6 @@ class CalendarPage:
         self._open_dialog(dlg)
 
 
-
-    def _snooze_minutes(self, task_id: int, day: date, hour: int, duration: int, add_minutes: int):
-        base = datetime(day.year, day.month, day.day, hour, 0, 0) + timedelta(minutes=add_minutes)
-        self._reschedule(task_id, base, duration)
-
-    def _snooze_evening(self, task_id: int):
-        now = datetime.now().astimezone()
-        base = now.replace(hour=19, minute=0, second=0, microsecond=0)
-        if base < now:
-            base = base + timedelta(days=1)
-        self._reschedule(task_id, base, 30)
-
-    def _snooze_tomorrow(self, task_id: int):
-        base = (datetime.now().astimezone() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
-        self._reschedule(task_id, base, 30)
 
     def _reschedule(self, task_id: int, start_dt: datetime, duration: int):
         t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
