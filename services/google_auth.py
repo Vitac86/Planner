@@ -1,26 +1,37 @@
 # planner/services/google_auth.py
-from __future__ import annotations
-
-import json
-import os
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
+import logging
 
-from google.auth.exceptions import RefreshError
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
 from core.settings import CLIENT_SECRET_PATH, TOKEN_PATH
 
 
+LOGGER = logging.getLogger(__name__)
+
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/drive.appdata",
     "https://www.googleapis.com/auth/tasks",
-    # "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.appdata",
 ]
+
+
+def _has_all_scopes(creds: Optional[Credentials]) -> bool:
+    if not creds:
+        return False
+    current = set(creds.scopes or [])
+    return all(scope in current for scope in SCOPES)
+
+
+def _log_scopes(creds: Optional[Credentials]) -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO)
+    scopes = sorted(creds.scopes) if creds and creds.scopes else []
+    LOGGER.info("Active Google credentials scopes: %s", scopes)
 
 
 class GoogleAuth:
@@ -34,11 +45,10 @@ class GoogleAuth:
         self.secrets_path.parent.mkdir(parents=True, exist_ok=True)
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self.creds: Optional[Credentials] = None
-        self._log(f"Token path: {self.token_path}")
 
     def ensure_credentials(self) -> bool:
-        if self.creds and self.creds.valid and self._has_required_scopes(self.creds):
-            self._log_active_scopes(self.creds.scopes)
+        if self.creds and self.creds.valid and _has_all_scopes(self.creds):
+            _log_scopes(self.creds)
             return True
 
         if self.token_path.exists():
@@ -46,27 +56,20 @@ class GoogleAuth:
                 self.creds = Credentials.from_authorized_user_file(
                     str(self.token_path), SCOPES
                 )
-            except (ValueError, json.JSONDecodeError) as exc:
-                self._log(f"Failed to load token.json: {exc}; triggering reauth")
-                self.reset_credentials()
+            except Exception:
                 self.creds = None
 
-        if self.creds and not self._has_required_scopes(self.creds):
-            self._log(
-                "Token is missing required scopes; removing token and requesting consent"
-            )
-            self.reset_credentials()
+        if self.creds and not _has_all_scopes(self.creds):
+            try:
+                self.token_path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
             self.creds = None
 
         if not self.creds or not self.creds.valid:
             if self.creds and self.creds.expired and self.creds.refresh_token:
-                try:
-                    self.creds.refresh(Request())
-                except RefreshError as exc:
-                    self._log(f"Token refresh failed: {exc}; forcing reauth")
-                    self.reset_credentials()
-                    self.creds = None
-            if not self.creds:
+                self.creds.refresh(Request())
+            else:
                 if not self.secrets_path.exists():
                     raise FileNotFoundError(
                         f"Не найден {self.secrets_path}. "
@@ -75,66 +78,31 @@ class GoogleAuth:
                 flow = InstalledAppFlow.from_client_secrets_file(
                     str(self.secrets_path), SCOPES
                 )
-                self._log("Running OAuth consent flow (local server)")
+                # Откроет браузер и поднимет локальный сервер для callback
                 self.creds = flow.run_local_server(
-                    port=0,
-                    access_type="offline",
-                    prompt="consent",
-                    # ``include_granted_scopes`` must be provided as a lowercase string
-                    # value ("true"/"false") in the authorization request. Passing a
-                    # boolean leads to a ``400 invalid_request`` error from Google.
-                    include_granted_scopes="true",
+                    port=0, access_type="offline", prompt="consent"
                 )
 
-        if not self.creds:
-            raise RuntimeError("Не удалось получить учетные данные Google")
+            # Сохраняем полученный токен
+            self.token_path.parent.mkdir(parents=True, exist_ok=True)
+            self.token_path.write_text(self.creds.to_json(), encoding="utf-8")
 
-        if not self._has_required_scopes(self.creds):
-            raise RuntimeError("Авторизация без обязательных прав доступа Google")
+        if not _has_all_scopes(self.creds):
+            try:
+                self.token_path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            self.creds = None
+            return self.ensure_credentials()
 
-        self._persist_credentials(self.creds)
-        self._log_active_scopes(self.creds.scopes)
+        _log_scopes(self.creds)
         return True
 
     def get_credentials(self) -> Optional[Credentials]:
+        if not self.creds or not self.creds.valid:
+            try:
+                if not self.ensure_credentials():
+                    return None
+            except Exception:
+                return None
         return self.creds
-
-    def get_active_scopes(self) -> list[str]:
-        if not self.creds:
-            return []
-        return sorted(set(self.creds.scopes or []))
-
-    def reset_credentials(self) -> None:
-        self.creds = None
-        try:
-            if self.token_path.exists():
-                self.token_path.unlink()
-                self._log("Removed cached Google token")
-        except OSError as exc:
-            self._log(f"Failed to remove cached token: {exc}")
-
-    # ----- helpers -----
-    def _log(self, message: str) -> None:
-        print(f"[GoogleAuth] {message}")
-
-    def _persist_credentials(self, creds: Credentials) -> None:
-        data = creds.to_json()
-        tmp_path = self.token_path.with_suffix(".tmp")
-        try:
-            tmp_path.write_text(data, encoding="utf-8")
-            os.replace(tmp_path, self.token_path)
-        finally:
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
-
-    @staticmethod
-    def _has_required_scopes(creds: Credentials) -> bool:
-        current = set(creds.scopes or [])
-        return all(scope in current for scope in SCOPES)
-
-    def _log_active_scopes(self, scopes: Iterable[str] | None) -> None:
-        scopes_list = sorted(set(scopes or []))
-        self._log(f"Active scopes: {', '.join(scopes_list) if scopes_list else '—'}")

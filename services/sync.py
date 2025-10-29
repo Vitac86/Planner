@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 
+from datetime_utils import parse_rfc3339, to_rfc3339
+
 from services.tasks import TaskService
 from core.settings import GOOGLE_SYNC
 
@@ -55,17 +57,12 @@ def _parse_g_datetime(obj: dict | None) -> Optional[datetime]:
     if not obj:
         return None
     if "dateTime" in obj and obj["dateTime"]:
-        # RFC3339; делаем tz-aware
-        s = str(obj["dateTime"]).replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(s)
-        except Exception:
-            return None
+        return parse_rfc3339(str(obj["dateTime"]))
     if "date" in obj and obj["date"]:
         # all-day -> в полночь локального дня (без tz; дальше ты сам решаешь как отображать)
         try:
-            d = datetime.fromisoformat(str(obj["date"]))
-            return d  # 00:00
+            d = datetime.strptime(str(obj["date"]).strip(), "%Y-%m-%d")
+            return d
         except Exception:
             # некоторые клиенты присылают 'YYYY-MM-DD' -> отработает
             try:
@@ -109,7 +106,7 @@ class GoogleSync:
             params["syncToken"] = token
         else:
             # первичная выгрузка за последние 6 мес.
-            params["timeMin"] = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
+            params["timeMin"] = to_rfc3339(datetime.now(timezone.utc) - timedelta(days=180))
 
         while True:
             resp = self.service.events().list(**params).execute()

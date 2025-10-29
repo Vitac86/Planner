@@ -1,6 +1,7 @@
 # planner/services/tasks.py
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, date, timedelta
 from typing import Iterable, List, Optional
@@ -10,29 +11,64 @@ from sqlalchemy import and_, or_, case
 
 from storage.db import get_session
 from models.task import Task
-from core.priorities import DEFAULT_PRIORITY, normalize_priority
+from core.priorities import normalize_priority
+from utils.datetime_utils import ensure_utc, utc_now
 
 
 class TaskService:
+    _listeners = {
+        "after_create": set(),
+        "after_update": set(),
+        "after_delete": set(),
+    }
+
+    @classmethod
+    def subscribe(cls, event: str, callback):
+        if event not in cls._listeners:
+            raise ValueError(f"Unsupported event: {event}")
+        cls._listeners[event].add(callback)
+
+    @classmethod
+    def unsubscribe(cls, event: str, callback):
+        if event not in cls._listeners:
+            return
+        cls._listeners[event].discard(callback)
+
+    @classmethod
+    def _emit(cls, event: str, task_id: int):
+        listeners = list(cls._listeners.get(event, []))
+        for listener in listeners:
+            try:
+                listener(task_id)
+            except Exception:
+                pass
+
     def add(
         self,
         title: str,
         notes: Optional[str] = None,
         start: Optional[datetime] = None,
         duration_minutes: Optional[int] = None,
-        priority: int = DEFAULT_PRIORITY,
+        priority: int = 0,
+        *,
+        emit: bool = True,
     ) -> Task:
         with get_session() as s:
             t = Task(
                 title=title.strip(),
                 notes=notes or None,
-                start=start,
+                start=ensure_utc(start),
                 duration_minutes=duration_minutes or None,
                 priority=normalize_priority(priority),
             )
             s.add(t)
             s.commit()
             s.refresh(t)
+            if emit:
+                try:
+                    self._emit("after_create", t.id)
+                except Exception:
+                    pass
             return t
 
     def get(self, task_id: int) -> Optional[Task]:
@@ -48,6 +84,7 @@ class TaskService:
         start: Optional[datetime] = None,
         duration_minutes: Optional[int] = None,
         priority: Optional[int] = None,
+        emit: bool = True,
     ) -> Optional[Task]:
         with get_session() as s:
             t = s.get(Task, task_id)
@@ -58,15 +95,20 @@ class TaskService:
             if notes is not None:
                 t.notes = notes or None
             if start is not None or start is None:
-                t.start = start
+                t.start = ensure_utc(start)
             if duration_minutes is not None or duration_minutes is None:
                 t.duration_minutes = duration_minutes
             if priority is not None:
                 t.priority = normalize_priority(priority)
-            t.updated_at = datetime.utcnow()
+            t.updated_at = utc_now()
             s.add(t)
             s.commit()
             s.refresh(t)
+            if emit:
+                try:
+                    self._emit("after_update", t.id)
+                except Exception:
+                    pass
             return t
 
     def set_event_id(self, task_id: int, event_id: Optional[str]):
@@ -74,7 +116,7 @@ class TaskService:
             t = s.get(Task, task_id)
             if t:
                 t.gcal_event_id = event_id
-                t.updated_at = datetime.utcnow()
+                t.updated_at = utc_now()
                 s.add(t)
                 s.commit()
 
@@ -83,14 +125,19 @@ class TaskService:
             t = s.get(Task, task_id)
             if t:
                 t.status = status
-                t.updated_at = datetime.utcnow()
+                t.updated_at = utc_now()
                 s.add(t)
                 s.commit()
 
-    def delete(self, task_id: int):
+    def delete(self, task_id: int, *, emit: bool = True):
         with get_session() as s:
             t = s.get(Task, task_id)
             if t:
+                if emit:
+                    try:
+                        self._emit("after_delete", task_id)
+                    except Exception:
+                        pass
                 s.delete(t)
                 s.commit()
 
@@ -121,12 +168,92 @@ class TaskService:
             )
             return list(s.exec(stmt))
 
+    def list_unscheduled_updated_since(self, since: Optional[datetime]) -> Iterable[Task]:
+        with get_session() as s:
+            stmt = select(Task).where(Task.start == None)  # noqa: E711
+            if since is not None:
+                stmt = stmt.where(Task.updated_at > since)
+            stmt = stmt.where(Task.status != "done").order_by(Task.updated_at.desc())
+            return list(s.exec(stmt))
+
     def get_by_event_id(self, gcal_event_id: str | None):
         if not gcal_event_id:
             return None
         with get_session() as s:
             stmt = select(Task).where(Task.gcal_event_id == gcal_event_id)
             return s.exec(stmt).first()
+
+    def get_by_gtasks_id(self, gtasks_id: str | None):
+        if not gtasks_id:
+            return None
+        with get_session() as s:
+            stmt = select(Task).where(Task.gtasks_id == gtasks_id)
+            return s.exec(stmt).first()
+
+    def create_from_sync(
+        self,
+        *,
+        title: str,
+        notes: Optional[str] = None,
+        start: Optional[datetime] = None,
+        duration_minutes: Optional[int] = None,
+        priority: int = 0,
+        status: Optional[str] = None,
+        gcal_event_id: Optional[str] = None,
+        gcal_etag: Optional[str] = None,
+        gcal_updated: Optional[datetime] = None,
+        gtasks_id: Optional[str] = None,
+        gtasks_updated: Optional[datetime] = None,
+    ) -> Task:
+        with get_session() as s:
+            task = Task(
+                title=title.strip() or "Задача",
+                notes=notes or None,
+                start=ensure_utc(start),
+                duration_minutes=duration_minutes,
+                priority=normalize_priority(priority),
+                status=status or "todo",
+                gcal_event_id=gcal_event_id,
+                gcal_etag=gcal_etag,
+                gcal_updated=ensure_utc(gcal_updated),
+                gtasks_id=gtasks_id,
+                gtasks_updated=ensure_utc(gtasks_updated),
+            )
+            if task.start is None:
+                task.duration_minutes = None
+            s.add(task)
+            s.commit()
+            s.refresh(task)
+            return task
+
+    def update_from_sync(
+        self,
+        task_id: int,
+        *,
+        updated_at: Optional[datetime] = None,
+        **fields,
+    ) -> Optional[Task]:
+        with get_session() as s:
+            task = s.get(Task, task_id)
+            if not task:
+                return None
+            for key, value in fields.items():
+                if hasattr(task, key):
+                    if isinstance(value, datetime):
+                        setattr(task, key, ensure_utc(value))
+                    else:
+                        setattr(task, key, value)
+            if updated_at is not None:
+                task.updated_at = ensure_utc(updated_at)
+            else:
+                task.updated_at = utc_now()
+            s.add(task)
+            s.commit()
+            s.refresh(task)
+            return task
+
+    def delete_from_sync(self, task_id: int) -> None:
+        self.delete(task_id, emit=False)
 
     def unschedule(self, task_id: int):
         """Снять расписание и отвязать от Google-события (но задачу не удалять)."""
@@ -197,6 +324,58 @@ class TaskService:
             return tasks
 
         return [t for t in tasks if self._match_query(query, f"{t.title} {t.notes or ''}")]
+
+    # ---------- Metadata helpers ----------
+    def clean_notes_metadata(self) -> int:
+        """Strip JSON metadata blocks from notes. Returns number of tasks changed."""
+
+        changed = 0
+        with get_session() as s:
+            stmt = select(Task).where(Task.notes != None)  # noqa: E711
+            tasks = list(s.exec(stmt))
+            for task in tasks:
+                original = task.notes or ""
+                cleaned = self._strip_metadata(original)
+                if cleaned != original:
+                    task.notes = cleaned or None
+                    task.updated_at = datetime.utcnow()
+                    s.add(task)
+                    changed += 1
+            if changed:
+                s.commit()
+        return changed
+
+    def _strip_metadata(self, notes: str) -> str:
+        candidate = (notes or "").strip()
+        if not candidate:
+            return ""
+
+        # Fast path: JSON on a single line
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                user_note = parsed.get("note") or parsed.get("text") or parsed.get("user_notes")
+                if isinstance(user_note, str):
+                    return user_note.strip()
+                return ""
+        except Exception:
+            pass
+
+        # Remove leading JSON block if present on the first line
+        lines = notes.splitlines()
+        if lines:
+            first = lines[0].strip()
+            if first.startswith("{") and first.endswith("}"):
+                try:
+                    parsed = json.loads(first)
+                    rest = "\n".join(lines[1:]).strip()
+                    user_note = parsed.get("note") or parsed.get("text") or parsed.get("user_notes")
+                    if isinstance(user_note, str):
+                        return user_note.strip()
+                    return rest
+                except Exception:
+                    return "\n".join(lines[1:]).strip()
+        return notes
 
     # --- text helpers -------------------------------------------------
     _RE_SPACES = re.compile(r"\s+")

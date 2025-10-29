@@ -1,30 +1,20 @@
 # planner/ui/pages/today.py
 import re
-from datetime import datetime, date, time as dt_time
+from datetime import datetime, date, timedelta, time as dt_time
 import flet as ft
 
 from services.tasks import TaskService
 from core.priorities import (
-    DEFAULT_PRIORITY,
     priority_options,
     priority_label,
     priority_color,
     normalize_priority,
 )
-from core.settings import UI
-from helpers import snooze
-from helpers.datetime_utils import (
-    parse_date_input,
-    parse_time_input,
-    snap_minutes,
-)
-
-GRID_STEP = UI.calendar.grid_step_minutes
-MIN_DURATION = UI.calendar.min_block_duration_minutes
+from core.settings import UI, GOOGLE_SYNC
 
 
 class TodayPage:
-    LIST_SECTION_HEIGHT = max((UI.today.list_section_height or 0) + 100, 540)
+    LIST_SECTION_HEIGHT = UI.today.list_section_height
 
     def __init__(self, app):
         self.app = app
@@ -51,14 +41,8 @@ class TodayPage:
         self.date_picker_add = ft.DatePicker(
             first_date=date(2000, 1, 1),
             last_date=date(2100, 12, 31),
-        )
-        self.date_picker_add.on_change = lambda e: self._set_tf_date(
-            self.date_tf, e.data or e.control.value
-        )
-        self.date_picker_add.on_dismiss = (
-            lambda e, picker=self.date_picker_add: self._handle_date_picker_dismiss(
-                picker, self.date_tf, e.control.value, keep=True
-            )
+            on_change=lambda e: self._set_tf_date(self.date_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_date(self.date_tf, e.control.value),
         )
 
         # TimePicker
@@ -69,14 +53,13 @@ class TodayPage:
                 self.app.page.overlay.append(p)
 
         self.date_btn = ft.IconButton(
-            icon=ft.Icons.CALENDAR_MONTH,
-            tooltip="Календарь",
-            on_click=lambda e: self._open_date_picker(self.date_picker_add),
+            icon=ft.Icons.CALENDAR_MONTH, tooltip="Календарь",
+            on_click=lambda e: self.app.page.open(self.date_picker_add)
         )
         self.time_btn = ft.IconButton(
             icon=ft.Icons.SCHEDULE,
             tooltip="Выбрать время",
-            on_click=lambda e: self._open_time_picker(self.time_picker_add, self.time_tf, keep=True),
+            on_click=lambda e: self._open_time_picker(self.time_picker_add, self.time_tf),
         )
 
         self.dur_tf = ft.TextField(
@@ -88,7 +71,7 @@ class TodayPage:
         self.priority_dd = ft.Dropdown(
             label="Приоритет",
             width=160,
-            value=str(DEFAULT_PRIORITY),
+            value=str(0),
             options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
         )
         self.to_calendar_cb = ft.Checkbox(
@@ -177,7 +160,6 @@ class TodayPage:
     
     # --- вызов из меню/автообновления ---
     def activate_from_menu(self):
-        self._close_local_overlays()
         self.load()
 
     def load(self):
@@ -185,98 +167,17 @@ class TodayPage:
         self.refresh_lists()
 
     # ---------- Утилиты ----------
-    def _close_overlay_control(self, ctrl, *, remove: bool = True) -> bool:
-        if not ctrl:
-            return False
-        changed = False
-        try:
-            if hasattr(ctrl, "open") and getattr(ctrl, "open", False):
-                ctrl.open = False
-                changed = True
-        except Exception:
-            pass
-        try:
-            overlay = getattr(self.app.page, "overlay", None) or []
-            if remove and ctrl in overlay:
-                overlay.remove(ctrl)
-                changed = True
-        except Exception:
-            pass
-        return changed
-
-    def _close_local_overlays(self):
-        changed = False
-        if self.edit_dialog:
-            dlg = self.edit_dialog
-            self.edit_dialog = None
-            self._close_alert_dialog(dlg)
-            changed = True
-        for ctrl in (self.date_picker_add, self.time_picker_add):
-            if self._close_overlay_control(ctrl, remove=False):
-                changed = True
-        try:
-            overlays_snapshot = list(getattr(self.app.page, "overlay", None) or [])
-        except Exception:
-            overlays_snapshot = []
-        for ctrl in overlays_snapshot:
-            if isinstance(ctrl, (ft.DatePicker, ft.TimePicker)) and ctrl not in (self.date_picker_add, self.time_picker_add):
-                if self._close_overlay_control(ctrl):
-                    changed = True
-        if changed:
-            self.app.cleanup_overlays()
-
-    def _handle_date_picker_dismiss(self, picker: ft.DatePicker, tf: ft.TextField, value, *, keep: bool = False):
-        self._close_overlay_control(picker, remove=not keep)
-        self._set_tf_date(tf, value)
-        self.app.cleanup_overlays()
-
-    def _handle_time_picker_close(self, picker: ft.TimePicker, *, keep: bool = False):
-        self._close_overlay_control(picker, remove=not keep)
-        self.app.cleanup_overlays()
-
-    def _clear_errors(self):
-        for ctrl in (self.title_tf, self.date_tf, self.time_tf, self.dur_tf):
-            ctrl.error_text = None
-            ctrl.border_color = None
-
-    def _mark_error(self, ctrl: ft.TextField, message: str):
-        ctrl.error_text = message
-        ctrl.border_color = ft.Colors.RED_400
-
-    def _mark_task_dirty(self, task_id: int) -> None:
-        sync = getattr(self.app, "undated_sync", None)
-        if not sync:
-            return
-        try:
-            sync.mark_dirty(task_id)
-        except Exception as exc:
-            print("undated mark dirty error:", exc)
-
-    def _remove_undated_mapping(self, task_id: int, *, delete_remote: bool = False) -> None:
-        sync = getattr(self.app, "undated_sync", None)
-        if not sync:
-            return
-        try:
-            sync.remove_mapping(task_id, delete_remote=delete_remote)
-        except Exception as exc:
-            print("undated remove mapping error:", exc)
-
     def _new_time_picker(self) -> ft.TimePicker:
         picker = ft.TimePicker(help_text="Выберите время")
         picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
         picker.on_dismiss = lambda e, _picker=picker: self._time_picker_on_dismiss(_picker, e)
         return picker
 
-    def _open_date_picker(self, picker: ft.DatePicker):
-        if picker not in self.app.page.overlay:
-            self.app.page.overlay.append(picker)
-        self.app.page.open(picker)
-
-    def _open_time_picker(self, picker: ft.TimePicker, tf: ft.TextField, *, keep: bool = False):
+    def _open_time_picker(self, picker: ft.TimePicker, tf: ft.TextField):
         prev = tf.value
         parsed = self._parse_time_tf(tf.value)
         if parsed:
-            base_time = parsed
+            base_time = dt_time(parsed[0], parsed[1])
         else:
             now = datetime.now()
             base_time = dt_time(now.hour, now.minute)
@@ -284,18 +185,10 @@ class TodayPage:
             picker.value = base_time
         except Exception:
             pass
-        picker.data = {"tf": tf, "prev": prev, "applied": False, "keep": keep}
+        picker.data = {"tf": tf, "prev": prev, "applied": False}
         if picker not in self.app.page.overlay:
             self.app.page.overlay.append(picker)
-        try:
-            picker.open = True
-        except Exception:
-            pass
-        try:
-            picker.pick_time()
-        except Exception:
-            pass
-        self.app.page.update()
+        self.app.page.open(picker)
 
     def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
         data = picker.data or {}
@@ -311,22 +204,16 @@ class TodayPage:
     def _time_picker_on_dismiss(self, picker: ft.TimePicker, e: ft.ControlEvent):
         data = picker.data or {}
         tf = data.get("tf")
-        keep = data.get("keep", False)
         if not tf:
-            self._handle_time_picker_close(picker, keep=keep)
             picker.data = None
             return
         value = e.data
         if value:
-            self._handle_time_picker_close(picker, keep=keep)
             self._set_tf_time(tf, value)
             data["applied"] = True
         elif not data.get("applied"):
             tf.value = data.get("prev", tf.value)
-            self._handle_time_picker_close(picker, keep=keep)
             self.app.page.update()
-        else:
-            self._handle_time_picker_close(picker, keep=keep)
         picker.data = None
 
     def _set_tf_date(self, tf: ft.TextField, value):
@@ -392,64 +279,61 @@ class TodayPage:
 
 
     def _parse_date_tf(self, s: str):
-        return parse_date_input(s)
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$", s)
+        if not m:
+            return None
+        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mth, d)
+        except ValueError:
+            return None
 
     def _parse_time_tf(self, s: str):
-        return parse_time_input(s)
+        """
+        Возвращает (hour, minute) или None. Допускает секунды.
+        """
+        s = (s or "").strip()
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$", s)
+        if not m:
+            return None
+        h, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= minute <= 59:
+            return h, minute
+        return None
 
-    def _combine_dt(self, parsed_date, parsed_time):
-        if parsed_date and parsed_time:
-            result = datetime.combine(parsed_date, parsed_time)
-            if GRID_STEP > 0:
-                total_minutes = result.hour * 60 + result.minute
-                snapped = snap_minutes(total_minutes, step=GRID_STEP, direction="nearest")
-                result = result.replace(hour=(snapped // 60) % 24, minute=snapped % 60)
-            return result
-        if parsed_date:
-            return datetime.combine(parsed_date, dt_time(0, 0))
+    def _combine_dt(self, date_str: str, time_str: str):
+        d = self._parse_date_tf(date_str)
+        t = self._parse_time_tf(time_str)
+        if d and t:
+            return datetime(d.year, d.month, d.day, t[0], t[1])
+        if d and not t:
+            return datetime(d.year, d.month, d.day)  # без времени
+        if not d and t:
+            now = datetime.now()
+            cand = datetime(now.year, now.month, now.day, t[0], t[1])
+            if cand < now - timedelta(minutes=1):
+                cand += timedelta(days=1)
+            return cand
         return None
 
     # ---------- CRUD ----------
     def on_add(self, _):
-        self._clear_errors()
         title = (self.title_tf.value or "").strip()
         if not title:
-            self._mark_error(self.title_tf, "Введите название задачи")
-            self.app.page.update()
-            return
+            return self._toast("Введите название задачи")
 
-        raw_date = (self.date_tf.value or "").strip()
-        raw_time = (self.time_tf.value or "").strip()
-        raw_duration = (self.dur_tf.value or "").strip()
+        if self.date_tf.value and self._parse_date_tf(self.date_tf.value) is None:
+            return self._toast("Неверный формат даты. Пример: 10.10.2025")
+        if self.time_tf.value and self._parse_time_tf(self.time_tf.value) is None:
+            return self._toast("Неверный формат времени. Пример: 09:30")
 
-        parsed_date = parse_date_input(raw_date) if raw_date else None
-        if raw_date and not parsed_date:
-            self._mark_error(self.date_tf, "Неверная дата. Пример: 10.10.2025")
-            self.app.page.update()
-            return
+        start_dt = self._combine_dt(self.date_tf.value, self.time_tf.value)
 
-        parsed_time = parse_time_input(raw_time) if raw_time else None
-        if raw_time and not parsed_time:
-            self._mark_error(self.time_tf, "Неверное время. Пример: 09:30")
-            self.app.page.update()
-            return
-
-        start_dt = self._combine_dt(parsed_date, parsed_time)
-        duration = None
-
-        if start_dt is not None:
-            if raw_duration:
-                try:
-                    duration = int(raw_duration)
-                except (TypeError, ValueError):
-                    self._mark_error(self.dur_tf, "Введите длительность в минутах")
-                    self.app.page.update()
-                    return
-            else:
-                duration = UI.today.default_duration_minutes
-
-            duration = max(duration or MIN_DURATION, MIN_DURATION)
-            duration = snap_minutes(duration, step=GRID_STEP, direction="nearest")
+        try:
+            duration = int(self.dur_tf.value) if self.dur_tf.value else None
+        except ValueError:
+            return self._toast("Длительность должна быть числом (мин)")
 
         priority = normalize_priority(self.priority_dd.value)
 
@@ -459,70 +343,34 @@ class TodayPage:
             duration_minutes=duration,
             priority=priority,
         )
-        if start_dt is None:
-            self._mark_task_dirty(task.id)
 
         msg = "Задача добавлена"
-        if self.to_calendar_cb.value and start_dt and duration:
-            try:
-                ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
-                self.svc.set_event_id(task.id, ev["id"])
-                msg = "Задача добавлена и запланирована в Google"
-            except Exception as e:
-                print("Google create event error:", e)
-                self.app.notify_google_unavailable(e)
-                msg = f"Создана локально, Google недоступен: {e}"
 
         self.title_tf.value = ""
         self.date_tf.value = ""
         self.time_tf.value = ""
-        self.dur_tf.value = str(UI.today.default_duration_minutes)
-        self.priority_dd.value = str(DEFAULT_PRIORITY)
+        self.dur_tf.value = "30"
+        self.priority_dd.value = str(priority)
         self.refresh_lists()
+        if GOOGLE_SYNC.auto_push_on_edit:
+            self.app.push_tasks_to_google()
         self._toast(msg)
 
     def on_toggle_done(self, task_id: int, checked: bool):
         self.svc.set_status(task_id, "done" if checked else "todo")
-        task = self.svc.get(task_id)
-        if task and task.start is None:
-            self._mark_task_dirty(task.id)
         self.refresh_lists()
+        if GOOGLE_SYNC.auto_push_on_edit:
+            self.app.push_tasks_to_google()
 
-    def on_delete(self, task_id: int, gcal_event_id: str | None):
-        if gcal_event_id:
-            try:
-                self.app.gcal.delete_event_by_id(gcal_event_id)
-            except Exception as ex:
-                print("Google delete event error:", ex)
-                self.app.notify_google_unavailable(ex)
-        self._remove_undated_mapping(task_id)
+    def on_delete(self, task_id: int):
         self.svc.delete(task_id)
         self.refresh_lists()
+        if GOOGLE_SYNC.auto_push_on_edit:
+            self.app.push_tasks_to_google()
         self._toast("Задача удалена")
 
     def on_edit_click(self, e: ft.ControlEvent):
         self.open_edit_dialog(int(e.control.data))
-
-    def _apply_snooze(self, task_id: int, preset, toast_message: str):
-        task = self.svc.get(task_id)
-        if not task:
-            return self._toast("Задача не найдена")
-        result = preset(task)
-        updated = self.svc.update(task_id, start=result.start, duration_minutes=result.duration_minutes)
-        if updated and getattr(updated, "gcal_event_id", None):
-            try:
-                self.app.gcal.update_event_for_task(
-                    updated.gcal_event_id,
-                    updated,
-                    result.start,
-                    result.duration_minutes,
-                )
-            except Exception as ex:
-                print("Google update event error:", ex)
-                self.app.notify_google_unavailable(ex)
-                self._toast(f"Google недоступен: {ex}")
-        self.refresh_lists()
-        self._toast(toast_message)
 
     # ---------- Рендер ----------
     def refresh_lists(self):
@@ -609,18 +457,6 @@ class TodayPage:
 
         actions = ft.Row(
             controls=[
-                ft.PopupMenuButton(
-                    icon=ft.Icons.SNOOZE,
-                    tooltip="Snooze",
-                    items=[
-                        ft.PopupMenuItem("Snooze +15 мин", on_click=lambda e, tid=t.id: self._apply_snooze(tid, lambda task: snooze.minutes(task, 15), "Перенесено на +15 мин")),
-                        ft.PopupMenuItem("Snooze +30 мин", on_click=lambda e, tid=t.id: self._apply_snooze(tid, lambda task: snooze.minutes(task, 30), "Перенесено на +30 мин")),
-                        ft.PopupMenuItem("Snooze +60 мин", on_click=lambda e, tid=t.id: self._apply_snooze(tid, lambda task: snooze.minutes(task, 60), "Перенесено на +60 мин")),
-                        ft.PopupMenuItem(text="—", disabled=True),
-                        ft.PopupMenuItem("Сегодня вечером", on_click=lambda e, tid=t.id: self._apply_snooze(tid, snooze.tonight, "Перенесено на вечер")),
-                        ft.PopupMenuItem("Завтра утром", on_click=lambda e, tid=t.id: self._apply_snooze(tid, snooze.tomorrow_morning, "Перенесено на завтра утром")),
-                    ],
-                ),
                 ft.IconButton(
                     icon=ft.Icons.EDIT_OUTLINED,
                     tooltip="Редактировать",
@@ -631,7 +467,7 @@ class TodayPage:
                 ft.IconButton(
                     icon=ft.Icons.DELETE_OUTLINE,
                     tooltip="Удалить",
-                    on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev),
+                    on_click=lambda e, tid=t.id: self.on_delete(tid),
                     style=ft.ButtonStyle(padding=ft.padding.all(8)),
                 ),
             ],
@@ -673,9 +509,9 @@ class TodayPage:
         dp = ft.DatePicker(
             first_date=date(2000, 1, 1),
             last_date=date(2100, 12, 31),
+            on_change=lambda e: self._set_tf_date(date_tf, e.data or e.control.value),
+            on_dismiss=lambda e: self._set_tf_date(date_tf, e.control.value),
         )
-        dp.on_change = lambda e: self._set_tf_date(date_tf, e.data or e.control.value)
-        dp.on_dismiss = lambda e, picker=dp: self._handle_date_picker_dismiss(picker, date_tf, e.control.value)
         tp = self._new_time_picker()
         for p in (dp, tp):
             if p not in self.app.page.overlay:
@@ -684,7 +520,7 @@ class TodayPage:
         date_btn = ft.IconButton(
             icon=ft.Icons.CALENDAR_MONTH,
             tooltip="Календарь",
-            on_click=lambda e, _dp=dp: self._open_date_picker(_dp),
+            on_click=lambda e, _dp=dp: self.app.page.open(_dp),
         )
         time_btn = ft.IconButton(
             icon=ft.Icons.SCHEDULE,
@@ -732,19 +568,14 @@ class TodayPage:
             new_title = (title_tf.value or "").strip()
             if not new_title:
                 return self._toast("Введите название")
-            date_val_input = (date_tf.value or "").strip()
-            parsed_date_edit = self._parse_date_tf(date_val_input) if date_val_input else None
-            if date_val_input and parsed_date_edit is None:
+            if date_tf.value and self._parse_date_tf(date_tf.value) is None:
                 return self._toast("Неверный формат даты. Пример: 10.10.2025")
-            time_val_input = (time_tf.value or "").strip()
-            parsed_time_edit = self._parse_time_tf(time_val_input) if time_val_input else None
-            if time_val_input and parsed_time_edit is None:
+            if time_tf.value and self._parse_time_tf(time_tf.value) is None:
                 return self._toast("Неверный формат времени. Пример: 09:30")
 
-            new_start = self._combine_dt(parsed_date_edit, parsed_time_edit)
+            new_start = self._combine_dt(date_tf.value, time_tf.value)
             try:
-                dur_val = (dur_tf.value or "").strip()
-                new_dur = int(dur_val) if dur_val else None
+                new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
             except ValueError:
                 return self._toast("Длительность должна быть числом (мин)")
 
@@ -756,42 +587,12 @@ class TodayPage:
                 duration_minutes=new_dur,
                 priority=normalize_priority(priority_dd.value),
             )
-            if updated:
-                if updated.start is None:
-                    self._mark_task_dirty(updated.id)
-                else:
-                    self._remove_undated_mapping(updated.id, delete_remote=True)
-
-            # gcal-sync
-            if new_start is not None and new_dur is not None:
-                if updated.gcal_event_id:
-                    try:
-                        self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
-                    except Exception as e:
-                        print("Google update event error:", e)
-                        self.app.notify_google_unavailable(e)
-                        self._toast(f"Google: не удалось обновить: {e}")
-                else:
-                    try:
-                        ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
-                        self.svc.set_event_id(task_id, ev["id"])
-                    except Exception as e:
-                        print("Google create event error:", e)
-                        self.app.notify_google_unavailable(e)
-                        self._toast(f"Google: не удалось создать: {e}")
-            else:
-                if updated.gcal_event_id:
-                    try:
-                        self.app.gcal.delete_event_by_id(updated.gcal_event_id)
-                    except Exception as e:
-                        print("Google delete event error:", e)
-                        self.app.notify_google_unavailable(e)
-                    finally:
-                        self.svc.set_event_id(task_id, None)
 
             _remove_pickers()
             _finalize_dialog()
             self.refresh_lists()
+            if GOOGLE_SYNC.auto_push_on_edit:
+                self.app.push_tasks_to_google()
             self._toast("Сохранено")
 
         def on_cancel(_=None):
