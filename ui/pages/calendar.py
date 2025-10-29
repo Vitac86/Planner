@@ -1144,7 +1144,15 @@ class CalendarPage:
         picker.data = {"tf": tf, "prev": prev, "applied": False}
         if picker not in self.app.page.overlay:
             self.app.page.overlay.append(picker)
-        self.app.page.open(picker)
+        try:
+            picker.open = True
+        except Exception:
+            pass
+        try:
+            picker.pick_time()
+        except Exception:
+            pass
+        self.app.page.update()
 
     def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
         data = picker.data or {}
