@@ -10,10 +10,11 @@ from core.priorities import (
     priority_color,
     normalize_priority,
 )
+from core.settings import UI
 
 
 class TodayPage:
-    LIST_SECTION_HEIGHT = 240
+    LIST_SECTION_HEIGHT = UI.today.list_section_height
 
     def __init__(self, app):
         self.app = app
@@ -61,14 +62,22 @@ class TodayPage:
             on_click=lambda e: self._open_time_picker(self.time_picker_add, self.time_tf),
         )
 
-        self.dur_tf = ft.TextField(label="Длительность, мин", value="30", width=160, prefix=ft.Icon(ft.Icons.TIMER))
+        self.dur_tf = ft.TextField(
+            label="Длительность, мин",
+            value=str(UI.today.default_duration_minutes),
+            width=160,
+            prefix=ft.Icon(ft.Icons.TIMER),
+        )
         self.priority_dd = ft.Dropdown(
             label="Приоритет",
             width=160,
             value=str(0),
             options=[ft.dropdown.Option(key, label) for key, label in priority_options().items()],
         )
-        self.to_calendar_cb = ft.Checkbox(label="Сразу в календарь", value=True)
+        self.to_calendar_cb = ft.Checkbox(
+            label="Сразу в календарь",
+            value=UI.today.add_to_calendar_by_default,
+        )
         self.add_btn = ft.FilledButton("Добавить", icon=ft.Icons.ADD, on_click=self.on_add)
 
         quick_add = ft.Card(

@@ -15,41 +15,47 @@ from core.priorities import (
     priority_bgcolor,
     normalize_priority,
 )
+from core.settings import UI
 
 # ===== настройки =====
-DAY_START = 0
-DAY_END   = 23
+CAL_UI = UI.calendar
+THEME = UI.theme
 
-ROW_MIN_H        = 36          # минимальная высота строки часа
-DAY_COL_W        = 160
-HOURS_COL_W      = 76
-SIDE_PANEL_W     = 240
-HEADER_H         = 54
+DAY_START = CAL_UI.day_start
+DAY_END = CAL_UI.day_end
 
-CHIP_EST_H       = 26          # ожидаемая высота «чипа»
-CELL_VPAD        = 8
-CHIPS_SPACING    = 4
+ROW_MIN_H = CAL_UI.row_min_height  # минимальная высота строки часа
+DAY_COL_W = CAL_UI.day_column_width
+HOURS_COL_W = CAL_UI.hours_column_width
+SIDE_PANEL_W = CAL_UI.side_panel_width
+HEADER_H = CAL_UI.header_height
 
-IMPORT_NEW_GCAL = True
+CHIP_EST_H = CAL_UI.chip_estimated_height  # ожидаемая высота «чипа»
+CELL_VPAD = CAL_UI.cell_vertical_padding
+CHIPS_SPACING = CAL_UI.chips_spacing
 
-DIALOG_WIDTH_NARROW = 460
-DIALOG_WIDTH_WIDE   = 680
+IMPORT_NEW_GCAL = CAL_UI.import_new_from_google
 
-def _c(name: str, default: str):
+DIALOG_WIDTH_NARROW = CAL_UI.dialog_width_narrow
+DIALOG_WIDTH_WIDE = CAL_UI.dialog_width_wide
+
+
+def _color(value: str, fallback: str = "") -> str:
     try:
-        return getattr(ft.Colors, name)
+        return getattr(ft.Colors, value)
     except Exception:
-        return default
+        return value or fallback
 
-CLR_OUTLINE  = _c("OUTLINE_VARIANT",    "#E5E7EB")
-CLR_SURFVAR  = _c("SURFACE_VARIANT",    "#F1F5F9")
-CLR_TEXTSUB  = _c("ON_SURFACE_VARIANT", "#6B7280")
-CLR_TODAY_BG = "#EEF2FF"
-CLR_NOW_LINE = "#EF4444"
-CLR_CHIP     = "#E0E7FF"
-CLR_CHIP_TXT = "#1F2937"
-CLR_UNS_BG   = "#FFF59D"
-CLR_BACKDROP = "#000000"  # для клика-вне
+
+CLR_OUTLINE = _color(THEME.outline, "#E5E7EB")
+CLR_SURFVAR = _color(THEME.surface_variant, "#F1F5F9")
+CLR_TEXTSUB = _color(THEME.text_subtle, "#6B7280")
+CLR_TODAY_BG = THEME.today_bg
+CLR_NOW_LINE = THEME.now_line
+CLR_CHIP = THEME.chip
+CLR_CHIP_TXT = THEME.chip_text
+CLR_UNS_BG = THEME.unscheduled_bg
+CLR_BACKDROP = THEME.backdrop  # для клика-вне
 
 NOW_ANCHOR_KEY = "now-anchor"
 
