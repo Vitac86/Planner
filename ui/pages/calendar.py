@@ -220,8 +220,9 @@ class CalendarPage:
         if getattr(t, "gcal_event_id", None):
             try:
                 self.app.gcal.delete_event_by_id(t.gcal_event_id)
-            except Exception:
-                pass
+            except Exception as ex:
+                print("Google delete event error:", ex)
+                self.app.notify_google_unavailable(ex)
         self.svc.delete(task_id)
         self.load()
         self._toast("Удалено")
@@ -796,6 +797,8 @@ class CalendarPage:
                     ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
                     self.svc.set_event_id(task_id, ev["id"])
             except Exception as ex:
+                print("Google calendar save error:", ex)
+                self.app.notify_google_unavailable(ex)
                 self._toast(f"Google недоступен: {ex}")
 
             self._close_dialog(dlg)
@@ -854,6 +857,8 @@ class CalendarPage:
                 self.svc.set_event_id(task.id, ev["id"])
                 self._toast("Создано и в календаре")
             except Exception as ex:
+                print("Google create event error:", ex)
+                self.app.notify_google_unavailable(ex)
                 self._toast(f"Создано локально (Google недоступен): {ex}")
 
             self._close_dialog(dlg)
@@ -1008,18 +1013,25 @@ class CalendarPage:
                     try:
                         self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
                     except Exception as e:
+                        print("Google update event error:", e)
+                        self.app.notify_google_unavailable(e)
                         self._toast(f"Google: не удалось обновить: {e}")
                 else:
                     try:
                         ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
                         self.svc.set_event_id(task_id, ev["id"])
                     except Exception as e:
+                        print("Google create event error:", e)
+                        self.app.notify_google_unavailable(e)
                         self._toast(f"Google: не удалось создать: {e}")
             else:
                 # если дата/время/длительность очищены — удаляем привязанное событие
                 if updated.gcal_event_id:
                     try:
                         self.app.gcal.delete_event_by_id(updated.gcal_event_id)
+                    except Exception as e:
+                        print("Google delete event error:", e)
+                        self.app.notify_google_unavailable(e)
                     finally:
                         self.svc.set_event_id(task_id, None)
 
@@ -1076,6 +1088,8 @@ class CalendarPage:
                 ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
                 self.svc.set_event_id(task_id, ev["id"])
         except Exception as ex:
+            print("Google calendar save error:", ex)
+            self.app.notify_google_unavailable(ex)
             self._toast(f"Google недоступен: {ex}")
         self.load()
 
