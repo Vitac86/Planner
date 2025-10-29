@@ -6,12 +6,14 @@ from typing import Any, Dict, List, Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from core.settings import GOOGLE_SYNC
+
 try:
     from google.oauth2.credentials import Credentials
 except Exception:
     Credentials = None
 
-DEFAULT_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DEFAULT_SCOPES = list(GOOGLE_SYNC.scopes)
 
 # ---------- время в RFC3339 ----------
 def _ensure_tz(dt: datetime) -> datetime:

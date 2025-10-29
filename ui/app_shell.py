@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import flet as ft
 
+from core.settings import UI, GOOGLE_SYNC
+
 # страницы
 from .pages.today import TodayPage
 from .pages.calendar import CalendarPage
@@ -13,12 +15,9 @@ from .pages.history import HistoryPage
 # Google
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
-from googleapiclient.discovery import build
 
 # Pull-синхронизация Google -> локально
 from services.sync import GoogleSync, JsonTokenStore
-
-SAFE_SURFACE_BG = "#F1F5F9"  # вместо ft.Colors.SURFACE_VARIANT (его нет в 0.28.3)
 
 
 class AppShell:
@@ -26,7 +25,7 @@ class AppShell:
         self.page = page
 
         # базовые настройки окна
-        self.page.title = "Planner"
+        self.page.title = UI.app_title
         self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
         self.page.vertical_alignment = ft.MainAxisAlignment.START
 
@@ -79,7 +78,7 @@ class AppShell:
         # корневой лэйаут
         self.root = ft.Row(
             controls=[
-                ft.Container(self.nav, width=88, bgcolor=SAFE_SURFACE_BG),
+                ft.Container(self.nav, width=88, bgcolor=UI.theme.safe_surface_bg),
                 ft.VerticalDivider(width=1),
                 self.content,
             ],
@@ -153,10 +152,17 @@ class AppShell:
             print("Google pull sync error:", e)
             return False
 
-    def _start_auto_refresh(self, view_name: str, refresh_fn, period_sec: int = 60):
+    def _start_auto_refresh(
+        self, view_name: str, refresh_fn, period_sec: int | None = None
+    ):
         """Периодически дергаем pull + refresh_fn, пока активен указанный view."""
+        if not GOOGLE_SYNC.enabled or not UI.auto_refresh.enabled:
+            refresh_fn()
+            return
         self._stop_auto_refresh()
         self._active_view = view_name
+
+        interval = period_sec or GOOGLE_SYNC.auto_pull_interval_sec or UI.auto_refresh.interval_sec
 
         async def _loop():
             # первый прогон — сразу: подтянуть изменения и перерисовать
@@ -167,7 +173,7 @@ class AppShell:
                 print("auto refresh (initial):", e)
 
             while self._active_view == view_name:
-                await asyncio.sleep(period_sec)
+                await asyncio.sleep(interval)
                 if self._active_view != view_name:
                     break
                 if self._has_open_overlay():
