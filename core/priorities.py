@@ -7,32 +7,32 @@ from typing import Dict
 # 0 — default/no priority, 1 — low, 2 — medium, 3 — high.
 PRIORITY_META: Dict[int, Dict[str, str]] = {
     0: {
-        "label": "Без приоритета",
+        "label": "Без",
         "short": "Без",
         "color": "#64748B",    # slate-500
         "bgcolor": "#E2E8F0",  # slate-200
     },
     1: {
-        "label": "Низкий приоритет",
+        "label": "Низкий",
         "short": "Низкий",
         "color": "#0EA5E9",    # sky-500
         "bgcolor": "#E0F2FE",  # sky-100
     },
     2: {
-        "label": "Средний приоритет",
+        "label": "Средний",
         "short": "Средний",
         "color": "#F59E0B",    # amber-500
         "bgcolor": "#FEF3C7",  # amber-100
     },
     3: {
-        "label": "Высокий приоритет",
+        "label": "Высокий",
         "short": "Высокий",
         "color": "#EF4444",    # red-500
         "bgcolor": "#FEE2E2",  # red-100
     },
 }
 
-DEFAULT_PRIORITY = 0
+DEFAULT_PRIORITY = 1
 
 
 def normalize_priority(value: int | str | None) -> int:

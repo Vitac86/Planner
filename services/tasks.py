@@ -10,7 +10,7 @@ from sqlalchemy import and_, or_, case
 
 from storage.db import get_session
 from models.task import Task
-from core.priorities import normalize_priority
+from core.priorities import DEFAULT_PRIORITY, normalize_priority
 
 
 class TaskService:
@@ -20,7 +20,7 @@ class TaskService:
         notes: Optional[str] = None,
         start: Optional[datetime] = None,
         duration_minutes: Optional[int] = None,
-        priority: int = 0,
+        priority: int = DEFAULT_PRIORITY,
     ) -> Task:
         with get_session() as s:
             t = Task(
