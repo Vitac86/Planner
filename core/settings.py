@@ -133,6 +133,7 @@ class GoogleSyncSettings:
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/tasks",
     )
     sync_token_path: Path = SYNC_TOKEN_PATH
     delete_on_google_cancel: bool = False
