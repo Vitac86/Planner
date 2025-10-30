@@ -18,6 +18,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive.appdata",
+    "https://www.googleapis.com/auth/tasks",
     # "https://www.googleapis.com/auth/drive.file",
 ]
 
