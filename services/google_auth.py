@@ -79,7 +79,10 @@ class GoogleAuth:
                     port=0,
                     access_type="offline",
                     prompt="consent",
-                    include_granted_scopes=True,
+                    # ``include_granted_scopes`` must be provided as a lowercase string
+                    # value ("true"/"false") in the authorization request. Passing a
+                    # boolean leads to a ``400 invalid_request`` error from Google.
+                    include_granted_scopes="true",
                 )
 
         if not self.creds:
