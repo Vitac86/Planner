@@ -243,6 +243,24 @@ class TodayPage:
         ctrl.error_text = message
         ctrl.border_color = ft.Colors.RED_400
 
+    def _mark_task_dirty(self, task_id: int) -> None:
+        sync = getattr(self.app, "undated_sync", None)
+        if not sync:
+            return
+        try:
+            sync.mark_dirty(task_id)
+        except Exception as exc:
+            print("undated mark dirty error:", exc)
+
+    def _remove_undated_mapping(self, task_id: int, *, delete_remote: bool = False) -> None:
+        sync = getattr(self.app, "undated_sync", None)
+        if not sync:
+            return
+        try:
+            sync.remove_mapping(task_id, delete_remote=delete_remote)
+        except Exception as exc:
+            print("undated remove mapping error:", exc)
+
     def _new_time_picker(self) -> ft.TimePicker:
         picker = ft.TimePicker(help_text="Выберите время")
         picker.on_change = lambda e, _picker=picker: self._time_picker_on_change(_picker, e)
@@ -441,6 +459,8 @@ class TodayPage:
             duration_minutes=duration,
             priority=priority,
         )
+        if start_dt is None:
+            self._mark_task_dirty(task.id)
 
         msg = "Задача добавлена"
         if self.to_calendar_cb.value and start_dt and duration:
@@ -463,6 +483,9 @@ class TodayPage:
 
     def on_toggle_done(self, task_id: int, checked: bool):
         self.svc.set_status(task_id, "done" if checked else "todo")
+        task = self.svc.get(task_id)
+        if task and task.start is None:
+            self._mark_task_dirty(task.id)
         self.refresh_lists()
 
     def on_delete(self, task_id: int, gcal_event_id: str | None):
@@ -472,6 +495,7 @@ class TodayPage:
             except Exception as ex:
                 print("Google delete event error:", ex)
                 self.app.notify_google_unavailable(ex)
+        self._remove_undated_mapping(task_id)
         self.svc.delete(task_id)
         self.refresh_lists()
         self._toast("Задача удалена")
@@ -732,6 +756,11 @@ class TodayPage:
                 duration_minutes=new_dur,
                 priority=normalize_priority(priority_dd.value),
             )
+            if updated:
+                if updated.start is None:
+                    self._mark_task_dirty(updated.id)
+                else:
+                    self._remove_undated_mapping(updated.id, delete_remote=True)
 
             # gcal-sync
             if new_start is not None and new_dur is not None:
