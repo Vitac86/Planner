@@ -15,6 +15,7 @@ from .pages.history import HistoryPage
 # Google
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
+from services.google_tasks import GoogleTasksSync
 
 # Pull-синхронизация Google -> локально
 from services.sync import GoogleSync, JsonTokenStore
@@ -33,6 +34,7 @@ class AppShell:
         # при необходимости можно передать пути: GoogleAuth(secrets_path=..., token_path=...)
         self.auth = GoogleAuth()
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
+        self.tasks_sync = GoogleTasksSync(self.auth)
 
         # --- страницы ---
         self._today = TodayPage(self)
@@ -147,10 +149,26 @@ class AppShell:
             if not self.gcal or not getattr(self.gcal, "service", None) or not getattr(self.gcal, "calendar_id", None):
                 return False
             sync = GoogleSync(self.gcal.service, self.gcal.calendar_id, JsonTokenStore())
-            return sync.pull()
+            changed = sync.pull()
         except Exception as e:
             print("Google pull sync error:", e)
-            return False
+            changed = False
+
+        try:
+            changed_tasks = self.tasks_sync.pull()
+            changed = changed or changed_tasks
+        except Exception as e:
+            print("Google Tasks pull error:", e)
+
+        return changed
+
+    def _push_to_google(self):
+        if not GOOGLE_SYNC.enabled:
+            return
+        try:
+            self.tasks_sync.push()
+        except Exception as e:
+            print("Google Tasks push error:", e)
 
     def _start_auto_refresh(
         self, view_name: str, refresh_fn, period_sec: int | None = None
@@ -169,6 +187,7 @@ class AppShell:
             try:
                 self._pull_from_google()
                 refresh_fn()
+                self._push_to_google()
             except Exception as e:
                 print("auto refresh (initial):", e)
 
@@ -181,6 +200,7 @@ class AppShell:
                 try:
                     self._pull_from_google()
                     refresh_fn()
+                    self._push_to_google()
                 except Exception as e:
                     print("auto refresh:", e)
 
@@ -247,7 +267,47 @@ class AppShell:
         if self._has_open_overlay():
             return
         self._pull_from_google()
+        self._push_to_google()
         if self._active_view == "calendar":
             self._calendar.load()
         elif self._active_view == "today":
             self._today.load()
+
+    # ---------- публичные утилиты для страниц ----------
+    def connect_google_services(self) -> bool:
+        try:
+            self.auth.ensure_credentials()
+            self.gcal.connect()
+            self.tasks_sync.connect()
+            return True
+        except Exception as exc:
+            print("Google connect error:", exc)
+            raise
+
+    def push_tasks_to_google(self, *, force: bool = False):
+        if not GOOGLE_SYNC.enabled:
+            return
+        try:
+            self.tasks_sync.push(force_all=force)
+        except Exception as exc:
+            print("Google Tasks push (manual) error:", exc)
+
+    def full_resync_google_tasks(self):
+        try:
+            self.tasks_sync.full_resync()
+        except Exception as exc:
+            print("Google Tasks full resync error:", exc)
+            raise
+
+    def cleanup_task_notes(self) -> int:
+        try:
+            return self.tasks_sync.cleanup_notes_metadata()
+        except Exception as exc:
+            print("Google Tasks cleanup error:", exc)
+            raise
+
+    def tasks_sync_status(self) -> str:
+        meta = self.tasks_sync.store.get_meta()
+        if not meta.tasklist_id:
+            return "Google Tasks: не выбрано"
+        return f"Google Tasks: список {meta.tasklist_id}"

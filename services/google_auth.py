@@ -51,3 +51,12 @@ class GoogleAuth:
             self.token_path.write_text(self.creds.to_json(), encoding="utf-8")
 
         return True
+
+    def get_credentials(self) -> Optional[Credentials]:
+        if not self.creds or not self.creds.valid:
+            try:
+                if not self.ensure_credentials():
+                    return None
+            except Exception:
+                return None
+        return self.creds
