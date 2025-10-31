@@ -84,7 +84,7 @@ class CalendarUISettings:
 
 @dataclass(frozen=True)
 class TodayUISettings:
-    list_section_height: int = 240
+    list_section_height: int = 340
     default_duration_minutes: int = 30
     add_to_calendar_by_default: bool = True
 
