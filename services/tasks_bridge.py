@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from core.settings import GOOGLE_SYNC
+from storage.store import MetadataStore
 
 try:  # pragma: no cover - optional dependency when running tests without Google SDK
     from google.oauth2.credentials import Credentials
@@ -78,39 +79,71 @@ def _build_service(creds: Any):
 
 
 def _metadata_from_task(local_task: Dict[str, Any]) -> Dict[str, Any]:
-    meta = {
-        "task_id": local_task.get("task_id"),
-        "priority": local_task.get("priority"),
-        "status": local_task.get("status"),
-        "updated_at": _ensure_datetime(local_task.get("updated_at")),
-        "device_id": local_task.get("device_id"),
-    }
+    meta = {}
+    provided = local_task.get("meta")
+    if isinstance(provided, dict):
+        meta.update(provided)
+    for key in ("task_id", "priority", "status", "updated_at", "device_id"):
+        if key in meta:
+            continue
+        value = local_task.get(key)
+        if key == "updated_at":
+            value = _ensure_datetime(value)
+        meta[key] = value
     # remove empty values to reduce payload noise
-    return {k: v for k, v in meta.items() if v is not None and v != ""}
+    cleaned: Dict[str, Any] = {}
+    for key, value in meta.items():
+        if value is None or value == "":
+            continue
+        if key == "task_id":
+            cleaned[key] = str(value)
+        else:
+            cleaned[key] = value
+    return cleaned
 
 
-def _compose_notes(meta: Dict[str, Any], notes: Optional[str]) -> str:
-    payload = json.dumps(meta, ensure_ascii=False, sort_keys=True)
-    body = (notes or "").strip()
-    if body:
-        return f"{payload}\n\n{body}"
-    return payload
-
-
-def _split_notes(raw_notes: Optional[str]) -> Tuple[Dict[str, Any], str]:
+def _split_notes(raw_notes: Optional[str]) -> Tuple[Dict[str, Any], str, bool]:
     if not raw_notes:
-        return {}, ""
-    stripped = raw_notes.lstrip()
-    first_line, remainder = (stripped, "")
-    if "\n" in stripped:
-        first_line, remainder = stripped.split("\n", 1)
+        return {}, "", False
+
+    original = raw_notes or ""
+    stripped = original.lstrip()
+    leading = original[: len(original) - len(stripped)]
+    decoder = json.JSONDecoder()
     try:
-        parsed = json.loads(first_line.strip())
+        parsed, offset = decoder.raw_decode(stripped)
         if isinstance(parsed, dict):
-            return parsed, remainder.lstrip("\n")
+            remainder = stripped[offset:]
+            cleaned = (leading + remainder).lstrip("\r\n")
+            return parsed, cleaned.strip(), True
     except json.JSONDecodeError:
         pass
-    return {}, raw_notes
+
+    if "\"task_id\"" in original:
+        try:
+            start = original.index("{")
+            end = original.rindex("}") + 1
+            parsed = json.loads(original[start:end])
+            if isinstance(parsed, dict):
+                cleaned = (original[:start] + original[end:]).lstrip("\r\n")
+                return parsed, cleaned.strip(), True
+        except (ValueError, json.JSONDecodeError):
+            pass
+
+    return {}, original.strip(), False
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
 
 
 def _status_payload(local_task: Dict[str, Any]) -> Tuple[str, Optional[str]]:
@@ -124,9 +157,10 @@ def _status_payload(local_task: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 class GoogleTasksBridge:
     """Lightweight wrapper over Google Tasks API with retry/backoff."""
 
-    def __init__(self, auth: Any):
+    def __init__(self, auth: Any, *, metadata_store: MetadataStore | None = None):
         self.auth = auth
         self.service = None
+        self.metadata_store = metadata_store or MetadataStore()
         self._maybe_build_service()
 
     @property
@@ -172,12 +206,37 @@ class GoogleTasksBridge:
             for item in response.get("items", []):
                 if item.get("deleted"):
                     continue
-                meta, body = _split_notes(item.get("notes"))
+                raw_notes = item.get("notes") or ""
+                meta_from_notes, body, had_meta = _split_notes(raw_notes)
+                stored_meta = (
+                    self.metadata_store.load_task_meta(item.get("id"), tasklist_id)
+                    if self.metadata_store and item.get("id")
+                    else {}
+                )
+                merged_meta = {**meta_from_notes, **stored_meta}
+                timestamp = _parse_timestamp(item.get("updated"))
+                if self.metadata_store and item.get("id"):
+                    if merged_meta:
+                        self.metadata_store.save_task_meta(
+                            item.get("id"), tasklist_id, merged_meta, timestamp
+                        )
+                    else:
+                        self.metadata_store.delete_task_meta(item.get("id"), tasklist_id)
+                if had_meta and raw_notes.strip() != body:
+                    try:
+                        self._call_with_backoff(
+                            self.service.tasks().patch,
+                            tasklist=tasklist_id,
+                            task=item.get("id"),
+                            body={"notes": body},
+                        )
+                    except Exception:
+                        pass
                 info = {
                     "id": item.get("id"),
                     "title": item.get("title") or "",
                     "notes": body,
-                    "metadata": meta,
+                    "metadata": merged_meta,
                     "updated": item.get("updated"),
                     "status": item.get("status"),
                     "raw": item,
@@ -209,7 +268,7 @@ class GoogleTasksBridge:
                 gtask_id = existing.get("id")
 
         metadata = _metadata_from_task(local_task)
-        notes = _compose_notes(metadata, local_task.get("notes"))
+        notes = (local_task.get("notes") or "").strip()
         status, completed_ts = _status_payload(local_task)
         payload = {
             "title": local_task.get("title") or "",
@@ -236,7 +295,11 @@ class GoogleTasksBridge:
                 tasklist=tasklist_id,
                 body=payload,
             )
-        return response.get("id")
+
+        remote_id = response.get("id")
+        if self.metadata_store and remote_id:
+            self.metadata_store.save_task_meta(remote_id, tasklist_id, metadata)
+        return remote_id
 
     def delete_task(self, tasklist_id: str, gtask_id: str) -> None:
         if not gtask_id:
@@ -253,6 +316,11 @@ class GoogleTasksBridge:
             if status == 404:
                 return
             raise
+        if self.metadata_store:
+            try:
+                self.metadata_store.delete_task_meta(gtask_id, tasklist_id)
+            except Exception:
+                pass
 
     # ----- internal helpers -----
     def _maybe_build_service(self, strict: bool = False) -> None:

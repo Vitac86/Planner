@@ -5,6 +5,7 @@ import flet as ft
 
 from core.settings import APP_NAME, UI
 from storage.db import init_db
+from storage.store import init_store
 from ui.app_shell import AppShell
 
 
@@ -19,6 +20,7 @@ def main(page: ft.Page):
     page.window_min_height = UI.window_min_height
 
     init_db()
+    init_store()
     shell = AppShell(page)
     shell.mount()
 
