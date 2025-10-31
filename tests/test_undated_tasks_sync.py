@@ -1,14 +1,66 @@
 import json
 from datetime import datetime
+from typing import Dict, Tuple
 
 import pytest
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
+from core.priorities import DEFAULT_PRIORITY
 from models import SyncMapUndated, Task
+from services.appdata import AppDataClient
 from services.tasks_bridge import _split_notes, _status_payload
 from services.undated_tasks_sync import UndatedTasksSync
-from storage import config as config_module
-from storage.store import MetadataStore, init_store
+
+
+class FakeAppData(AppDataClient):  # type: ignore[misc]
+    """In-memory stub of :class:`AppDataClient` for unit tests."""
+
+    def __init__(self):
+        # ``AppDataClient`` expects an ``auth`` object but we don't need one here.
+        super().__init__(auth=None)
+        self.config = {"version": 1, "tasklist_id": None, "last_full_sync": None}
+        self.index = {"version": 1, "tasklist_id": None, "tasks": {}}
+        self.config_etag = "cfg-0"
+        self.index_etag = "idx-0"
+        self.ensure_calls = 0
+
+    # ``AppDataClient`` normally builds Drive services. Our stub skips that part.
+    def ensure_files(self) -> Dict[str, str]:  # type: ignore[override]
+        self.ensure_calls += 1
+        return {self.CONFIG_NAME: "config", self.INDEX_NAME: "index"}
+
+    def read_config(self) -> Tuple[Dict[str, object], str]:  # type: ignore[override]
+        return (json.loads(json.dumps(self.config)), self.config_etag)
+
+    def write_config(  # type: ignore[override]
+        self,
+        data,
+        if_match=None,
+        *,
+        on_conflict=None,
+    ):
+        self.config = json.loads(json.dumps(data))
+        major = int(self.config_etag.split("-")[1]) + 1
+        self.config_etag = f"cfg-{major}"
+        return json.loads(json.dumps(self.config)), self.config_etag
+
+    def read_index(self) -> Tuple[Dict[str, object], str]:  # type: ignore[override]
+        return (json.loads(json.dumps(self.index)), self.index_etag)
+
+    def write_index(  # type: ignore[override]
+        self,
+        data,
+        if_match=None,
+        *,
+        on_conflict=None,
+    ):
+        payload = json.loads(json.dumps(data))
+        if on_conflict:
+            payload = on_conflict(payload)
+        self.index = payload
+        major = int(self.index_etag.split("-")[1]) + 1
+        self.index_etag = f"idx-{major}"
+        return json.loads(json.dumps(self.index)), self.index_etag
 
 
 class FakeBridge:
@@ -44,24 +96,6 @@ def session_factory():
     return factory
 
 
-@pytest.fixture()
-def metadata_store():
-    engine = create_engine("sqlite:///:memory:")
-    init_store(engine=engine)
-
-    def factory():
-        return Session(engine)
-
-    return MetadataStore(session_factory=factory)
-
-
-@pytest.fixture(autouse=True)
-def config_path(tmp_path, monkeypatch):
-    cfg_path = tmp_path / "config.json"
-    monkeypatch.setattr(config_module, "CONFIG_PATH", cfg_path)
-    return cfg_path
-
-
 def _create_task(session_factory):
     with session_factory() as session:
         task = Task(title="Test", start=None)
@@ -71,15 +105,17 @@ def _create_task(session_factory):
         return task.id
 
 
-def test_push_dirty_creates_mapping(session_factory, metadata_store):
+def test_push_dirty_creates_mapping_and_updates_index(session_factory):
     task_id = _create_task(session_factory)
 
     bridge = FakeBridge()
+    appdata = FakeAppData()
     sync = UndatedTasksSync(
         auth=None,
         bridge=bridge,
         session_factory=session_factory,
-        metadata_store=metadata_store,
+        appdata=appdata,
+        device_id="TEST-DEVICE",
     )
 
     assert sync.push_dirty() is True
@@ -90,8 +126,12 @@ def test_push_dirty_creates_mapping(session_factory, metadata_store):
         assert mapping.gtask_id == "gtask-123"
         assert mapping.dirty_flag == 0
 
-    stored_meta = metadata_store.load_task_meta("gtask-123", "list-1")
-    assert stored_meta.get("task_id") == str(task_id)
+    entry = appdata.index["tasks"].get("gtask-123")
+    assert entry is not None
+    assert entry["task_id"] == str(task_id)
+    assert entry["status"] == "todo"
+    assert entry["priority"] == DEFAULT_PRIORITY
+    assert appdata.config["tasklist_id"] == "list-1"
 
 
 def test_split_notes_extracts_metadata_and_body():
@@ -104,28 +144,48 @@ def test_split_notes_extracts_metadata_and_body():
     assert had_meta is True
 
 
-def test_status_done_completes_on_push_and_pull(session_factory, metadata_store):
+def test_status_done_completes_on_push_and_pull(session_factory):
     status, completed_at = _status_payload({"status": "done", "updated_at": datetime.utcnow()})
     assert status == "completed"
     assert completed_at is not None
 
     task_id = _create_task(session_factory)
 
+    with session_factory() as session:
+        mapping = SyncMapUndated(
+            task_id=str(task_id),
+            gtask_id="gtask-remote",
+            tasklist_id="list-1",
+            dirty_flag=0,
+        )
+        session.add(mapping)
+        session.commit()
+
     remote_item = {
         "id": "gtask-remote",
         "title": "Remote",
         "notes": "Updated",
-        "metadata": {"task_id": str(task_id)},
         "status": "completed",
         "updated": datetime.utcnow().isoformat(),
+        "detected_meta": {},
     }
 
     bridge = FakeBridge(items=[remote_item])
+    appdata = FakeAppData()
+    appdata.index["tasks"]["gtask-remote"] = {
+        "task_id": str(task_id),
+        "priority": DEFAULT_PRIORITY,
+        "status": "todo",
+        "updated_at": datetime.utcnow().isoformat(),
+        "device_id": "OTHER",
+    }
+
     sync = UndatedTasksSync(
         auth=None,
         bridge=bridge,
         session_factory=session_factory,
-        metadata_store=metadata_store,
+        appdata=appdata,
+        device_id="LOCAL",
     )
 
     assert sync.pull() is True
@@ -134,3 +194,4 @@ def test_status_done_completes_on_push_and_pull(session_factory, metadata_store)
         updated_task = session.get(Task, task_id)
         assert updated_task.status == "done"
         assert (updated_task.notes or "") == "Updated"
+

@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Optional
 
 from core.settings import DATA_DIR
+from services.appdata import AppDataClient
 from services.google_auth import GoogleAuth
 from services.tasks_bridge import GoogleTasksBridge
-from storage.store import MetadataStore, init_store
 
 
 LOG_PATH = DATA_DIR / "migration.log"
@@ -19,27 +19,48 @@ def migrate_descriptions(
     *,
     auth: Optional[GoogleAuth] = None,
     bridge: Optional[GoogleTasksBridge] = None,
-    metadata_store: Optional[MetadataStore] = None,
+    appdata: Optional[AppDataClient] = None,
 ) -> int:
     """Run a migration that extracts metadata JSON from task descriptions."""
 
-    init_store()
-    store = metadata_store or MetadataStore()
     auth = auth or GoogleAuth()
     if hasattr(auth, "ensure_credentials"):
         auth.ensure_credentials()
-    bridge = bridge or GoogleTasksBridge(auth, metadata_store=store)
+    appdata = appdata or AppDataClient(auth)
+    bridge = bridge or GoogleTasksBridge(auth)
+
+    appdata.ensure_files()
+    index, etag = appdata.read_index()
+    if not index:
+        index = {"version": 1, "tasklist_id": None, "tasks": {}}
 
     tasklist_id = bridge.ensure_tasklist()
+    index["tasklist_id"] = tasklist_id
+    tasks_meta = index.setdefault("tasks", {})
+
     migrated = 0
     for item in bridge.fetch_all(tasklist_id):
-        raw_notes = (item.get("raw") or {}).get("notes", "") or ""
-        cleaned = item.get("notes") or ""
-        logging.info(
-            "Task %s migrated: notes length %d -> %d", item.get("id"), len(raw_notes), len(cleaned)
-        )
-        migrated += 1
-    logging.info("Migration completed; %d tasks processed", migrated)
+        gtask_id = item.get("id")
+        detected = item.get("detected_meta") or {}
+        if not gtask_id or not detected:
+            continue
+
+        entry = dict(tasks_meta.get(gtask_id) or {})
+        before = entry.copy()
+        for key in ("task_id", "priority", "status", "updated_at", "device_id"):
+            value = detected.get(key)
+            if value in (None, ""):
+                continue
+            entry[key] = value
+        if entry != before:
+            tasks_meta[gtask_id] = entry
+            migrated += 1
+            logging.info("Migrated metadata for %s", gtask_id)
+
+    if migrated:
+        appdata.write_index(index, if_match=etag)
+
+    logging.info("Migration completed; %d tasks updated", migrated)
     return migrated
 
 
