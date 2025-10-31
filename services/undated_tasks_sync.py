@@ -10,7 +10,9 @@ from sqlmodel import select
 from core.settings import GOOGLE_SYNC
 from models import SyncMapUndated, Task
 from services.tasks_bridge import GoogleTasksBridge
+from storage.config import load_config, update_config
 from storage.db import get_session
+from storage.store import MetadataStore
 
 
 def _utcnow() -> datetime:
@@ -47,9 +49,11 @@ class UndatedTasksSync:
         *,
         bridge: GoogleTasksBridge | None = None,
         session_factory=get_session,
+        metadata_store: MetadataStore | None = None,
     ) -> None:
         self.auth = auth
-        self.bridge = bridge or GoogleTasksBridge(auth)
+        self.metadata_store = metadata_store or MetadataStore()
+        self.bridge = bridge or GoogleTasksBridge(auth, metadata_store=self.metadata_store)
         self._session_factory = session_factory
         self._tasklist_id: Optional[str] = None
 
@@ -197,6 +201,7 @@ class UndatedTasksSync:
                 mapping.dirty_flag = 0
                 mapping.updated_at_utc = _utcnow()
                 session.add(mapping)
+                self._update_mapping(session, str(task.id), tasklist_id, gtask_id)
                 task.updated_at = datetime.utcnow()
                 session.add(task)
                 changed = True
@@ -253,10 +258,26 @@ class UndatedTasksSync:
             self._tasklist_id = self.bridge.ensure_tasklist()
         except Exception:
             self._tasklist_id = None
+        if self._tasklist_id and self.metadata_store:
+            self.metadata_store.register_list(
+                self._tasklist_id,
+                name=self.bridge.tasklist_title,
+                backend="google_tasks",
+            )
+            self._ensure_default_list(self._tasklist_id)
         return self._tasklist_id
 
-    @staticmethod
-    def _update_mapping(session, task_id: str, tasklist_id: str, gtask_id: Optional[str]) -> None:
+    def _ensure_default_list(self, list_id: str) -> None:
+        cfg = load_config()
+        changes = {}
+        if not cfg.default_list_id:
+            changes["default_list_id"] = list_id
+        if cfg.last_used_list_id != list_id:
+            changes["last_used_list_id"] = list_id
+        if changes:
+            update_config(**changes)
+
+    def _update_mapping(self, session, task_id: str, tasklist_id: str, gtask_id: Optional[str]) -> None:
         mapping = session.get(SyncMapUndated, task_id)
         now_utc = _utcnow()
         if mapping is None:
@@ -273,6 +294,14 @@ class UndatedTasksSync:
             mapping.updated_at_utc = now_utc
             mapping.dirty_flag = 0
         session.add(mapping)
+        if self.metadata_store and gtask_id:
+            try:
+                meta = self.metadata_store.load_task_meta(gtask_id, tasklist_id)
+                if str(meta.get("task_id")) != str(task_id):
+                    meta["task_id"] = str(task_id)
+                    self.metadata_store.save_task_meta(gtask_id, tasklist_id, meta)
+            except Exception:
+                pass
 
 
 __all__ = ["UndatedTasksSync"]

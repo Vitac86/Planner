@@ -46,6 +46,8 @@ for _dir in (DATA_DIR, STORAGE_DIR, SECRETS_DIR, BACKUP_DIR):
 
 
 DB_PATH = DATA_DIR / "app.db"
+STORE_DB_PATH = DATA_DIR / "store.db"
+CONFIG_PATH = DATA_DIR / "config.json"
 TOKEN_PATH = DATA_DIR / "token.json"
 CLIENT_SECRET_PATH = SECRETS_DIR / "client_secret.json"
 SYNC_TOKEN_PATH = STORAGE_DIR / "gcal_sync_token.json"
@@ -159,6 +161,8 @@ __all__ = [
     "SECRETS_DIR",
     "BACKUP_DIR",
     "DB_PATH",
+    "STORE_DB_PATH",
+    "CONFIG_PATH",
     "TOKEN_PATH",
     "CLIENT_SECRET_PATH",
     "SYNC_TOKEN_PATH",
