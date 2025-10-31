@@ -138,6 +138,24 @@ class CalendarPage:
 
         self.load()
 
+    def _mark_undated_dirty(self, task_id: int) -> None:
+        sync = getattr(self.app, "undated_sync", None)
+        if not sync:
+            return
+        try:
+            sync.mark_dirty(task_id)
+        except Exception as exc:
+            print("undated mark dirty error:", exc)
+
+    def _remove_undated_mapping(self, task_id: int, *, delete_remote: bool = False) -> None:
+        sync = getattr(self.app, "undated_sync", None)
+        if not sync:
+            return
+        try:
+            sync.remove_mapping(task_id, delete_remote=delete_remote)
+        except Exception as exc:
+            print("undated remove mapping error:", exc)
+
     # ===== публичное: вызывать из бокового меню =====
     def activate_from_menu(self):
         self._close_any_dialog()
@@ -223,6 +241,7 @@ class CalendarPage:
             except Exception as ex:
                 print("Google delete event error:", ex)
                 self.app.notify_google_unavailable(ex)
+        self._remove_undated_mapping(task_id, delete_remote=True)
         self.svc.delete(task_id)
         self.load()
         self._toast("Удалено")
@@ -416,6 +435,7 @@ class CalendarPage:
                 try:
                     # по умолчанию — не удаляем задачу, а отвязываем и убираем расписание
                     self.svc.update(t.id, start=None)
+                    self._mark_undated_dirty(t.id)
                     self.svc.set_event_id(t.id, None)
                 except Exception:
                     pass
@@ -790,6 +810,8 @@ class CalendarPage:
                 duration_minutes=duration,
                 priority=priority,
             )
+            if t:
+                self._remove_undated_mapping(task_id, delete_remote=True)
             try:
                 if t and getattr(t, "gcal_event_id", None):
                     self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
@@ -1006,6 +1028,11 @@ class CalendarPage:
                 duration_minutes=new_dur,
                 priority=normalize_priority(priority_dd.value),
             )
+            if updated:
+                if new_start is None:
+                    self._mark_undated_dirty(updated.id)
+                else:
+                    self._remove_undated_mapping(updated.id, delete_remote=True)
 
             # --- Google Calendar sync ---
             if new_start is not None and new_dur is not None:
@@ -1081,6 +1108,8 @@ class CalendarPage:
 
     def _reschedule(self, task_id: int, start_dt: datetime, duration: int):
         t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
+        if t:
+            self._remove_undated_mapping(task_id, delete_remote=True)
         try:
             if t and getattr(t, "gcal_event_id", None):
                 self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)

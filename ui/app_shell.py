@@ -16,6 +16,7 @@ from .pages.history import HistoryPage
 # Google
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
+from services.undated_tasks_sync import UndatedTasksSync
 
 # Pull-синхронизация Google -> локально
 from services.sync import GoogleSync, JsonTokenStore
@@ -34,6 +35,7 @@ class AppShell:
         # при необходимости можно передать пути: GoogleAuth(secrets_path=..., token_path=...)
         self.auth = GoogleAuth()
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
+        self.undated_sync = UndatedTasksSync(self.auth)
 
         # --- страницы ---
         self._today = TodayPage(self)
@@ -173,7 +175,13 @@ class AppShell:
             if not self.gcal or not getattr(self.gcal, "service", None) or not getattr(self.gcal, "calendar_id", None):
                 return False
             sync = GoogleSync(self.gcal.service, self.gcal.calendar_id, JsonTokenStore())
-            return sync.pull()
+            changed = sync.pull()
+            try:
+                changed = self.undated_sync.sync() or changed
+            except Exception as e:
+                print("Undated tasks sync error:", e)
+                self.notify_google_unavailable(e)
+            return changed
         except Exception as e:
             print("Google pull sync error:", e)
             self.notify_google_unavailable(e)
@@ -281,6 +289,10 @@ class AppShell:
         if self._has_open_overlay():
             return
         self._pull_from_google()
+        try:
+            self.undated_sync.push_dirty()
+        except Exception as e:
+            print("undated manual push error:", e)
         if self._active_view == "calendar":
             self._calendar.load()
         elif self._active_view == "today":
