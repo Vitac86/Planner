@@ -7,6 +7,8 @@ import flet as ft
 from datetime import datetime, date, timedelta, time as dt_time
 from typing import Dict, Tuple, List, Optional
 
+from datetime_utils import parse_rfc3339
+
 from services.tasks import TaskService
 from core.priorities import (
     priority_options,
@@ -341,12 +343,7 @@ class CalendarPage:
 
         # --- утилита парсинга дат ---
         def _parse_ev_datetime(s: str | None):
-            if not s:
-                return None
-            try:
-                return datetime.fromisoformat(s.replace("Z", "+00:00"))
-            except Exception:
-                return None
+            return parse_rfc3339(s)
 
         # карты по id событий
         ev_map = {}
@@ -377,10 +374,10 @@ class CalendarPage:
                 }
             else:
                 # all-day -> ставим дату без времени (твой Today/Календарь понимают это как "без времени")
+                raw_date = (st.get("date") or "").strip()
                 try:
-                    d = date.fromisoformat((st.get("date") or "").strip())
-                    dt_start = datetime(d.year, d.month, d.day)
-                except Exception:
+                    dt_start = datetime.strptime(raw_date, "%Y-%m-%d") if raw_date else None
+                except ValueError:
                     dt_start = None
                 ev_map[eid] = {
                     "title": ev.get("summary") or "",

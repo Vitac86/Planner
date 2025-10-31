@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from core.settings import GOOGLE_SYNC
+from datetime_utils import to_rfc3339
 
 try:
     from google.oauth2.credentials import Credentials
@@ -15,15 +16,17 @@ except Exception:
 
 DEFAULT_SCOPES = list(GOOGLE_SYNC.scopes)
 
-# ---------- время в RFC3339 ----------
-def _ensure_tz(dt: datetime) -> datetime:
+def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
-        dt = datetime.now().astimezone().replace(year=dt.year, month=dt.month, day=dt.day,
-                                                 hour=dt.hour, minute=dt.minute, second=dt.second, microsecond=dt.microsecond)
-    return dt.astimezone()
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 def _to_rfc3339(dt: datetime) -> str:
-    return _ensure_tz(dt).isoformat()
+    result = to_rfc3339(_ensure_utc(dt))
+    if result is None:
+        raise ValueError("Failed to convert datetime to RFC3339")
+    return result
 
 def _path_exists(p) -> bool:
     try:
@@ -156,7 +159,7 @@ class GoogleCalendar:
 
     def create_event_for_task(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
-        end_dt = _ensure_tz(start_dt) + timedelta(minutes=duration_minutes)
+        end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
         body = {
             "summary": getattr(task, "title", "Задача"),
             "description": self._with_marker(task, getattr(task, "notes", None)),
@@ -167,7 +170,7 @@ class GoogleCalendar:
 
     def update_event_for_task(self, event_id: str, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
-        end_dt = _ensure_tz(start_dt) + timedelta(minutes=duration_minutes)
+        end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
         body = {
             "summary": getattr(task, "title", "Задача"),
             "description": self._with_marker(task, getattr(task, "notes", None)),
