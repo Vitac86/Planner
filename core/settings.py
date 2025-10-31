@@ -46,6 +46,8 @@ for _dir in (DATA_DIR, STORAGE_DIR, SECRETS_DIR, BACKUP_DIR):
 
 
 DB_PATH = DATA_DIR / "app.db"
+STORE_DB_PATH = DATA_DIR / "store.db"
+CONFIG_PATH = DATA_DIR / "config.json"
 TOKEN_PATH = DATA_DIR / "token.json"
 CLIENT_SECRET_PATH = SECRETS_DIR / "client_secret.json"
 SYNC_TOKEN_PATH = STORAGE_DIR / "gcal_sync_token.json"
@@ -69,6 +71,9 @@ class ThemeColors:
 class CalendarUISettings:
     day_start: int = 0
     day_end: int = 23
+    grid_step_minutes: int = 30
+    min_block_duration_minutes: int = 15
+    drag_magnet_margin_minutes: int = 5
     row_min_height: int = 36
     day_column_width: int = 160
     hours_column_width: int = 76
@@ -90,6 +95,14 @@ class TodayUISettings:
 
 
 @dataclass(frozen=True)
+class SnoozeSettings:
+    evening_hour: int = 20
+    evening_minute: int = 0
+    tomorrow_hour: int = 9
+    tomorrow_minute: int = 0
+
+
+@dataclass(frozen=True)
 class AutoRefreshSettings:
     enabled: bool = True
     interval_sec: int = 60
@@ -106,6 +119,7 @@ class UISettings:
     theme: ThemeColors = ThemeColors()
     calendar: CalendarUISettings = CalendarUISettings()
     today: TodayUISettings = TodayUISettings()
+    snooze: SnoozeSettings = SnoozeSettings()
     auto_refresh: AutoRefreshSettings = AutoRefreshSettings()
 
 
@@ -117,7 +131,12 @@ class GoogleSyncSettings:
     enabled: bool = True
     auto_pull_interval_sec: int = 60
     auto_push_on_edit: bool = True
-    scopes: tuple[str, ...] = ("https://www.googleapis.com/auth/calendar",)
+    scopes: tuple[str, ...] = (
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/tasks",
+    )
     sync_token_path: Path = SYNC_TOKEN_PATH
     delete_on_google_cancel: bool = False
 
@@ -142,6 +161,8 @@ __all__ = [
     "SECRETS_DIR",
     "BACKUP_DIR",
     "DB_PATH",
+    "STORE_DB_PATH",
+    "CONFIG_PATH",
     "TOKEN_PATH",
     "CLIENT_SECRET_PATH",
     "SYNC_TOKEN_PATH",

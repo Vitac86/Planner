@@ -16,6 +16,7 @@ from core.priorities import (
     normalize_priority,
 )
 from core.settings import UI
+from helpers import snooze
 
 # ===== настройки =====
 CAL_UI = UI.calendar
@@ -137,6 +138,24 @@ class CalendarPage:
 
         self.load()
 
+    def _mark_undated_dirty(self, task_id: int) -> None:
+        sync = getattr(self.app, "undated_sync", None)
+        if not sync:
+            return
+        try:
+            sync.mark_dirty(task_id)
+        except Exception as exc:
+            print("undated mark dirty error:", exc)
+
+    def _remove_undated_mapping(self, task_id: int, *, delete_remote: bool = False) -> None:
+        sync = getattr(self.app, "undated_sync", None)
+        if not sync:
+            return
+        try:
+            sync.remove_mapping(task_id, delete_remote=delete_remote)
+        except Exception as exc:
+            print("undated remove mapping error:", exc)
+
     # ===== публичное: вызывать из бокового меню =====
     def activate_from_menu(self):
         self._close_any_dialog()
@@ -219,8 +238,10 @@ class CalendarPage:
         if getattr(t, "gcal_event_id", None):
             try:
                 self.app.gcal.delete_event_by_id(t.gcal_event_id)
-            except Exception:
-                pass
+            except Exception as ex:
+                print("Google delete event error:", ex)
+                self.app.notify_google_unavailable(ex)
+        self._remove_undated_mapping(task_id, delete_remote=True)
         self.svc.delete(task_id)
         self.load()
         self._toast("Удалено")
@@ -414,6 +435,7 @@ class CalendarPage:
                 try:
                     # по умолчанию — не удаляем задачу, а отвязываем и убираем расписание
                     self.svc.update(t.id, start=None)
+                    self._mark_undated_dirty(t.id)
                     self.svc.set_event_id(t.id, None)
                 except Exception:
                     pass
@@ -692,14 +714,29 @@ class CalendarPage:
         def act_move(_):
             close(); self._schedule_task(task_id, day, hour)
 
+        def _apply_snooze(action, success_message: str):
+            close()
+            task = self.svc.get(task_id)
+            if not task:
+                return self._toast("Задача не найдена")
+            result = action(task)
+            self._reschedule(task_id, result.start, result.duration_minutes)
+            self._toast(success_message)
+
+        def act_snooze15(_):
+            _apply_snooze(lambda task: snooze.minutes(task, 15), "Перенесено на +15 мин")
+
         def act_snooze30(_):
-            close(); self._snooze_minutes(task_id, day, hour, duration, 30)
+            _apply_snooze(lambda task: snooze.minutes(task, 30), "Перенесено на +30 мин")
+
+        def act_snooze60(_):
+            _apply_snooze(lambda task: snooze.minutes(task, 60), "Перенесено на +60 мин")
 
         def act_evening(_):
-            close(); self._snooze_evening(task_id)
+            _apply_snooze(snooze.tonight, "Перенесено на вечер")
 
         def act_tomorrow(_):
-            close(); self._snooze_tomorrow(task_id)
+            _apply_snooze(snooze.tomorrow_morning, "Перенесено на завтра утром")
 
         def act_delete(_):
             close(); self._delete_task(task_id)
@@ -709,9 +746,11 @@ class CalendarPage:
                 ft.TextButton("Редактировать", on_click=act_edit),
                 ft.TextButton("Перенести…", on_click=act_move),
                 ft.Divider(height=1),
+                ft.TextButton("Snooze +15 мин", on_click=act_snooze15),
                 ft.TextButton("Snooze +30 мин", on_click=act_snooze30),
+                ft.TextButton("Snooze +60 мин", on_click=act_snooze60),
                 ft.TextButton("Сегодня вечером", on_click=act_evening),
-                ft.TextButton("Завтра 10:00", on_click=act_tomorrow),
+                ft.TextButton("Завтра утром", on_click=act_tomorrow),
                 ft.Divider(height=1),
                 ft.TextButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=act_delete),
             ],
@@ -771,6 +810,8 @@ class CalendarPage:
                 duration_minutes=duration,
                 priority=priority,
             )
+            if t:
+                self._remove_undated_mapping(task_id, delete_remote=True)
             try:
                 if t and getattr(t, "gcal_event_id", None):
                     self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
@@ -778,6 +819,8 @@ class CalendarPage:
                     ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
                     self.svc.set_event_id(task_id, ev["id"])
             except Exception as ex:
+                print("Google calendar save error:", ex)
+                self.app.notify_google_unavailable(ex)
                 self._toast(f"Google недоступен: {ex}")
 
             self._close_dialog(dlg)
@@ -836,6 +879,8 @@ class CalendarPage:
                 self.svc.set_event_id(task.id, ev["id"])
                 self._toast("Создано и в календаре")
             except Exception as ex:
+                print("Google create event error:", ex)
+                self.app.notify_google_unavailable(ex)
                 self._toast(f"Создано локально (Google недоступен): {ex}")
 
             self._close_dialog(dlg)
@@ -983,6 +1028,11 @@ class CalendarPage:
                 duration_minutes=new_dur,
                 priority=normalize_priority(priority_dd.value),
             )
+            if updated:
+                if new_start is None:
+                    self._mark_undated_dirty(updated.id)
+                else:
+                    self._remove_undated_mapping(updated.id, delete_remote=True)
 
             # --- Google Calendar sync ---
             if new_start is not None and new_dur is not None:
@@ -990,18 +1040,25 @@ class CalendarPage:
                     try:
                         self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
                     except Exception as e:
+                        print("Google update event error:", e)
+                        self.app.notify_google_unavailable(e)
                         self._toast(f"Google: не удалось обновить: {e}")
                 else:
                     try:
                         ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
                         self.svc.set_event_id(task_id, ev["id"])
                     except Exception as e:
+                        print("Google create event error:", e)
+                        self.app.notify_google_unavailable(e)
                         self._toast(f"Google: не удалось создать: {e}")
             else:
                 # если дата/время/длительность очищены — удаляем привязанное событие
                 if updated.gcal_event_id:
                     try:
                         self.app.gcal.delete_event_by_id(updated.gcal_event_id)
+                    except Exception as e:
+                        print("Google delete event error:", e)
+                        self.app.notify_google_unavailable(e)
                     finally:
                         self.svc.set_event_id(task_id, None)
 
@@ -1049,23 +1106,10 @@ class CalendarPage:
 
 
 
-    def _snooze_minutes(self, task_id: int, day: date, hour: int, duration: int, add_minutes: int):
-        base = datetime(day.year, day.month, day.day, hour, 0, 0) + timedelta(minutes=add_minutes)
-        self._reschedule(task_id, base, duration)
-
-    def _snooze_evening(self, task_id: int):
-        now = datetime.now().astimezone()
-        base = now.replace(hour=19, minute=0, second=0, microsecond=0)
-        if base < now:
-            base = base + timedelta(days=1)
-        self._reschedule(task_id, base, 30)
-
-    def _snooze_tomorrow(self, task_id: int):
-        base = (datetime.now().astimezone() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
-        self._reschedule(task_id, base, 30)
-
     def _reschedule(self, task_id: int, start_dt: datetime, duration: int):
         t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
+        if t:
+            self._remove_undated_mapping(task_id, delete_remote=True)
         try:
             if t and getattr(t, "gcal_event_id", None):
                 self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
@@ -1073,6 +1117,8 @@ class CalendarPage:
                 ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
                 self.svc.set_event_id(task_id, ev["id"])
         except Exception as ex:
+            print("Google calendar save error:", ex)
+            self.app.notify_google_unavailable(ex)
             self._toast(f"Google недоступен: {ex}")
         self.load()
 
@@ -1127,7 +1173,15 @@ class CalendarPage:
         picker.data = {"tf": tf, "prev": prev, "applied": False}
         if picker not in self.app.page.overlay:
             self.app.page.overlay.append(picker)
-        self.app.page.open(picker)
+        try:
+            picker.open = True
+        except Exception:
+            pass
+        try:
+            picker.pick_time()
+        except Exception:
+            pass
+        self.app.page.update()
 
     def _time_picker_on_change(self, picker: ft.TimePicker, e: ft.ControlEvent):
         data = picker.data or {}

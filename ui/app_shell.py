@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import flet as ft
 
 from core.settings import UI, GOOGLE_SYNC
@@ -15,6 +16,7 @@ from .pages.history import HistoryPage
 # Google
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
+from services.undated_tasks_sync import UndatedTasksSync
 
 # Pull-синхронизация Google -> локально
 from services.sync import GoogleSync, JsonTokenStore
@@ -33,6 +35,7 @@ class AppShell:
         # при необходимости можно передать пути: GoogleAuth(secrets_path=..., token_path=...)
         self.auth = GoogleAuth()
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
+        self.undated_sync = UndatedTasksSync(self.auth)
 
         # --- страницы ---
         self._today = TodayPage(self)
@@ -89,6 +92,7 @@ class AppShell:
         # автообновление активной страницы
         self._auto_task: asyncio.Task | None = None
         self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
+        self._google_error_notified: bool = False
 
     def cleanup_overlays(self):
         """Remove closed overlays (dialogs, pickers, backdrops) to avoid "ghost" windows."""
@@ -138,6 +142,30 @@ class AppShell:
         except Exception:
             return False
 
+    def notify_google_unavailable(self, error: Exception | None = None):
+        if self._google_error_notified:
+            return
+        reason = str(error or "")
+        reason_lc = reason.lower()
+        should_notify = False
+        network_errors = (asyncio.TimeoutError, TimeoutError, ConnectionError, socket.timeout)
+        if error and isinstance(error, network_errors):
+            should_notify = True
+        elif reason_lc:
+            for marker in ("timed out", "timeout", "connection", "unreachable", "unavailable"):
+                if marker in reason_lc:
+                    should_notify = True
+                    break
+        if not should_notify:
+            return
+        self._google_error_notified = True
+        try:
+            self.page.snack_bar = ft.SnackBar(ft.Text("Google недоступен"))
+            self.page.snack_bar.open = True
+            self.page.update()
+        except Exception:
+            pass
+
     def _pull_from_google(self) -> bool:
         """
         Подтягиваем изменения из Google -> локально.
@@ -147,9 +175,16 @@ class AppShell:
             if not self.gcal or not getattr(self.gcal, "service", None) or not getattr(self.gcal, "calendar_id", None):
                 return False
             sync = GoogleSync(self.gcal.service, self.gcal.calendar_id, JsonTokenStore())
-            return sync.pull()
+            changed = sync.pull()
+            try:
+                changed = self.undated_sync.sync() or changed
+            except Exception as e:
+                print("Undated tasks sync error:", e)
+                self.notify_google_unavailable(e)
+            return changed
         except Exception as e:
             print("Google pull sync error:", e)
+            self.notify_google_unavailable(e)
             return False
 
     def _start_auto_refresh(
@@ -213,40 +248,51 @@ class AppShell:
 
     # ---------- переключение вкладок ----------
     def on_nav_change(self, e: ft.ControlEvent):
-        idx = int(e.control.selected_index)
-
-        if idx == 0:  # Сегодня
-            self.content.content = self._today.view
-            self._pull_from_google()
-            self._today.activate_from_menu()
-            self._start_auto_refresh("today", self._today.load)
-
-        elif idx == 1:  # Календарь
-            self.content.content = self._calendar.view
-            self._pull_from_google()
-            self._calendar.activate_from_menu()
-            try:
-                self._calendar.scroll_to_now()  # к текущему часу
-            except Exception:
-                pass
-            self._start_auto_refresh("calendar", self._calendar.load)
-
-        elif idx == 2:  # История
-            self.content.content = self._history.view
-            self._stop_auto_refresh()
-            self._history.activate_from_menu()
-
-        else:  # Настройки (используем полноценную страницу настроек)
-            self.content.content = self._settings.view
+        try:
+            self.cleanup_overlays()
             self._stop_auto_refresh()
 
-        self.page.update()
+            idx = int(e.control.selected_index)
+
+            if idx == 0:  # Сегодня
+                self.content.content = self._today.view
+                self.page.update()
+                self._pull_from_google()
+                self._today.activate_from_menu()
+                self._start_auto_refresh("today", self._today.load)
+
+            elif idx == 1:  # Календарь
+                self.content.content = self._calendar.view
+                self.page.update()
+                self._pull_from_google()
+                self._calendar.activate_from_menu()
+                try:
+                    self._calendar.scroll_to_now()  # к текущему часу
+                except Exception:
+                    pass
+                self._start_auto_refresh("calendar", self._calendar.load)
+
+            elif idx == 2:  # История
+                self.content.content = self._history.view
+                self.page.update()
+                self._history.activate_from_menu()
+
+            else:  # Настройки (используем полноценную страницу настроек)
+                self.content.content = self._settings.view
+                self.page.update()
+
+        except Exception as e:
+            print("nav error:", e)
 
     # ---------- ручной вызов синка (если где-то используете) ----------
     def current_page_auto_sync(self):
         if self._has_open_overlay():
             return
         self._pull_from_google()
+        try:
+            self.undated_sync.push_dirty()
+        except Exception as e:
+            print("undated manual push error:", e)
         if self._active_view == "calendar":
             self._calendar.load()
         elif self._active_view == "today":
