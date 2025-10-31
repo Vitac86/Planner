@@ -117,9 +117,17 @@ class GoogleSyncSettings:
     enabled: bool = True
     auto_pull_interval_sec: int = 60
     auto_push_on_edit: bool = True
-    scopes: tuple[str, ...] = ("https://www.googleapis.com/auth/calendar",)
+    scopes: tuple[str, ...] = (
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/tasks",
+        "https://www.googleapis.com/auth/drive.appdata",
+    )
     sync_token_path: Path = SYNC_TOKEN_PATH
     delete_on_google_cancel: bool = False
+    tasks_tasklist_name: str = "Planner Inbox"
+    tasks_pull_interval_sec: int = 90
+    tasks_push_interval_sec: int = 90
+    tasks_meta_filename: str = "planner-meta.json"
 
 
 GOOGLE_SYNC = GoogleSyncSettings()

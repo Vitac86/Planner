@@ -10,7 +10,7 @@ from core.priorities import (
     priority_color,
     normalize_priority,
 )
-from core.settings import UI
+from core.settings import UI, GOOGLE_SYNC
 
 
 class TodayPage:
@@ -359,11 +359,15 @@ class TodayPage:
         self.dur_tf.value = "30"
         self.priority_dd.value = str(priority)
         self.refresh_lists()
+        if GOOGLE_SYNC.auto_push_on_edit:
+            self.app.push_tasks_to_google()
         self._toast(msg)
 
     def on_toggle_done(self, task_id: int, checked: bool):
         self.svc.set_status(task_id, "done" if checked else "todo")
         self.refresh_lists()
+        if GOOGLE_SYNC.auto_push_on_edit:
+            self.app.push_tasks_to_google()
 
     def on_delete(self, task_id: int, gcal_event_id: str | None):
         if gcal_event_id:
@@ -373,6 +377,8 @@ class TodayPage:
                 pass
         self.svc.delete(task_id)
         self.refresh_lists()
+        if GOOGLE_SYNC.auto_push_on_edit:
+            self.app.push_tasks_to_google()
         self._toast("Задача удалена")
 
     def on_edit_click(self, e: ft.ControlEvent):
@@ -617,6 +623,8 @@ class TodayPage:
             _remove_pickers()
             _finalize_dialog()
             self.refresh_lists()
+            if GOOGLE_SYNC.auto_push_on_edit:
+                self.app.push_tasks_to_google()
             self._toast("Сохранено")
 
         def on_cancel(_=None):

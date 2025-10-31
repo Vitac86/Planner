@@ -1,6 +1,7 @@
 # planner/services/tasks.py
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, date, timedelta
 from typing import Iterable, List, Optional
@@ -121,6 +122,14 @@ class TaskService:
             )
             return list(s.exec(stmt))
 
+    def list_unscheduled_updated_since(self, since: Optional[datetime]) -> Iterable[Task]:
+        with get_session() as s:
+            stmt = select(Task).where(Task.start == None)  # noqa: E711
+            if since is not None:
+                stmt = stmt.where(Task.updated_at > since)
+            stmt = stmt.where(Task.status != "done").order_by(Task.updated_at.desc())
+            return list(s.exec(stmt))
+
     def get_by_event_id(self, gcal_event_id: str | None):
         if not gcal_event_id:
             return None
@@ -197,6 +206,58 @@ class TaskService:
             return tasks
 
         return [t for t in tasks if self._match_query(query, f"{t.title} {t.notes or ''}")]
+
+    # ---------- Metadata helpers ----------
+    def clean_notes_metadata(self) -> int:
+        """Strip JSON metadata blocks from notes. Returns number of tasks changed."""
+
+        changed = 0
+        with get_session() as s:
+            stmt = select(Task).where(Task.notes != None)  # noqa: E711
+            tasks = list(s.exec(stmt))
+            for task in tasks:
+                original = task.notes or ""
+                cleaned = self._strip_metadata(original)
+                if cleaned != original:
+                    task.notes = cleaned or None
+                    task.updated_at = datetime.utcnow()
+                    s.add(task)
+                    changed += 1
+            if changed:
+                s.commit()
+        return changed
+
+    def _strip_metadata(self, notes: str) -> str:
+        candidate = (notes or "").strip()
+        if not candidate:
+            return ""
+
+        # Fast path: JSON on a single line
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                user_note = parsed.get("note") or parsed.get("text") or parsed.get("user_notes")
+                if isinstance(user_note, str):
+                    return user_note.strip()
+                return ""
+        except Exception:
+            pass
+
+        # Remove leading JSON block if present on the first line
+        lines = notes.splitlines()
+        if lines:
+            first = lines[0].strip()
+            if first.startswith("{") and first.endswith("}"):
+                try:
+                    parsed = json.loads(first)
+                    rest = "\n".join(lines[1:]).strip()
+                    user_note = parsed.get("note") or parsed.get("text") or parsed.get("user_notes")
+                    if isinstance(user_note, str):
+                        return user_note.strip()
+                    return rest
+                except Exception:
+                    return "\n".join(lines[1:]).strip()
+        return notes
 
     # --- text helpers -------------------------------------------------
     _RE_SPACES = re.compile(r"\s+")

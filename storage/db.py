@@ -4,6 +4,10 @@ from sqlmodel import SQLModel, create_engine, Session
 from core.settings import DB_PATH, BACKUP
 from storage.backup import ensure_daily_backup
 
+# Ensure SQLModel metadata is populated
+import models.task  # noqa: F401
+import models.task_sync  # noqa: F401
+
 
 _engine = create_engine(f"sqlite:///{DB_PATH.as_posix()}", echo=False)
 
