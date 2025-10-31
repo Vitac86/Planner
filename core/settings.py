@@ -119,6 +119,7 @@ class GoogleSyncSettings:
     auto_push_on_edit: bool = True
     scopes: tuple[str, ...] = (
         "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/tasks",
         "https://www.googleapis.com/auth/drive.appdata",
     )

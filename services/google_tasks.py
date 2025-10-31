@@ -17,31 +17,33 @@ from models.task import Task
 from models.task_sync import TaskSyncMapping
 from services.task_sync_store import TaskSyncStore
 from services.tasks import TaskService
+from datetime_utils import parse_rfc3339, to_rfc3339
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def _utcnow_iso() -> str:
-    return _utcnow().replace(microsecond=0).isoformat() + "Z"
+    value = to_rfc3339(_utcnow())
+    if value is None:
+        raise ValueError("Unable to format current UTC time")
+    return value
 
 
 def _parse_google_datetime(value: Optional[str]) -> Optional[datetime]:
-    if not value:
+    parsed = parse_rfc3339(value)
+    if parsed is None:
         return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).replace(tzinfo=None)
-    except Exception:
-        return None
+    return parsed.replace(tzinfo=None)
 
 
 def _normalize_local(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
-    if dt.tzinfo:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -245,14 +247,14 @@ class GoogleTasksSync:
 
     def _serialize_mappings(self, updated_at: datetime) -> str:
         payload = {
-            "updated_at": updated_at.isoformat() + "Z",
+            "updated_at": to_rfc3339(updated_at),
             "mappings": [
                 {
                     "local_id": m.local_id,
                     "google_task_id": m.google_task_id,
                     "tasklist_id": m.tasklist_id,
                     "etag": m.etag,
-                    "updated_at_utc": (m.updated_at_utc.isoformat() + "Z") if m.updated_at_utc else None,
+                    "updated_at_utc": to_rfc3339(m.updated_at_utc),
                 }
                 for m in self.store.list_mappings()
             ],

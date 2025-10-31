@@ -34,7 +34,7 @@ def ensure_daily_backup(
 
     today = datetime.now().date()
     prefix = f"{db_file.stem}_"
-    backup_name = f"{prefix}{today.isoformat()}{db_file.suffix}"
+    backup_name = f"{prefix}{today.strftime('%Y-%m-%d')}{db_file.suffix}"
     destination = backups / backup_name
 
     created_path: Path | None = None
