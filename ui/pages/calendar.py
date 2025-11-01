@@ -7,8 +7,6 @@ import flet as ft
 from datetime import datetime, date, timedelta, time as dt_time
 from typing import Dict, Tuple, List, Optional
 
-from datetime_utils import parse_rfc3339
-
 from services.tasks import TaskService
 from core.priorities import (
     priority_options,
@@ -217,12 +215,6 @@ class CalendarPage:
         t = self.svc.get(task_id)
         if not t:
             return self._toast("Задача не найдена")
-        # удаляем событие в Google, если привязано
-        if getattr(t, "gcal_event_id", None):
-            try:
-                self.app.gcal.delete_event_by_id(t.gcal_event_id)
-            except Exception:
-                pass
         self.svc.delete(task_id)
         self.load()
         self._toast("Удалено")
@@ -319,146 +311,11 @@ class CalendarPage:
             self._scroll_to_now()
         self.app.cleanup_overlays()
     def _sync_from_google(self, ws: date, we: date):
-        """Подтягивает изменения из Google за окно недели (с небольшим буфером)
-        и обновляет/создаёт/отвязывает локальные задачи.
-        """
-        g = getattr(self.app, "gcal", None)
-        if not g or not getattr(g, "calendar_id", None):
-            return
-
-        # Берём окно чуть шире текущей недели
-        rng_start = ws - timedelta(days=3)
-        rng_end   = we + timedelta(days=3)
-
         try:
-            # ожидаем, что list_range(start_dt, end_dt, show_deleted=True) у тебя есть
-            events = g.list_range(
-                datetime(rng_start.year, rng_start.month, rng_start.day, 0, 0, 0),
-                datetime(rng_end.year, rng_end.month, rng_end.day, 23, 59, 59),
-                show_deleted=True  # важно для отслеживания удалений
-            )
+            self.app.sync_service.pull()
         except Exception as ex:
             self._toast(f"Google sync: {ex}")
-            return
 
-        # --- утилита парсинга дат ---
-        def _parse_ev_datetime(s: str | None):
-            return parse_rfc3339(s)
-
-        # карты по id событий
-        ev_map = {}
-        for ev in events or []:
-            eid = ev.get("id")
-            if not eid:
-                continue
-            status = ev.get("status", "confirmed")
-            if status == "cancelled":
-                ev_map[eid] = {"deleted": True}
-                continue
-
-            st = ev.get("start") or {}
-            en = ev.get("end") or {}
-
-            # all-day: Google присылает "date" вместо "dateTime"
-            if "dateTime" in st and "dateTime" in en:
-                dt_start = _parse_ev_datetime(st.get("dateTime"))
-                dt_end   = _parse_ev_datetime(en.get("dateTime"))
-                dur = None
-                if dt_start and dt_end:
-                    dur = int((dt_end - dt_start).total_seconds() // 60)
-                ev_map[eid] = {
-                    "title": ev.get("summary") or "",
-                    "start": dt_start,
-                    "duration": dur,
-                    "allday": False,
-                }
-            else:
-                # all-day -> ставим дату без времени (твой Today/Календарь понимают это как "без времени")
-                raw_date = (st.get("date") or "").strip()
-                try:
-                    dt_start = datetime.strptime(raw_date, "%Y-%m-%d") if raw_date else None
-                except ValueError:
-                    dt_start = None
-                ev_map[eid] = {
-                    "title": ev.get("summary") or "",
-                    "start": dt_start,
-                    "duration": None,
-                    "allday": True,
-                }
-
-        # --- Собираем локальные связанные задачи в нашем окне + «без даты» ---
-        linked_tasks: list = []
-        for i in range((rng_end - rng_start).days + 1):
-            d = rng_start + timedelta(days=i)
-            for t in self.svc.list_for_day(d):
-                if getattr(t, "gcal_event_id", None):
-                    linked_tasks.append(t)
-        for t in self.svc.list_unscheduled():
-            if getattr(t, "gcal_event_id", None):
-                linked_tasks.append(t)
-
-        # --- Обновляем связанные задачи по данным из Google ---
-        seen_event_ids = set()
-        for t in linked_tasks:
-            eid = getattr(t, "gcal_event_id", None)
-            info = ev_map.get(eid)
-            if not eid:
-                continue
-            seen_event_ids.add(eid)
-
-            # Событие удалили со стороны Google
-            if not info or info.get("deleted"):
-                try:
-                    # по умолчанию — не удаляем задачу, а отвязываем и убираем расписание
-                    self.svc.update(t.id, start=None)
-                    self.svc.set_event_id(t.id, None)
-                except Exception:
-                    pass
-                continue
-
-            # Обновления полей
-            upd = {}
-            if (t.title or "") != (info["title"] or ""):
-                upd["title"] = info["title"] or ""
-
-            if info["allday"]:
-                # день без времени
-                if not t.start or t.start.date() != info["start"].date() or (t.start.hour != 0 or t.start.minute != 0):
-                    upd["start"] = datetime(info["start"].year, info["start"].month, info["start"].day)
-                if getattr(t, "duration_minutes", None) is not None:
-                    upd["duration_minutes"] = None
-            else:
-                if not t.start or t.start != info["start"]:
-                    upd["start"] = info["start"]
-                if getattr(t, "duration_minutes", None) != info["duration"]:
-                    upd["duration_minutes"] = info["duration"]
-
-            if upd:
-                try:
-                    self.svc.update(t.id, **upd)
-                except Exception:
-                    pass
-
-        # --- (опционально) импорт новых событий как задач ---
-        if IMPORT_NEW_GCAL:
-            for eid, info in ev_map.items():
-                if eid in seen_event_ids:
-                    continue
-                if info.get("deleted"):
-                    continue
-                try:
-                    # создаём новую задачу, сразу привязываем eid
-                    new_task = self.svc.add(
-                        title=info.get("title") or "(без названия)",
-                        start=info.get("start"),
-                        duration_minutes=info.get("duration"),
-                    )
-                    self.svc.set_event_id(new_task.id, eid)
-                except Exception:
-                    pass
-
-
-    # ===== Без даты =====
     def _build_unscheduled(self):
         self.unscheduled_list.controls.clear()
         for t in self.svc.list_unscheduled():
@@ -762,20 +619,12 @@ class CalendarPage:
 
             priority = normalize_priority(priority_dd.value)
 
-            t = self.svc.update(
+            self.svc.update(
                 task_id,
                 start=start_dt,
                 duration_minutes=duration,
                 priority=priority,
             )
-            try:
-                if t and getattr(t, "gcal_event_id", None):
-                    self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
-                elif t:
-                    ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
-                    self.svc.set_event_id(task_id, ev["id"])
-            except Exception as ex:
-                self._toast(f"Google недоступен: {ex}")
 
             self._close_dialog(dlg)
             self._sweep_overlay()
@@ -827,13 +676,8 @@ class CalendarPage:
                 return self._toast("Длительность должна быть > 0")
             priority = normalize_priority(priority_dd.value)
 
-            task = self.svc.add(title=title, start=start_dt, duration_minutes=duration, priority=priority)
-            try:
-                ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
-                self.svc.set_event_id(task.id, ev["id"])
-                self._toast("Создано и в календаре")
-            except Exception as ex:
-                self._toast(f"Создано локально (Google недоступен): {ex}")
+            self.svc.add(title=title, start=start_dt, duration_minutes=duration, priority=priority)
+            self._toast("Создано")
 
             self._close_dialog(dlg)
             self._sweep_overlay()
@@ -981,27 +825,6 @@ class CalendarPage:
                 priority=normalize_priority(priority_dd.value),
             )
 
-            # --- Google Calendar sync ---
-            if new_start is not None and new_dur is not None:
-                if updated.gcal_event_id:
-                    try:
-                        self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
-                    except Exception as e:
-                        self._toast(f"Google: не удалось обновить: {e}")
-                else:
-                    try:
-                        ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
-                        self.svc.set_event_id(task_id, ev["id"])
-                    except Exception as e:
-                        self._toast(f"Google: не удалось создать: {e}")
-            else:
-                # если дата/время/длительность очищены — удаляем привязанное событие
-                if updated.gcal_event_id:
-                    try:
-                        self.app.gcal.delete_event_by_id(updated.gcal_event_id)
-                    finally:
-                        self.svc.set_event_id(task_id, None)
-
             _remove_pickers()
             self._close_dialog(dlg)
             self._sweep_overlay()
@@ -1062,15 +885,7 @@ class CalendarPage:
         self._reschedule(task_id, base, 30)
 
     def _reschedule(self, task_id: int, start_dt: datetime, duration: int):
-        t = self.svc.update(task_id, start=start_dt, duration_minutes=duration)
-        try:
-            if t and getattr(t, "gcal_event_id", None):
-                self.app.gcal.update_event_for_task(t.gcal_event_id, t, start_dt, duration)
-            elif t:
-                ev = self.app.gcal.create_event_for_task(t, start_dt, duration)
-                self.svc.set_event_id(task_id, ev["id"])
-        except Exception as ex:
-            self._toast(f"Google недоступен: {ex}")
+        self.svc.update(task_id, start=start_dt, duration_minutes=duration)
         self.load()
 
     # ===== автопрокрутка к сегодняшнему дню и текущему часу =====

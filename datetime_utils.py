@@ -1,31 +1,50 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Optional
+
+
+def _normalize_fraction(s: str) -> str:
+    """Pad or trim fractional seconds to 6 digits."""
+
+    digits = s[:6]
+    if len(digits) < 6:
+        digits = digits + "0" * (6 - len(digits))
+    return digits
 
 
 def parse_rfc3339(s: Optional[str]) -> Optional[datetime]:
+    """Parse a RFC3339 string and return a timezone-aware UTC datetime."""
+
     if not s:
         return None
-    s = s.strip()
-    if not s:
+
+    value = s.strip()
+    if not value:
         return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    if "." in s:
-        head, tail = s.split(".", 1)
-        if "+" in tail or "-" in tail:
-            if "+" in tail:
-                frac, tz = tail.split("+", 1)
-                sign = "+"
-            else:
-                frac, tz = tail.split("-", 1)
-                sign = "-"
-            s = f"{head}.{(frac + '000000')[:6]}{sign}{tz}"
+
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    if "." in value:
+        head, tail = value.split(".", 1)
+        tz_sign = "+"
+        tz_suffix = "00:00"
+        if "+" in tail:
+            frac, tz_suffix = tail.split("+", 1)
+            tz_sign = "+"
+        elif "-" in tail:
+            frac, tz_suffix = tail.split("-", 1)
+            tz_sign = "-"
         else:
-            s = f"{head}.{(tail + '000000')[:6]}+00:00"
+            frac = tail
+        frac = _normalize_fraction(frac)
+        value = f"{head}.{frac}{tz_sign}{tz_suffix}"
     try:
-        dt = datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
@@ -33,15 +52,22 @@ def parse_rfc3339(s: Optional[str]) -> Optional[datetime]:
     return dt
 
 
-def to_rfc3339(dt: Optional[Union[datetime, str]]) -> Optional[str]:
+def to_rfc3339_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize a datetime to RFC3339 in UTC."""
+
     if dt is None:
         return None
-    if isinstance(dt, str):
-        dt = parse_rfc3339(dt)
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    value = dt
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
     else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        value = value.astimezone(timezone.utc)
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Backwards compatible alias
+def to_rfc3339(dt: Optional[datetime]):
+    return to_rfc3339_utc(dt)
+
+
+__all__ = ["parse_rfc3339", "to_rfc3339", "to_rfc3339_utc"]
