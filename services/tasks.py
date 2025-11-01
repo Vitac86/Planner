@@ -12,7 +12,7 @@ from sqlalchemy import and_, or_, case
 from storage.db import get_session
 from models.task import Task
 from core.priorities import normalize_priority
-from datetime_utils import ensure_utc, utc_now
+from utils.datetime_utils import ensure_utc, utc_now
 
 
 class TaskService:

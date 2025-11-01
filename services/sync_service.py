@@ -8,7 +8,7 @@ from typing import Optional
 from googleapiclient.errors import HttpError
 
 from core.settings import GOOGLE_SYNC
-from datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc, utc_now
+from utils.datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc, utc_now
 from models.task import Task
 from services.google_calendar import GoogleCalendar
 from services.google_tasks import GoogleTasks

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from core.settings import GOOGLE_SYNC
-from datetime_utils import to_rfc3339
+from utils.datetime_utils import to_rfc3339_utc
 
 try:
     from google.oauth2.credentials import Credentials
@@ -23,7 +23,7 @@ def _ensure_utc(dt: datetime) -> datetime:
 
 
 def _to_rfc3339(dt: datetime) -> str:
-    result = to_rfc3339(_ensure_utc(dt))
+    result = to_rfc3339_utc(_ensure_utc(dt))
     if result is None:
         raise ValueError("Failed to convert datetime to RFC3339")
     return result
