@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from datetime_utils import ensure_utc, to_rfc3339_utc, utc_now
+from utils.datetime_utils import ensure_utc, to_rfc3339_utc, utc_now
 from core.settings import GOOGLE_SYNC
 
 
 def _parse_datetime(value: Optional[str]):
-    from datetime_utils import parse_rfc3339
+    from utils.datetime_utils import parse_rfc3339
 
     return ensure_utc(parse_rfc3339(value)) if value else None
 

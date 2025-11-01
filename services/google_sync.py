@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
-from datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc
+from utils.datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc
 
 
 def build_event_payload(task) -> Dict[str, Any]:

@@ -9,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from core.settings import GOOGLE_SYNC
-from datetime_utils import ensure_utc, to_rfc3339_utc
+from utils.datetime_utils import ensure_utc, to_rfc3339_utc
 
 
 class GoogleTasks:
@@ -171,17 +171,12 @@ class GoogleTasks:
             raise
 
 
--def _format_due(value: Optional[datetime]) -> Optional[str]:
-+def _format_due(value: Optional[datetime]) -> Optional[str]:
-     if value is None:
-         return None
--    normalized = ensure_utc(value).replace(microsecond=0)
--    # tasks API expects midnight timestamps for all-day entries
--    normalized = normalized.replace(hour=0, minute=0, second=0)
--    return to_rfc3339_utc(normalized)
-+    normalized = ensure_utc(value)
-+    normalized = normalized.replace(hour=0, minute=0, second=0, microsecond=0)
-+    return to_rfc3339_utc(normalized)
-+
-+
-+__all__ = ["GoogleTasks"]
+def _format_due(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = ensure_utc(value)
+    normalized = normalized.replace(hour=0, minute=0, second=0, microsecond=0)
+    return to_rfc3339_utc(normalized)
+
+
+__all__ = ["GoogleTasks"]

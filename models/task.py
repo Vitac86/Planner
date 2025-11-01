@@ -2,7 +2,7 @@
 from typing import Optional
 from datetime import datetime
 
-from datetime_utils import utc_now
+from utils.datetime_utils import utc_now
 from sqlmodel import SQLModel, Field
 
 class Task(SQLModel, table=True):

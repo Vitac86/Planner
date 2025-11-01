@@ -8,7 +8,7 @@ from typing import Iterable, List, Optional
 from sqlmodel import select
 from sqlalchemy import func
 
-from datetime_utils import utc_now
+from utils.datetime_utils import utc_now
 from models.pending_op import PendingOp
 from storage.db import get_session
 

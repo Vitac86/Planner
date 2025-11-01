@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
-from datetime_utils import utc_now
+from utils.datetime_utils import utc_now
 
 
 class PendingOp(SQLModel, table=True):
