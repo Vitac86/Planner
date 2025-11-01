@@ -1,80 +1,73 @@
-"""Utilities for Planner ↔ Google Calendar synchronisation."""
+"""Utility helpers shared between sync services."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from datetime_utils import parse_rfc3339, to_rfc3339_utc
-
-
-_MARKER_RE = re.compile(r"planner_task_id\s*:\s*(\d+)", re.I)
+from datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc
 
 
-def parse_marker(description: Optional[str]) -> Optional[int]:
-    if not description:
-        return None
-    match = _MARKER_RE.search(description)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
+def build_event_payload(task) -> Dict[str, Any]:
+    start = ensure_utc(getattr(task, "start", None))
+    duration = getattr(task, "duration_minutes", None)
+    if start is None or not duration:
+        raise ValueError("Scheduled task must have start and duration")
 
+    end = start + timedelta(minutes=int(duration))
+    notes = (getattr(task, "notes", None) or "").strip()
 
-def strip_marker(description: Optional[str]) -> str:
-    if not description:
-        return ""
-    lines = [ln for ln in description.splitlines() if not _MARKER_RE.search(ln)]
-    return "\n".join(lines).strip()
-
-
-def ensure_marker(notes: str, task_id: int) -> str:
-    marker = f"planner_task_id:{task_id}"
-    if marker in notes:
-        return notes
-    return f"{notes}\n{marker}" if notes else marker
+    body: Dict[str, Any] = {
+        "summary": getattr(task, "title", "Задача"),
+        "start": {"dateTime": to_rfc3339_utc(start)},
+        "end": {"dateTime": to_rfc3339_utc(end)},
+    }
+    if notes:
+        body["description"] = notes
+    return body
 
 
 def parse_event_datetime(payload: Dict[str, Any]) -> Optional[datetime]:
     if not payload:
         return None
-    date_time = payload.get("dateTime")
-    if date_time:
-        return parse_rfc3339(date_time)
-    all_day = payload.get("date")
-    if all_day:
+    if "dateTime" in payload:
+        return ensure_utc(parse_rfc3339(payload.get("dateTime")))
+    if "date" in payload:
         try:
-            return datetime.strptime(all_day, "%Y-%m-%d")
+            raw = datetime.strptime(payload["date"], "%Y-%m-%d")
         except ValueError:
             return None
+        return ensure_utc(raw)
     return None
 
 
-def build_event_payload(task) -> Dict[str, Any]:
+def extract_event_times(event: Dict[str, Any]) -> Tuple[Optional[datetime], Optional[datetime]]:
+    start = parse_event_datetime(event.get("start", {}))
+    end = parse_event_datetime(event.get("end", {}))
+    return start, end
+
+
+def extract_notes(event: Dict[str, Any]) -> str:
+    description = event.get("description") or ""
+    return description.strip()
+
+
+def event_updated(event: Dict[str, Any]) -> Optional[datetime]:
+    return ensure_utc(parse_rfc3339(event.get("updated")))
+
+
+def task_due_datetime(task) -> Optional[datetime]:
     start = getattr(task, "start", None)
-    duration = getattr(task, "duration_minutes", None)
-    end = None
-    if start and duration:
-        end = start + timedelta(minutes=duration)
-    description = ensure_marker(strip_marker(getattr(task, "notes", "") or ""), getattr(task, "id", 0))
-    body: Dict[str, Any] = {
-        "summary": getattr(task, "title", "Задача"),
-        "description": description,
-    }
-    if start:
-        body["start"] = {"dateTime": to_rfc3339_utc(start)}
-    if end:
-        body["end"] = {"dateTime": to_rfc3339_utc(end)}
-    return body
+    if start is None:
+        return None
+    return ensure_utc(start)
 
 
 __all__ = [
-    "parse_marker",
-    "strip_marker",
-    "ensure_marker",
-    "parse_event_datetime",
     "build_event_payload",
+    "event_updated",
+    "extract_event_times",
+    "extract_notes",
+    "parse_event_datetime",
+    "task_due_datetime",
 ]

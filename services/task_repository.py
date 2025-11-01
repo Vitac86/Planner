@@ -5,12 +5,9 @@ from typing import Optional
 
 from sqlmodel import select
 
+from datetime_utils import ensure_utc, utc_now
 from models.task import Task
 from storage.db import get_session
-
-
-def _utcnow() -> datetime:
-    return datetime.utcnow()
 
 
 class TaskRepository:
@@ -39,8 +36,11 @@ class TaskRepository:
             if not obj:
                 raise ValueError("Task not found")
             for key, value in fields.items():
-                setattr(obj, key, value)
-            obj.updated_at = _utcnow()
+                if isinstance(value, datetime):
+                    setattr(obj, key, ensure_utc(value))
+                else:
+                    setattr(obj, key, value)
+            obj.updated_at = utc_now()
             session.add(obj)
             session.commit()
             session.refresh(obj)
@@ -62,8 +62,8 @@ class TaskRepository:
             obj.duration_minutes = None
             obj.gcal_event_id = None
             obj.gcal_etag = None
-            obj.gcal_updated_utc = None
-            obj.updated_at = _utcnow()
+            obj.gcal_updated = None
+            obj.updated_at = utc_now()
             session.add(obj)
             session.commit()
             session.refresh(obj)

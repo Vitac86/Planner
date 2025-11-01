@@ -14,11 +14,24 @@ def ensure_task_columns(conn) -> None:
     columns = {
         "gcal_event_id": "TEXT",
         "gcal_etag": "TEXT",
-        "gcal_updated_utc": "TEXT",
+        "gcal_updated": "TEXT",
+        "gtasks_id": "TEXT",
+        "gtasks_updated": "TEXT",
     }
     for name, ddl_type in columns.items():
         if not _column_exists(conn, "task", name):
             conn.execute(text(f"ALTER TABLE task ADD COLUMN {name} {ddl_type}"))
+
+    if _column_exists(conn, "task", "gcal_updated_utc"):
+        conn.execute(
+            text(
+                """
+                UPDATE task
+                SET gcal_updated = COALESCE(gcal_updated, gcal_updated_utc)
+                WHERE gcal_updated_utc IS NOT NULL
+                """
+            )
+        )
 
 
 def ensure_pending_ops_table(conn) -> None:

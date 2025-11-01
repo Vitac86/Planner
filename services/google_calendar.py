@@ -86,10 +86,7 @@ def _find_service_in_auth(auth) -> Any:
 
 # ---------- основной класс ----------
 class GoogleCalendar:
-    """
-    Совместим с GoogleCalendar(self.auth) из AppShell.
-    Ставит маркер planner_task_id:<id> в description для двусторонней синхронизации.
-    """
+    """Thin wrapper around Google Calendar service."""
     def __init__(self, auth, calendar_id: str = "primary"):
         self.auth = auth
         self.calendar_id = getattr(auth, "calendar_id", None) or calendar_id
@@ -120,27 +117,6 @@ class GoogleCalendar:
                 "или готовый service в auth."
             )
 
-    # ----- utils для маркера -----
-    @staticmethod
-    def _with_marker(task, notes: Optional[str]) -> str:
-        base = (notes or "").strip()
-        marker = f"planner_task_id:{getattr(task, 'id', '')}"
-        return f"{base}\n{marker}" if base else marker
-
-    @staticmethod
-    def parse_task_id_from_description(desc: Optional[str]) -> Optional[int]:
-        if not desc:
-            return None
-        key = "planner_task_id:"
-        try:
-            for line in desc.splitlines():
-                line = line.strip()
-                if line.startswith(key):
-                    return int(line[len(key):].strip())
-        except Exception:
-            return None
-        return None
-
     # ----- операции -----
     def list_range(self, start_dt: datetime, end_dt: datetime, show_deleted: bool = False) -> List[Dict[str, Any]]:
         self._maybe_build_service(strict=True)
@@ -160,23 +136,27 @@ class GoogleCalendar:
     def create_event_for_task(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
         end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
+        notes = (getattr(task, "notes", None) or "").strip()
         body = {
             "summary": getattr(task, "title", "Задача"),
-            "description": self._with_marker(task, getattr(task, "notes", None)),
             "start": {"dateTime": _to_rfc3339(start_dt)},
             "end": {"dateTime": _to_rfc3339(end_dt)},
         }
+        if notes:
+            body["description"] = notes
         return self.service.events().insert(calendarId=self.calendar_id, body=body).execute()
 
     def update_event_for_task(self, event_id: str, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
         end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
+        notes = (getattr(task, "notes", None) or "").strip()
         body = {
             "summary": getattr(task, "title", "Задача"),
-            "description": self._with_marker(task, getattr(task, "notes", None)),
             "start": {"dateTime": _to_rfc3339(start_dt)},
             "end": {"dateTime": _to_rfc3339(end_dt)},
         }
+        if notes:
+            body["description"] = notes
         return self.service.events().patch(
             calendarId=self.calendar_id, eventId=event_id, body=body
         ).execute()

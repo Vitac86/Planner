@@ -1,7 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Optional
+
+
+UTC = timezone.utc
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def midnight_utc(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=UTC)
 
 
 def _normalize_fraction(s: str) -> str:
@@ -46,9 +65,9 @@ def parse_rfc3339(s: Optional[str]) -> Optional[datetime]:
         return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt
 
 
@@ -57,11 +76,9 @@ def to_rfc3339_utc(dt: Optional[datetime]) -> Optional[str]:
 
     if dt is None:
         return None
-    value = dt
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    else:
-        value = value.astimezone(timezone.utc)
+    value = ensure_utc(dt)
+    if value is None:
+        return None
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -70,4 +87,12 @@ def to_rfc3339(dt: Optional[datetime]):
     return to_rfc3339_utc(dt)
 
 
-__all__ = ["parse_rfc3339", "to_rfc3339", "to_rfc3339_utc"]
+__all__ = [
+    "UTC",
+    "ensure_utc",
+    "midnight_utc",
+    "parse_rfc3339",
+    "to_rfc3339",
+    "to_rfc3339_utc",
+    "utc_now",
+]
