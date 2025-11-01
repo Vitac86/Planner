@@ -15,9 +15,8 @@ from .pages.history import HistoryPage
 # Google
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
-from services.google_tasks import GoogleTasksSync
-from services.sync_service import SyncService
-from services.task_repository import TaskRepository
+from services.google_tasks import GoogleTasks
+from services.sync_service import SyncService, SYNC_LOG_PATH
 from services.pending_ops_queue import PendingOpsQueue
 from services.sync_token_storage import SyncTokenStorage
 from services.tasks import TaskService
@@ -36,12 +35,13 @@ class AppShell:
         # при необходимости можно передать пути: GoogleAuth(secrets_path=..., token_path=...)
         self.auth = GoogleAuth()
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
-        self.tasks_sync = GoogleTasksSync(self.auth)
+        self.gtasks = GoogleTasks(self.auth)
         self.sync_service = SyncService(
             self.gcal,
-            TaskRepository(),
-            PendingOpsQueue(),
+            self.gtasks,
+            TaskService(),
             SyncTokenStorage(),
+            PendingOpsQueue(),
         )
         TaskService.subscribe("after_create", self.sync_service.on_task_created)
         TaskService.subscribe("after_update", self.sync_service.on_task_updated)
@@ -157,30 +157,18 @@ class AppShell:
         Возвращает True, если локальная база изменилась (для логов/отладки).
         """
         try:
-            changed = bool(self.sync_service.pull())
+            return self.sync_service.pull_all()
         except Exception as e:
-            print("Google pull sync error:", e)
-            changed = False
-
-        try:
-            changed_tasks = self.tasks_sync.pull()
-            changed = changed or changed_tasks
-        except Exception as e:
-            print("Google Tasks pull error:", e)
-
-        return changed
+            print("Google sync error:", e)
+            return False
 
     def _push_to_google(self):
         if not GOOGLE_SYNC.enabled:
             return
         try:
-            self.sync_service.process_pending()
+            self.sync_service.push_queue_worker()
         except Exception as e:
             print("Google Calendar push error:", e)
-        try:
-            self.tasks_sync.push()
-        except Exception as e:
-            print("Google Tasks push error:", e)
 
     def _start_auto_refresh(
         self, view_name: str, refresh_fn, period_sec: int | None = None
@@ -290,36 +278,38 @@ class AppShell:
         try:
             self.auth.ensure_credentials()
             self.gcal.connect()
-            self.tasks_sync.connect()
+            self.gtasks.connect()
             return True
         except Exception as exc:
             print("Google connect error:", exc)
             raise
 
-    def push_tasks_to_google(self, *, force: bool = False):
-        if not GOOGLE_SYNC.enabled:
-            return
+    def sync_status(self) -> dict:
         try:
-            self.tasks_sync.push(force_all=force)
+            return self.sync_service.status()
         except Exception as exc:
-            print("Google Tasks push (manual) error:", exc)
+            print("Sync status error:", exc)
+            return {}
 
-    def full_resync_google_tasks(self):
+    def reset_calendar_sync(self) -> None:
         try:
-            self.tasks_sync.full_resync()
+            self.sync_service.reset_calendar_sync_token()
         except Exception as exc:
-            print("Google Tasks full resync error:", exc)
+            print("Reset calendar token error:", exc)
+
+    def force_full_resync(self) -> None:
+        try:
+            self.sync_service.force_full_resync()
+        except Exception as exc:
+            print("Full resync error:", exc)
             raise
 
-    def cleanup_task_notes(self) -> int:
+    def read_sync_log(self, lines: int = 100) -> str:
+        path = SYNC_LOG_PATH
         try:
-            return self.tasks_sync.cleanup_notes_metadata()
-        except Exception as exc:
-            print("Google Tasks cleanup error:", exc)
-            raise
-
-    def tasks_sync_status(self) -> str:
-        meta = self.tasks_sync.store.get_meta()
-        if not meta.tasklist_id:
-            return "Google Tasks: не выбрано"
-        return f"Google Tasks: список {meta.tasklist_id}"
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.readlines()
+        except FileNotFoundError:
+            return "Лог синхронизации пока не создан."
+        content = [line.rstrip("\n") for line in content[-lines:]]
+        return "\n".join(content)

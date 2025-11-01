@@ -2,25 +2,30 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Iterable, List, Optional
 
 from sqlmodel import select
+from sqlalchemy import func
 
+from datetime_utils import utc_now
 from models.pending_op import PendingOp
 from storage.db import get_session
 
 
-VALID_OPS = {"create", "update", "delete"}
-
-
-def _utcnow() -> datetime:
-    return datetime.utcnow()
+VALID_OPS = {
+    "gcal_create",
+    "gcal_update",
+    "gcal_delete",
+    "gtasks_create",
+    "gtasks_update",
+    "gtasks_delete",
+}
 
 
 def _next_try(attempts: int) -> datetime:
     delay = min(30, 2 ** max(attempts, 0))
-    return _utcnow() + timedelta(seconds=delay)
+    return utc_now() + timedelta(seconds=delay)
 
 
 @dataclass
@@ -42,8 +47,8 @@ class PendingOpsQueue:
             op=op,
             task_id=task_id,
             payload=json.dumps(payload, ensure_ascii=False),
-            created_at=_utcnow(),
-            next_try_at=_utcnow(),
+            created_at=utc_now(),
+            next_try_at=utc_now(),
         )
         with get_session() as session:
             session.add(record)
@@ -68,7 +73,7 @@ class PendingOpsQueue:
                 session.commit()
 
     def due(self, limit: int = 10) -> List[PendingOperation]:
-        now = _utcnow()
+        now = utc_now()
         with get_session() as session:
             stmt = (
                 select(PendingOp)
@@ -96,6 +101,10 @@ class PendingOpsQueue:
                 )
             )
         return result
+
+    def count(self) -> int:
+        with get_session() as session:
+            return int(session.exec(select(func.count()).select_from(PendingOp)).one())
 
 
 __all__ = ["PendingOpsQueue", "PendingOperation"]
