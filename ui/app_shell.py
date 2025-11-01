@@ -274,6 +274,10 @@ class AppShell:
             self._today.load()
 
     # ---------- публичные утилиты для страниц ----------
+    def push_tasks_to_google(self) -> None:
+        """Expose push-to-Google routine for UI pages."""
+        self._push_to_google()
+
     def connect_google_services(self) -> bool:
         try:
             self.auth.ensure_credentials()
