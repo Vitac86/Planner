@@ -345,13 +345,6 @@ class TodayPage:
         )
 
         msg = "Задача добавлена"
-        if self.to_calendar_cb.value and start_dt and duration:
-            try:
-                ev = self.app.gcal.create_event_for_task(task, start_dt, duration)
-                self.svc.set_event_id(task.id, ev["id"])
-                msg = "Задача добавлена и запланирована в Google"
-            except Exception as e:
-                msg = f"Создана локально, Google недоступен: {e}"
 
         self.title_tf.value = ""
         self.date_tf.value = ""
@@ -369,12 +362,7 @@ class TodayPage:
         if GOOGLE_SYNC.auto_push_on_edit:
             self.app.push_tasks_to_google()
 
-    def on_delete(self, task_id: int, gcal_event_id: str | None):
-        if gcal_event_id:
-            try:
-                self.app.gcal.delete_event_by_id(gcal_event_id)
-            except Exception:
-                pass
+    def on_delete(self, task_id: int):
         self.svc.delete(task_id)
         self.refresh_lists()
         if GOOGLE_SYNC.auto_push_on_edit:
@@ -479,7 +467,7 @@ class TodayPage:
                 ft.IconButton(
                     icon=ft.Icons.DELETE_OUTLINE,
                     tooltip="Удалить",
-                    on_click=lambda e, tid=t.id, ev=t.gcal_event_id: self.on_delete(tid, ev),
+                    on_click=lambda e, tid=t.id: self.on_delete(tid),
                     style=ft.ButtonStyle(padding=ft.padding.all(8)),
                 ),
             ],
@@ -599,26 +587,6 @@ class TodayPage:
                 duration_minutes=new_dur,
                 priority=normalize_priority(priority_dd.value),
             )
-
-            # gcal-sync
-            if new_start is not None and new_dur is not None:
-                if updated.gcal_event_id:
-                    try:
-                        self.app.gcal.update_event_for_task(updated.gcal_event_id, updated, new_start, new_dur)
-                    except Exception as e:
-                        self._toast(f"Google: не удалось обновить: {e}")
-                else:
-                    try:
-                        ev = self.app.gcal.create_event_for_task(updated, new_start, new_dur)
-                        self.svc.set_event_id(task_id, ev["id"])
-                    except Exception as e:
-                        self._toast(f"Google: не удалось создать: {e}")
-            else:
-                if updated.gcal_event_id:
-                    try:
-                        self.app.gcal.delete_event_by_id(updated.gcal_event_id)
-                    finally:
-                        self.svc.set_event_id(task_id, None)
 
             _remove_pickers()
             _finalize_dialog()

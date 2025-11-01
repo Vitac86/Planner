@@ -16,9 +16,11 @@ from .pages.history import HistoryPage
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
 from services.google_tasks import GoogleTasksSync
-
-# Pull-синхронизация Google -> локально
-from services.sync import GoogleSync, JsonTokenStore
+from services.sync_service import SyncService
+from services.task_repository import TaskRepository
+from services.pending_ops_queue import PendingOpsQueue
+from services.sync_token_storage import SyncTokenStorage
+from services.tasks import TaskService
 
 
 class AppShell:
@@ -35,6 +37,15 @@ class AppShell:
         self.auth = GoogleAuth()
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
         self.tasks_sync = GoogleTasksSync(self.auth)
+        self.sync_service = SyncService(
+            self.gcal,
+            TaskRepository(),
+            PendingOpsQueue(),
+            SyncTokenStorage(),
+        )
+        TaskService.subscribe("after_create", self.sync_service.on_task_created)
+        TaskService.subscribe("after_update", self.sync_service.on_task_updated)
+        TaskService.subscribe("after_delete", self.sync_service.on_task_deleted)
 
         # --- страницы ---
         self._today = TodayPage(self)
@@ -146,10 +157,7 @@ class AppShell:
         Возвращает True, если локальная база изменилась (для логов/отладки).
         """
         try:
-            if not self.gcal or not getattr(self.gcal, "service", None) or not getattr(self.gcal, "calendar_id", None):
-                return False
-            sync = GoogleSync(self.gcal.service, self.gcal.calendar_id, JsonTokenStore())
-            changed = sync.pull()
+            changed = bool(self.sync_service.pull())
         except Exception as e:
             print("Google pull sync error:", e)
             changed = False
@@ -165,6 +173,10 @@ class AppShell:
     def _push_to_google(self):
         if not GOOGLE_SYNC.enabled:
             return
+        try:
+            self.sync_service.process_pending()
+        except Exception as e:
+            print("Google Calendar push error:", e)
         try:
             self.tasks_sync.push()
         except Exception as e:

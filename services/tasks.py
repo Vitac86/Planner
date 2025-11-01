@@ -15,6 +15,33 @@ from core.priorities import normalize_priority
 
 
 class TaskService:
+    _listeners = {
+        "after_create": set(),
+        "after_update": set(),
+        "after_delete": set(),
+    }
+
+    @classmethod
+    def subscribe(cls, event: str, callback):
+        if event not in cls._listeners:
+            raise ValueError(f"Unsupported event: {event}")
+        cls._listeners[event].add(callback)
+
+    @classmethod
+    def unsubscribe(cls, event: str, callback):
+        if event not in cls._listeners:
+            return
+        cls._listeners[event].discard(callback)
+
+    @classmethod
+    def _emit(cls, event: str, task_id: int):
+        listeners = list(cls._listeners.get(event, []))
+        for listener in listeners:
+            try:
+                listener(task_id)
+            except Exception:
+                pass
+
     def add(
         self,
         title: str,
@@ -34,6 +61,10 @@ class TaskService:
             s.add(t)
             s.commit()
             s.refresh(t)
+            try:
+                self._emit("after_create", t.id)
+            except Exception:
+                pass
             return t
 
     def get(self, task_id: int) -> Optional[Task]:
@@ -68,6 +99,10 @@ class TaskService:
             s.add(t)
             s.commit()
             s.refresh(t)
+            try:
+                self._emit("after_update", t.id)
+            except Exception:
+                pass
             return t
 
     def set_event_id(self, task_id: int, event_id: Optional[str]):
@@ -92,6 +127,10 @@ class TaskService:
         with get_session() as s:
             t = s.get(Task, task_id)
             if t:
+                try:
+                    self._emit("after_delete", task_id)
+                except Exception:
+                    pass
                 s.delete(t)
                 s.commit()
 

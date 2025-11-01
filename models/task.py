@@ -13,5 +13,7 @@ class Task(SQLModel, table=True):
     priority: int = 0
     status: str = "todo"          # todo / doing / done
     gcal_event_id: Optional[str] = None
+    gcal_etag: Optional[str] = None
+    gcal_updated_utc: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
