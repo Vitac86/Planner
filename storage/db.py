@@ -7,6 +7,7 @@ from storage.backup import ensure_daily_backup
 # Ensure SQLModel metadata is populated
 import models.task  # noqa: F401
 import models.pending_op  # noqa: F401
+import models.tag  # noqa: F401
 from storage import migrations
 
 
