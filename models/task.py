@@ -1,12 +1,14 @@
 # planner/models/task.py
 from typing import Optional
 from datetime import datetime
+import uuid
 
 from utils.datetime_utils import utc_now
 from sqlmodel import SQLModel, Field
 
 class Task(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    uid: str = Field(default_factory=lambda: str(uuid.uuid4()), index=True, unique=True)
     title: str
     notes: Optional[str] = None
     start: Optional[datetime] = None

@@ -1,6 +1,6 @@
 # Сборка скриптов
-# Сгенерировано: 2025-11-01 16:33:14
-# Всего файлов: 48
+# Сгенерировано: 2025-11-17 18:05:05
+# Всего файлов: 53
 
 ### core/__init__.py
 ```python
@@ -250,104 +250,7 @@ __all__ = [
 
 ### datetime_utils.py
 ```python
-from __future__ import annotations
-
-from datetime import date, datetime, time, timezone
-from typing import Optional
-
-
-UTC = timezone.utc
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
-
-
-def midnight_utc(day: date) -> datetime:
-    return datetime.combine(day, time.min, tzinfo=UTC)
-
-
-def _normalize_fraction(s: str) -> str:
-    """Pad or trim fractional seconds to 6 digits."""
-
-    digits = s[:6]
-    if len(digits) < 6:
-        digits = digits + "0" * (6 - len(digits))
-    return digits
-
-
-def parse_rfc3339(s: Optional[str]) -> Optional[datetime]:
-    """Parse a RFC3339 string and return a timezone-aware UTC datetime."""
-
-    if not s:
-        return None
-
-    value = s.strip()
-    if not value:
-        return None
-
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-
-    if "." in value:
-        head, tail = value.split(".", 1)
-        tz_sign = "+"
-        tz_suffix = "00:00"
-        if "+" in tail:
-            frac, tz_suffix = tail.split("+", 1)
-            tz_sign = "+"
-        elif "-" in tail:
-            frac, tz_suffix = tail.split("-", 1)
-            tz_sign = "-"
-        else:
-            frac = tail
-        frac = _normalize_fraction(frac)
-        value = f"{head}.{frac}{tz_sign}{tz_suffix}"
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    else:
-        dt = dt.astimezone(UTC)
-    return dt
-
-
-def to_rfc3339_utc(dt: Optional[datetime]) -> Optional[str]:
-    """Serialize a datetime to RFC3339 in UTC."""
-
-    if dt is None:
-        return None
-    value = ensure_utc(dt)
-    if value is None:
-        return None
-    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-# Backwards compatible alias
-def to_rfc3339(dt: Optional[datetime]):
-    return to_rfc3339_utc(dt)
-
-
-__all__ = [
-    "UTC",
-    "ensure_utc",
-    "midnight_utc",
-    "parse_rfc3339",
-    "to_rfc3339",
-    "to_rfc3339_utc",
-    "utc_now",
-]
+from utils.datetime_utils import *  # noqa: F401,F403
 
 ```
 
@@ -760,7 +663,7 @@ from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
-from datetime_utils import utc_now
+from utils.datetime_utils import utc_now
 
 
 class PendingOp(SQLModel, table=True):
@@ -813,17 +716,52 @@ __all__ = ["SyncMapUndated"]
 
 ```
 
+### models/tag.py
+```python
+# planner/models/tag.py
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
+from sqlmodel import Field, SQLModel
+
+from utils.datetime_utils import utc_now
+
+
+class Tag(SQLModel, table=True):
+    __tablename__ = "tags"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)
+    color_hex: str
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class TaskTag(SQLModel, table=True):
+    __tablename__ = "task_tags"
+
+    task_id: int = Field(primary_key=True, foreign_key="task.id")
+    tag_id: int = Field(primary_key=True, foreign_key="tags.id")
+
+
+__all__ = ["Tag", "TaskTag"]
+
+```
+
 ### models/task.py
 ```python
 # planner/models/task.py
 from typing import Optional
 from datetime import datetime
+import uuid
 
-from datetime_utils import utc_now
+from utils.datetime_utils import utc_now
 from sqlmodel import SQLModel, Field
 
 class Task(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    uid: str = Field(default_factory=lambda: str(uuid.uuid4()), index=True, unique=True)
     title: str
     notes: Optional[str] = None
     start: Optional[datetime] = None
@@ -884,9 +822,17 @@ __all__ = ["TaskSyncMapping", "TaskSyncMeta"]
 # -*- coding: utf-8 -*-
 """
 push_to_github.py — инициализация git-репозитория и пуш на GitHub.
+Теперь поддерживает перезапись удалённой истории.
 
-Пример:
-  python push_to_github.py --remote https://github.com/Vitac86/Planner.git --name "Vitaly" --email vitac868686@gmail.com --lfs --git "C:\\Program Files\\Git\\bin\\git.exe"
+Примеры:
+  # Перезаписать ветку main удалённо (без удаления чужих веток/тэгов):
+  python push_to_github.py --remote https://github.com/<user>/<repo>.git --name "Your Name" --email you@example.com --overwrite
+
+  # Полная синхронизация (зеркалирование всех веток/тэгов, удалит лишнее на GitHub):
+  python push_to_github.py --remote https://github.com/<user>/<repo>.git --mirror
+
+  # Явный путь к git.exe:
+  python push_to_github.py --remote ... --git "C:\\Program Files\\Git\\cmd\\git.exe"
 """
 
 import argparse
@@ -896,7 +842,6 @@ import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
-
 
 DEFAULT_GITIGNORE = dedent("""\
     # Byte-compiled / cache
@@ -944,19 +889,13 @@ DEFAULT_GITATTRIBUTES_LFS = dedent("""\
     *.bin filter=lfs diff=lfs merge=lfs -text
 """)
 
-
 def find_git(explicit: str | None) -> str:
-    # 1) явный путь из аргумента/переменных окружения
     for candidate in [explicit, os.environ.get("GIT_EXE"), os.environ.get("GIT")]:
         if candidate and Path(candidate).exists():
             return str(Path(candidate))
-
-    # 2) в PATH
     which = shutil.which("git")
     if which:
         return which
-
-    # 3) типичные пути Git for Windows
     common_paths = [
         r"C:\Users\V.Pyatakov\AppData\Local\Programs\Git\cmd\git.exe",
         r"C:\Program Files\Git\cmd\git.exe",
@@ -966,9 +905,7 @@ def find_git(explicit: str | None) -> str:
     for p in common_paths:
         if Path(p).exists():
             return p
-
     raise FileNotFoundError("git не найден. Установите Git for Windows или укажите путь параметром --git.")
-
 
 def run(cmd, cwd=None, check=True):
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, shell=False)
@@ -976,10 +913,8 @@ def run(cmd, cwd=None, check=True):
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
     return result
 
-
 def run_git(git_exe: str, args: list[str], cwd: Path, check=True):
     return run([git_exe] + args, cwd=cwd, check=check)
-
 
 def ensure_in_repo(git: str, project_dir: Path, branch: str):
     git_dir = project_dir / ".git"
@@ -989,7 +924,6 @@ def ensure_in_repo(git: str, project_dir: Path, branch: str):
         run_git(git, ["init"], project_dir)
         run_git(git, ["branch", "-M", branch], project_dir)
 
-
 def git_config(git: str, project_dir: Path, name: str | None, email: str | None):
     if name:
         run_git(git, ["config", "user.name", name], project_dir)
@@ -997,7 +931,6 @@ def git_config(git: str, project_dir: Path, name: str | None, email: str | None)
         run_git(git, ["config", "user.email", email], project_dir)
     run_git(git, ["config", "core.autocrlf", "true"], project_dir)
     run_git(git, ["config", "core.longpaths", "true"], project_dir)
-
 
 def ensure_file_contains(path: Path, content: str):
     if path.exists():
@@ -1013,13 +946,10 @@ def ensure_file_contains(path: Path, content: str):
     else:
         path.write_text(content, encoding="utf-8")
 
-
 def setup_ignores(git: str, project_dir: Path, apply_lfs: bool):
     gi = project_dir / ".gitignore"
     ensure_file_contains(gi, DEFAULT_GITIGNORE)
-
     if apply_lfs:
-        # Идемпотентно: если lfs не установлен, просто предупреждаем
         try:
             run_git(git, ["lfs", "install"], project_dir, check=False)
         except Exception:
@@ -1027,12 +957,10 @@ def setup_ignores(git: str, project_dir: Path, apply_lfs: bool):
         ga = project_dir / ".gitattributes"
         ensure_file_contains(ga, DEFAULT_GITATTRIBUTES_LFS)
 
-
 def ensure_readme(project_dir: Path):
     readme = project_dir / "README.md"
     if not readme.exists():
         readme.write_text("# Project\n\nОписание проекта.\n", encoding="utf-8")
-
 
 def initial_commit_if_needed(git: str, project_dir: Path, message: str):
     run_git(git, ["add", "."], project_dir)
@@ -1042,7 +970,6 @@ def initial_commit_if_needed(git: str, project_dir: Path, message: str):
     else:
         print("Нет изменений для коммита — пропускаю commit.")
 
-
 def set_remote(git: str, project_dir: Path, remote_url: str, remote_name: str = "origin"):
     remotes = run_git(git, ["remote"], project_dir)
     if remote_name in remotes.stdout.split():
@@ -1050,18 +977,35 @@ def set_remote(git: str, project_dir: Path, remote_url: str, remote_name: str = 
     else:
         run_git(git, ["remote", "add", remote_name, remote_url], project_dir)
 
+def push(git: str, project_dir: Path, branch: str, remote_name: str = "origin",
+         overwrite: bool = False, mirror: bool = False):
+    # Если нужен полный зеркальный пуш (ОСТОРОЖНО: удалит лишние ветки/теги на GitHub)
+    if mirror:
+        print("[WARN] Выполняю зеркалирование: git push --mirror (все ветки/теги, с удалением лишних на удалённом).")
+        run_git(git, ["push", "--mirror", remote_name], project_dir, check=True)
+        return
 
-def push(git: str, project_dir: Path, branch: str, remote_name: str = "origin"):
+    # Обычный пуш (или с перезаписью одной ветки)
+    args = ["push", "-u", remote_name, branch]
+    if overwrite:
+        # Перезаписываем историю ветки на удалённом
+        args.append("--force-with-lease")
     try:
-        run_git(git, ["push", "-u", remote_name, branch], project_dir, check=True)
-    except RuntimeError:
-        print("Первый push не удался. Пробую pull --rebase и повторный push ...", file=sys.stderr)
-        run_git(git, ["pull", "--rebase", remote_name, branch], project_dir, check=False)
-        run_git(git, ["push", "--force-with-lease", remote_name, branch], project_dir, check=True)
-
+        run_git(git, args, project_dir, check=True)
+    except RuntimeError as e:
+        # Если не указан overwrite — пробуем мягкий pull --rebase и повторный пуш
+        if not overwrite:
+            print("Первый push не удался. Пробую pull --rebase и повторный push ...", file=sys.stderr)
+            run_git(git, ["pull", "--rebase", remote_name, branch], project_dir, check=False)
+            run_git(git, ["push", "-u", remote_name, branch], project_dir, check=True)
+        else:
+            # В жёстком режиме даём пользователю подсказку про защиту ветки
+            raise RuntimeError(
+                f"Перезаписать ветку не получилось. Возможно, ветка защищена на GitHub.\n{e}"
+            )
 
 def main():
-    parser = argparse.ArgumentParser(description="Подготовка и публикация проекта на GitHub.")
+    parser = argparse.ArgumentParser(description="Подготовка и публикация проекта на GitHub (с опцией перезаписи).")
     parser.add_argument("--project-dir", default=".", help="Корень проекта (по умолчанию текущая папка).")
     parser.add_argument("--remote", required=True, help="URL удалённого репозитория, напр. https://github.com/user/repo.git")
     parser.add_argument("--branch", default="main", help="Имя основной ветки (по умолчанию main).")
@@ -1070,7 +1014,13 @@ def main():
     parser.add_argument("--message", default="Initial commit", help="Сообщение первого коммита.")
     parser.add_argument("--lfs", action="store_true", help="Включить Git LFS трекинг больших файлов.")
     parser.add_argument("--git", default=None, help="Полный путь к git.exe (если не в PATH).")
+    parser.add_argument("--overwrite", action="store_true", help="Перезаписать удалённую ветку (--force-with-lease).")
+    parser.add_argument("--mirror", action="store_true", help="Зеркалировать весь локальный репозиторий на удалённый (--mirror). ОПАСНО!")
     args = parser.parse_args()
+
+    if args.overwrite and args.mirror:
+        print("Нельзя одновременно использовать --overwrite и --mirror.", file=sys.stderr)
+        sys.exit(2)
 
     project_dir = Path(args.project_dir).resolve()
     if not project_dir.exists():
@@ -1086,10 +1036,9 @@ def main():
     ensure_readme(project_dir)
     initial_commit_if_needed(git_exe, project_dir, args.message)
     set_remote(git_exe, project_dir, args.remote)
-    push(git_exe, project_dir, args.branch)
+    push(git_exe, project_dir, args.branch, overwrite=args.overwrite, mirror=args.mirror)
 
     print("\nГотово! Проект отправлен на GitHub.\nЕсли спросит логин/пароль — используйте GitHub-логин и Personal Access Token.")
-
 
 if __name__ == "__main__":
     main()
@@ -1577,6 +1526,219 @@ __all__ = ["AppDataClient"]
 
 ```
 
+### services/appdata_store.py
+```python
+"""Google Drive appDataFolder helper for Planner synchronisation metadata."""
+
+from __future__ import annotations
+
+import json
+from typing import Dict, Optional
+
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaInMemoryUpload
+
+CONFIG_FILENAME = "planner_config.json"
+INDEX_FILENAME = "gtasks_index.json"
+DEFAULT_CONFIG = {"version": 1, "tasklist_id": None, "last_full_sync": None}
+DEFAULT_INDEX = {"version": 1, "tasks": {}}
+
+
+class AppDataStore:
+    def __init__(self, auth):
+        self.auth = auth
+        self.service = None
+        self._files: Dict[str, Dict[str, Optional[str]]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    def ensure_files(self) -> None:
+        self._ensure_service()
+        files = self._list_files()
+        for name, default in (
+            (CONFIG_FILENAME, DEFAULT_CONFIG),
+            (INDEX_FILENAME, DEFAULT_INDEX),
+        ):
+            if name not in files:
+                self._create_file(name, default)
+                files = self._list_files()  # refresh to obtain metadata + etag
+        self._files = files
+
+    def read_config(self) -> Dict:
+        return self._read_json(CONFIG_FILENAME, DEFAULT_CONFIG)
+
+    def write_config(self, payload: Dict) -> None:
+        self._write_json(CONFIG_FILENAME, payload, DEFAULT_CONFIG)
+
+    def read_index(self) -> Dict:
+        return self._read_json(INDEX_FILENAME, DEFAULT_INDEX)
+
+    def write_index(self, payload: Dict) -> None:
+        self._write_json(INDEX_FILENAME, payload, DEFAULT_INDEX)
+
+    # ------------------------------------------------------------------
+    # Service helpers
+    def _ensure_service(self) -> None:
+        if self.service is not None:
+            return
+        creds = None
+        if hasattr(self.auth, "get_credentials") and callable(self.auth.get_credentials):
+            creds = self.auth.get_credentials()
+        elif hasattr(self.auth, "ensure_credentials") and callable(self.auth.ensure_credentials):
+            if self.auth.ensure_credentials():  # type: ignore[misc]
+                creds = getattr(self.auth, "creds", None) or getattr(
+                    self.auth, "credentials", None
+                )
+        else:
+            creds = getattr(self.auth, "creds", None) or getattr(
+                self.auth, "credentials", None
+            )
+        if creds is None:
+            raise RuntimeError("Google credentials are not available for appData access")
+        self.service = build("drive", "v3", credentials=creds)
+
+    def _list_files(self) -> Dict[str, Dict[str, Optional[str]]]:
+        service = self.service
+        if service is None:
+            return {}
+        files: Dict[str, Dict[str, Optional[str]]] = {}
+        page_token: Optional[str] = None
+        while True:
+            response = (
+                service.files()
+                .list(
+                    spaces="appDataFolder",
+                    fields="nextPageToken, files(id, name, modifiedTime)",
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+            for entry in response.get("files", []):
+                name = entry.get("name")
+                if not name:
+                    continue
+                meta = self._fetch_metadata(entry.get("id"))
+                if meta:
+                    files[name] = meta
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        return files
+
+    def _fetch_metadata(self, file_id: Optional[str]) -> Optional[Dict[str, Optional[str]]]:
+        if not file_id or self.service is None:
+            return None
+        request = self.service.files().get(
+            fileId=file_id,
+            fields="id, name, modifiedTime, size",
+            supportsAllDrives=False,
+        )
+        metadata = request.execute()
+        etag = None
+        if hasattr(request, "resp") and request.resp is not None:
+            etag = request.resp.get("ETag") or request.resp.get("etag")
+        metadata["etag"] = etag
+        return metadata
+
+    def _create_file(self, name: str, payload: Dict) -> None:
+        service = self.service
+        if service is None:
+            raise RuntimeError("Drive service is not initialised")
+        media = MediaInMemoryUpload(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            mimetype="application/json",
+            resumable=False,
+        )
+        service.files().create(
+            body={"name": name, "parents": ["appDataFolder"]},
+            media_body=media,
+            fields="id, name",
+        ).execute()
+
+    # ------------------------------------------------------------------
+    # JSON helpers
+    def _ensure_cache(self) -> None:
+        if not self._files:
+            self.ensure_files()
+
+    def _read_json(self, name: str, default: Dict) -> Dict:
+        self._ensure_cache()
+        info = self._files.get(name)
+        if not info:
+            return default.copy()
+        file_id = info.get("id")
+        if not file_id:
+            return default.copy()
+        request = self.service.files().get_media(fileId=file_id)
+        try:
+            content = request.execute()
+        except HttpError as exc:
+            status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+            if status == 404:
+                self._files.pop(name, None)
+                return default.copy()
+            raise
+        if isinstance(content, bytes):
+            text = content.decode("utf-8")
+        else:
+            text = str(content)
+        if not text.strip():
+            return default.copy()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return default.copy()
+        metadata = self._fetch_metadata(file_id)
+        if metadata:
+            self._files[name] = metadata
+        return data if isinstance(data, dict) else default.copy()
+
+    def _write_json(self, name: str, payload: Dict, default: Dict) -> None:
+        self._ensure_cache()
+        info = self._files.get(name)
+        if not info:
+            self.ensure_files()
+            info = self._files.get(name)
+        if not info:
+            raise RuntimeError(f"Failed to locate {name} in appDataFolder")
+        file_id = info.get("id")
+        if not file_id:
+            raise RuntimeError(f"Invalid file id for {name}")
+
+        data = json.dumps(payload or default, ensure_ascii=False).encode("utf-8")
+        media = MediaInMemoryUpload(data, mimetype="application/json", resumable=False)
+        etag = info.get("etag")
+
+        for attempt in range(2):
+            request = self.service.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields="id, modifiedTime",
+            )
+            if etag:
+                request.headers["If-Match"] = etag
+            try:
+                request.execute()
+                refreshed = self._fetch_metadata(file_id)
+                if refreshed:
+                    self._files[name] = refreshed
+                return
+            except HttpError as exc:
+                status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+                if status == 412 and attempt == 0:
+                    refreshed = self._fetch_metadata(file_id)
+                    if refreshed:
+                        etag = refreshed.get("etag")
+                        self._files[name] = refreshed
+                        continue
+                raise
+
+
+__all__ = ["AppDataStore", "CONFIG_FILENAME", "INDEX_FILENAME"]
+
+```
+
 ### services/google_auth.py
 ```python
 # planner/services/google_auth.py
@@ -1701,7 +1863,7 @@ from typing import Any, Dict, List, Optional
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from core.settings import GOOGLE_SYNC
-from datetime_utils import to_rfc3339
+from utils.datetime_utils import to_rfc3339_utc
 
 try:
     from google.oauth2.credentials import Credentials
@@ -1717,7 +1879,7 @@ def _ensure_utc(dt: datetime) -> datetime:
 
 
 def _to_rfc3339(dt: datetime) -> str:
-    result = to_rfc3339(_ensure_utc(dt))
+    result = to_rfc3339_utc(_ensure_utc(dt))
     if result is None:
         raise ValueError("Failed to convert datetime to RFC3339")
     return result
@@ -1780,10 +1942,7 @@ def _find_service_in_auth(auth) -> Any:
 
 # ---------- основной класс ----------
 class GoogleCalendar:
-    """
-    Совместим с GoogleCalendar(self.auth) из AppShell.
-    Ставит маркер planner_task_id:<id> в description для двусторонней синхронизации.
-    """
+    """Thin wrapper around Google Calendar service."""
     def __init__(self, auth, calendar_id: str = "primary"):
         self.auth = auth
         self.calendar_id = getattr(auth, "calendar_id", None) or calendar_id
@@ -1814,27 +1973,6 @@ class GoogleCalendar:
                 "или готовый service в auth."
             )
 
-    # ----- utils для маркера -----
-    @staticmethod
-    def _with_marker(task, notes: Optional[str]) -> str:
-        base = (notes or "").strip()
-        marker = f"planner_task_id:{getattr(task, 'id', '')}"
-        return f"{base}\n{marker}" if base else marker
-
-    @staticmethod
-    def parse_task_id_from_description(desc: Optional[str]) -> Optional[int]:
-        if not desc:
-            return None
-        key = "planner_task_id:"
-        try:
-            for line in desc.splitlines():
-                line = line.strip()
-                if line.startswith(key):
-                    return int(line[len(key):].strip())
-        except Exception:
-            return None
-        return None
-
     # ----- операции -----
     def list_range(self, start_dt: datetime, end_dt: datetime, show_deleted: bool = False) -> List[Dict[str, Any]]:
         self._maybe_build_service(strict=True)
@@ -1854,23 +1992,27 @@ class GoogleCalendar:
     def create_event_for_task(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
         end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
+        notes = (getattr(task, "notes", None) or "").strip()
         body = {
             "summary": getattr(task, "title", "Задача"),
-            "description": self._with_marker(task, getattr(task, "notes", None)),
             "start": {"dateTime": _to_rfc3339(start_dt)},
             "end": {"dateTime": _to_rfc3339(end_dt)},
         }
+        if notes:
+            body["description"] = notes
         return self.service.events().insert(calendarId=self.calendar_id, body=body).execute()
 
     def update_event_for_task(self, event_id: str, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
         end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
+        notes = (getattr(task, "notes", None) or "").strip()
         body = {
             "summary": getattr(task, "title", "Задача"),
-            "description": self._with_marker(task, getattr(task, "notes", None)),
             "start": {"dateTime": _to_rfc3339(start_dt)},
             "end": {"dateTime": _to_rfc3339(end_dt)},
         }
+        if notes:
+            body["description"] = notes
         return self.service.events().patch(
             calendarId=self.calendar_id, eventId=event_id, body=body
         ).execute()
@@ -1888,608 +2030,266 @@ class GoogleCalendar:
 
 ### services/google_sync.py
 ```python
-"""Utilities for Planner ↔ Google Calendar synchronisation."""
+"""Utility helpers shared between sync services."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from datetime_utils import parse_rfc3339, to_rfc3339_utc
-
-
-_MARKER_RE = re.compile(r"planner_task_id\s*:\s*(\d+)", re.I)
+from utils.datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc
 
 
-def parse_marker(description: Optional[str]) -> Optional[int]:
-    if not description:
-        return None
-    match = _MARKER_RE.search(description)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
+def build_event_payload(task) -> Dict[str, Any]:
+    start = ensure_utc(getattr(task, "start", None))
+    duration = getattr(task, "duration_minutes", None)
+    if start is None or not duration:
+        raise ValueError("Scheduled task must have start and duration")
 
+    end = start + timedelta(minutes=int(duration))
+    notes = (getattr(task, "notes", None) or "").strip()
 
-def strip_marker(description: Optional[str]) -> str:
-    if not description:
-        return ""
-    lines = [ln for ln in description.splitlines() if not _MARKER_RE.search(ln)]
-    return "\n".join(lines).strip()
-
-
-def ensure_marker(notes: str, task_id: int) -> str:
-    marker = f"planner_task_id:{task_id}"
-    if marker in notes:
-        return notes
-    return f"{notes}\n{marker}" if notes else marker
+    body: Dict[str, Any] = {
+        "summary": getattr(task, "title", "Задача"),
+        "start": {"dateTime": to_rfc3339_utc(start)},
+        "end": {"dateTime": to_rfc3339_utc(end)},
+    }
+    if notes:
+        body["description"] = notes
+    return body
 
 
 def parse_event_datetime(payload: Dict[str, Any]) -> Optional[datetime]:
     if not payload:
         return None
-    date_time = payload.get("dateTime")
-    if date_time:
-        return parse_rfc3339(date_time)
-    all_day = payload.get("date")
-    if all_day:
+    if "dateTime" in payload:
+        return ensure_utc(parse_rfc3339(payload.get("dateTime")))
+    if "date" in payload:
         try:
-            return datetime.strptime(all_day, "%Y-%m-%d")
+            raw = datetime.strptime(payload["date"], "%Y-%m-%d")
         except ValueError:
             return None
+        return ensure_utc(raw)
     return None
 
 
-def build_event_payload(task) -> Dict[str, Any]:
+def extract_event_times(event: Dict[str, Any]) -> Tuple[Optional[datetime], Optional[datetime]]:
+    start = parse_event_datetime(event.get("start", {}))
+    end = parse_event_datetime(event.get("end", {}))
+    return start, end
+
+
+def extract_notes(event: Dict[str, Any]) -> str:
+    description = event.get("description") or ""
+    return description.strip()
+
+
+def event_updated(event: Dict[str, Any]) -> Optional[datetime]:
+    return ensure_utc(parse_rfc3339(event.get("updated")))
+
+
+def task_due_datetime(task) -> Optional[datetime]:
     start = getattr(task, "start", None)
-    duration = getattr(task, "duration_minutes", None)
-    end = None
-    if start and duration:
-        end = start + timedelta(minutes=duration)
-    description = ensure_marker(strip_marker(getattr(task, "notes", "") or ""), getattr(task, "id", 0))
-    body: Dict[str, Any] = {
-        "summary": getattr(task, "title", "Задача"),
-        "description": description,
-    }
-    if start:
-        body["start"] = {"dateTime": to_rfc3339_utc(start)}
-    if end:
-        body["end"] = {"dateTime": to_rfc3339_utc(end)}
-    return body
+    if start is None:
+        return None
+    return ensure_utc(start)
 
 
 __all__ = [
-    "parse_marker",
-    "strip_marker",
-    "ensure_marker",
-    "parse_event_datetime",
     "build_event_payload",
+    "event_updated",
+    "extract_event_times",
+    "extract_notes",
+    "parse_event_datetime",
+    "task_due_datetime",
 ]
 
 ```
 
 ### services/google_tasks.py
 ```python
-"""Google Tasks synchronisation helpers."""
+"""Minimal Google Tasks client used by the synchronisation service."""
 
 from __future__ import annotations
 
-import io
-import json
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Dict, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from core.settings import GOOGLE_SYNC
-from models.task import Task
-from models.task_sync import TaskSyncMapping
-from services.task_sync_store import TaskSyncStore
-from services.tasks import TaskService
-from datetime_utils import parse_rfc3339, to_rfc3339
+from utils.datetime_utils import ensure_utc, to_rfc3339_utc
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _utcnow_iso() -> str:
-    value = to_rfc3339(_utcnow())
-    if value is None:
-        raise ValueError("Unable to format current UTC time")
-    return value
-
-
-def _parse_google_datetime(value: Optional[str]) -> Optional[datetime]:
-    parsed = parse_rfc3339(value)
-    if parsed is None:
-        return None
-    return parsed.replace(tzinfo=None)
-
-
-def _normalize_local(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
-
-
-@dataclass
-class DriveSnapshot:
-    file_id: Optional[str]
-    content: Optional[str]
-    modified_at: Optional[datetime]
-
-
-class DriveAppDataClient:
-    """Helper for storing metadata in Drive appDataFolder."""
-
-    def __init__(self, drive_service):
-        self.drive_service = drive_service
-
-    def download(self, filename: str, known_file_id: Optional[str] = None) -> DriveSnapshot:
-        file_id = known_file_id
-        meta = None
-        if file_id:
-            try:
-                meta = (
-                    self.drive_service.files()
-                    .get(fileId=file_id, fields="id, name, modifiedTime")
-                    .execute()
-                )
-            except HttpError as e:
-                if getattr(e, "resp", None) and getattr(e.resp, "status", None) == 404:
-                    file_id = None
-                else:
-                    raise
-
-        if not file_id:
-            res = (
-                self.drive_service.files()
-                .list(
-                    spaces="appDataFolder",
-                    q="name = '{}'".format(filename.replace("'", "\\'")),
-                    fields="files(id, name, modifiedTime)",
-                    pageSize=1,
-                )
-                .execute()
-            )
-            files = res.get("files", [])
-            if files:
-                meta = files[0]
-                file_id = meta.get("id")
-            else:
-                return DriveSnapshot(file_id=None, content=None, modified_at=None)
-
-        request = self.drive_service.files().get_media(fileId=file_id)
-        buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        content = buffer.getvalue().decode("utf-8")
-        modified_at = _parse_google_datetime((meta or {}).get("modifiedTime")) if meta else None
-        return DriveSnapshot(file_id=file_id, content=content, modified_at=modified_at)
-
-    def upload(self, filename: str, content: str, file_id: Optional[str] = None) -> str:
-        media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype="application/json")
-        body = {"name": filename, "parents": ["appDataFolder"]}
-        if file_id:
-            res = (
-                self.drive_service.files()
-                .update(fileId=file_id, media_body=media, body={"name": filename})
-                .execute()
-            )
-            return res.get("id", file_id)
-        res = self.drive_service.files().create(body=body, media_body=media, fields="id").execute()
-        return res.get("id")
-
-
-class GoogleTasksSync:
-    """Synchronise Planner unscheduled tasks with Google Tasks."""
-
-    def __init__(self, auth, *, task_service: Optional[TaskService] = None, store: Optional[TaskSyncStore] = None):
+class GoogleTasks:
+    def __init__(self, auth, tasklist_name: str | None = None) -> None:
         self.auth = auth
-        self.task_service = task_service or TaskService()
-        self.store = store or TaskSyncStore()
+        self.tasklist_name = tasklist_name or GOOGLE_SYNC.tasks_tasklist_name or "Planner"
         self.service = None
-        self.drive_service = None
         self.tasklist_id: Optional[str] = None
-        self._drive_synced = False
 
-    # ----- initialisation -----
-    def connect(self):
-        self._ensure_services()
-        self._ensure_tasklist()
-        self._ensure_drive_backup()
+    # ------------------------------------------------------------------
+    # Initialisation helpers
+    def connect(self) -> None:
+        self._ensure_service(strict=True)
+        self.ensure_tasklist()
 
-    def _ensure_services(self):
-        if self.service and self.drive_service:
+    def _ensure_service(self, strict: bool = False) -> None:
+        if self.service is not None:
             return
-        creds = None
-        if hasattr(self.auth, "get_credentials"):
-            creds = self.auth.get_credentials()
-        elif hasattr(self.auth, "ensure_credentials"):
-            if self.auth.ensure_credentials():
-                creds = getattr(self.auth, "creds", None)
-        if not creds:
-            raise RuntimeError("Google credentials are not available")
-        if not self.service:
-            self.service = build("tasks", "v1", credentials=creds)
-        if not self.drive_service:
-            self.drive_service = build("drive", "v3", credentials=creds)
 
-    def _ensure_tasklist(self) -> str:
-        meta = self.store.get_meta()
+        creds = None
+        if hasattr(self.auth, "get_credentials") and callable(self.auth.get_credentials):
+            creds = self.auth.get_credentials()
+        elif hasattr(self.auth, "ensure_credentials") and callable(self.auth.ensure_credentials):
+            if self.auth.ensure_credentials():  # type: ignore[misc]
+                creds = getattr(self.auth, "creds", None) or getattr(self.auth, "credentials", None)
+        else:
+            creds = getattr(self.auth, "creds", None) or getattr(self.auth, "credentials", None)
+
+        if not creds and strict:
+            raise RuntimeError("Google credentials are not available")
+        if not creds:
+            return
+
+        self.service = build("tasks", "v1", credentials=creds)
+
+    def ensure_tasklist(self) -> str:
+        self._ensure_service(strict=True)
         if self.tasklist_id:
             return self.tasklist_id
-        candidate = meta.tasklist_id
-        if candidate:
-            try:
-                self.service.tasklists().get(tasklist=candidate).execute()
-                self.tasklist_id = candidate
-                return candidate
-            except HttpError as e:
-                if getattr(e, "resp", None) and getattr(e.resp, "status", None) != 404:
-                    raise
 
-        name = GOOGLE_SYNC.tasks_tasklist_name
-        found = self._find_tasklist_by_name(name)
-        if not found:
-            created = self.service.tasklists().insert(body={"title": name}).execute()
-            found = created.get("id")
-        if not found:
-            raise RuntimeError("Unable to determine Google Tasks list id")
-        self.tasklist_id = found
-        self.store.update_meta(tasklist_id=found)
-        return found
+        service = self.service
+        if service is None:  # pragma: no cover - defensive, should not happen
+            raise RuntimeError("Google Tasks service is not initialised")
 
-    def _find_tasklist_by_name(self, name: str) -> Optional[str]:
-        page_token = None
+        page_token: Optional[str] = None
         while True:
-            resp = self.service.tasklists().list(maxResults=100, pageToken=page_token).execute()
-            for item in resp.get("items", []):
-                if item.get("title") == name:
-                    return item.get("id")
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-        return None
-
-    # ----- drive backup -----
-    def _ensure_drive_backup(self, *, push_local: bool = False):
-        if not self.drive_service:
-            return
-        client = DriveAppDataClient(self.drive_service)
-        meta = self.store.get_meta()
-        local_updated = self.store.max_mapping_updated_at()
-        if push_local:
-            if local_updated:
-                payload = self._serialize_mappings(local_updated)
-                file_id = client.upload(GOOGLE_SYNC.tasks_meta_filename, payload, meta.drive_file_id)
-                self.store.update_meta(drive_snapshot_at=local_updated, drive_file_id=file_id)
-            return
-
-        snapshot = client.download(GOOGLE_SYNC.tasks_meta_filename, meta.drive_file_id)
-        if snapshot.file_id and snapshot.file_id != meta.drive_file_id:
-            self.store.update_meta(drive_file_id=snapshot.file_id)
-
-        if snapshot.content:
-            try:
-                data = json.loads(snapshot.content)
-            except json.JSONDecodeError:
-                data = None
-            if data:
-                remote_updated = _parse_google_datetime(data.get("updated_at")) or snapshot.modified_at
-                mappings_data = data.get("mappings", [])
-                if mappings_data and (not local_updated or (remote_updated and remote_updated > local_updated)):
-                    entries = []
-                    for item in mappings_data:
-                        local_id = item.get("local_id")
-                        if not local_id:
-                            continue
-                        if not self.task_service.get(local_id):
-                            continue
-                        entry = TaskSyncMapping(
-                            local_id=local_id,
-                            google_task_id=item.get("google_task_id"),
-                            tasklist_id=item.get("tasklist_id"),
-                            etag=item.get("etag"),
-                            updated_at_utc=_parse_google_datetime(item.get("updated_at_utc")) or _utcnow(),
-                        )
-                        entries.append(entry)
-                    if entries:
-                        self.store.replace_mappings(entries)
-                        self.store.update_meta(
-                            drive_snapshot_at=remote_updated or _utcnow(),
-                            drive_file_id=snapshot.file_id,
-                        )
-                        self._drive_synced = True
-                        return
-
-        if local_updated:
-            payload = self._serialize_mappings(local_updated)
-            file_id = client.upload(GOOGLE_SYNC.tasks_meta_filename, payload, snapshot.file_id or meta.drive_file_id)
-            self.store.update_meta(drive_snapshot_at=local_updated, drive_file_id=file_id)
-        self._drive_synced = True
-
-    def _serialize_mappings(self, updated_at: datetime) -> str:
-        payload = {
-            "updated_at": to_rfc3339(updated_at),
-            "mappings": [
-                {
-                    "local_id": m.local_id,
-                    "google_task_id": m.google_task_id,
-                    "tasklist_id": m.tasklist_id,
-                    "etag": m.etag,
-                    "updated_at_utc": to_rfc3339(m.updated_at_utc),
-                }
-                for m in self.store.list_mappings()
-            ],
-        }
-        return json.dumps(payload, ensure_ascii=False, indent=2)
-
-    # ----- pull -----
-    def pull(self, *, incremental: bool = True) -> bool:
-        if not GOOGLE_SYNC.enabled:
-            return False
-        self._ensure_services()
-        tasklist_id = self._ensure_tasklist()
-        if not self._drive_synced:
-            self._ensure_drive_backup()
-
-        meta = self.store.get_meta()
-        updated_min = meta.updated_min if incremental else None
-        changed = False
-        page_token = None
-
-        params = dict(
-            tasklist=tasklist_id,
-            showCompleted=True,
-            showHidden=True,
-            showDeleted=True,
-            maxResults=100,
-        )
-        if updated_min:
-            params["updatedMin"] = updated_min
-
-        while True:
-            if page_token:
-                params["pageToken"] = page_token
-            else:
-                params.pop("pageToken", None)
-            resp = self.service.tasks().list(**params).execute()
-            for item in resp.get("items", []):
-                if item.get("parent"):
-                    continue  # ignore subtasks for now
-                if self._apply_remote_task(item):
-                    changed = True
-            page_token = resp.get("nextPageToken")
+            response = (
+                service.tasklists()
+                .list(maxResults=100, pageToken=page_token)
+                .execute()
+            )
+            for item in response.get("items", []):
+                if item.get("title") == self.tasklist_name:
+                    self.tasklist_id = item.get("id")
+                    if self.tasklist_id:
+                        return self.tasklist_id
+            page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
-        now_iso = _utcnow_iso()
-        self.store.update_meta(
-            updated_min=now_iso,
-            last_pull_at=_utcnow(),
-            tasklist_id=tasklist_id,
-        )
-        if changed:
-            self._ensure_drive_backup(push_local=True)
-        return changed
-
-    def _apply_remote_task(self, item: Dict) -> bool:
-        google_id = item.get("id")
-        if not google_id:
-            return False
-        mapping = self.store.get_mapping_by_google(google_id)
-        status = item.get("status")
-        deleted = item.get("deleted")
-        notes = (item.get("notes") or "").strip()
-        title = item.get("title") or "Без названия"
-        updated_remote = _parse_google_datetime(item.get("updated")) or _utcnow()
-        due = item.get("due")
-
-        if deleted:
-            if mapping:
-                self.task_service.set_status(mapping.local_id, "done")
-                self.store.delete_mapping(mapping.local_id)
-                return True
-            return False
-
-        if status == "completed":
-            if mapping:
-                self.task_service.set_status(mapping.local_id, "done")
-                self.store.upsert_mapping(
-                    mapping.local_id,
-                    google_task_id=google_id,
-                    tasklist_id=self.tasklist_id,
-                    etag=item.get("etag"),
-                    updated_at_utc=updated_remote,
-                )
-                return True
-            return False
-
-        if due:
-            # Currently we only track "без даты" задачи via Google Tasks
-            return False
-
-        if mapping:
-            task = self.task_service.get(mapping.local_id)
-            if not task:
-                # Mapping exists but task missing -> recreate
-                task = self.task_service.add(title=title, notes=notes or None)
-                self.store.upsert_mapping(
-                    task.id,
-                    google_task_id=google_id,
-                    tasklist_id=self.tasklist_id,
-                    etag=item.get("etag"),
-                    updated_at_utc=updated_remote,
-                )
-                return True
-            changed = False
-            updates = {}
-            if task.title != title:
-                updates["title"] = title
-            if (task.notes or "").strip() != notes:
-                updates["notes"] = notes
-            if task.status == "done":
-                self.task_service.set_status(task.id, "todo")
-                changed = True
-            if updates:
-                self.task_service.update(task.id, **updates)
-                changed = True
-            self.store.upsert_mapping(
-                task.id,
-                google_task_id=google_id,
-                tasklist_id=self.tasklist_id,
-                etag=item.get("etag"),
-                updated_at_utc=updated_remote,
-            )
-            return changed
-
-        # New task from Google
-        task = self.task_service.add(title=title, notes=notes or None)
-        self.store.upsert_mapping(
-            task.id,
-            google_task_id=google_id,
-            tasklist_id=self.tasklist_id,
-            etag=item.get("etag"),
-            updated_at_utc=updated_remote,
-        )
-        return True
-
-    # ----- push -----
-    def push(self, *, force_all: bool = False) -> bool:
-        if not GOOGLE_SYNC.enabled:
-            return False
-        self._ensure_services()
-        tasklist_id = self._ensure_tasklist()
-        meta = self.store.get_meta()
-        since = None if force_all else meta.last_push_at
-        tasks = self.task_service.list_unscheduled_updated_since(since)
-        changed = False
-        for task in tasks:
-            if task.status == "done":
-                continue
-            if self._push_task(task, tasklist_id, force=force_all):
-                changed = True
-        if changed or force_all:
-            self.store.update_meta(last_push_at=_utcnow())
-            self._ensure_drive_backup(push_local=True)
-        return changed
-
-    def _push_task(self, task: Task, tasklist_id: str, *, force: bool = False) -> bool:
-        mapping = self.store.get_mapping(task.id)
-        body = {
-            "title": task.title or "Без названия",
-            "notes": (task.notes or "").strip(),
-            "status": "needsAction",
-        }
-
-        if mapping and mapping.google_task_id:
-            if not force and not self._needs_remote_update(task, mapping):
-                return False
-            request = self.service.tasks().patch(
-                tasklist=tasklist_id,
-                task=mapping.google_task_id,
-                body=body,
-            )
-            if mapping.etag:
-                request.headers["If-Match"] = mapping.etag
-            try:
-                resp = request.execute()
-            except HttpError as e:
-                status = getattr(e.resp, "status", None)
-                if status == 404:
-                    mapping = None
-                elif status == 412:
-                    return self._handle_conflict(task, mapping, tasklist_id)
-                else:
-                    raise
-            else:
-                self.store.upsert_mapping(
-                    task.id,
-                    google_task_id=resp.get("id"),
-                    tasklist_id=tasklist_id,
-                    etag=resp.get("etag"),
-                    updated_at_utc=_parse_google_datetime(resp.get("updated")) or _utcnow(),
-                )
-                return True
-
-        if not mapping or not mapping.google_task_id:
-            resp = self.service.tasks().insert(tasklist=tasklist_id, body=body).execute()
-            self.store.upsert_mapping(
-                task.id,
-                google_task_id=resp.get("id"),
-                tasklist_id=tasklist_id,
-                etag=resp.get("etag"),
-                updated_at_utc=_parse_google_datetime(resp.get("updated")) or _utcnow(),
-            )
-            return True
-        return False
-
-    def _needs_remote_update(self, task: Task, mapping: TaskSyncMapping) -> bool:
-        remote_timestamp = _normalize_local(mapping.updated_at_utc)
-        local_timestamp = _normalize_local(task.updated_at)
-        if not remote_timestamp or not local_timestamp:
-            return True
-        return local_timestamp > remote_timestamp
-
-    def _handle_conflict(self, task: Task, mapping: TaskSyncMapping, tasklist_id: str) -> bool:
-        remote = (
-            self.service.tasks()
-            .get(tasklist=tasklist_id, task=mapping.google_task_id)
+        created = (
+            service.tasklists()
+            .insert(body={"title": self.tasklist_name})
             .execute()
         )
-        remote_updated = _parse_google_datetime(remote.get("updated"))
-        local_updated = _normalize_local(task.updated_at)
-        if remote_updated and (not local_updated or remote_updated >= local_updated):
-            return self._apply_remote_task(remote)
+        self.tasklist_id = created.get("id")
+        if not self.tasklist_id:
+            raise RuntimeError("Failed to create Google Tasks list")
+        return self.tasklist_id
 
-        request = self.service.tasks().patch(
-            tasklist=tasklist_id,
-            task=mapping.google_task_id,
-            body={
-                "title": task.title or "Без названия",
-                "notes": (task.notes or "").strip(),
-                "status": "needsAction",
-            },
-        )
-        etag = remote.get("etag")
-        if etag:
-            request.headers["If-Match"] = etag
-        resp = request.execute()
-        self.store.upsert_mapping(
-            task.id,
-            google_task_id=resp.get("id"),
-            tasklist_id=tasklist_id,
-            etag=resp.get("etag"),
-            updated_at_utc=_parse_google_datetime(resp.get("updated")) or _utcnow(),
-        )
-        return True
+    # ------------------------------------------------------------------
+    # CRUD helpers
+    def list(self, updated_min: Optional[datetime] = None) -> List[Dict]:
+        self.connect()
+        service = self.service
+        tasklist_id = self.tasklist_id
+        if service is None or tasklist_id is None:  # pragma: no cover - defensive
+            return []
 
-    # ----- maintenance -----
-    def cleanup_notes_metadata(self) -> int:
-        changed = self.task_service.clean_notes_metadata()
-        if changed:
-            self.push(force_all=True)
-        return changed
+        params: Dict[str, Any] = {
+            "tasklist": tasklist_id,
+            "showDeleted": True,
+            "showHidden": True,
+            "maxResults": 100,
+        }
+        if updated_min:
+            params["updatedMin"] = to_rfc3339_utc(ensure_utc(updated_min)) or ""
 
-    def full_resync(self):
-        self.store.update_meta(updated_min=None)
-        self.pull(incremental=False)
-        self.push(force_all=True)
+        items: List[Dict] = []
+        page_token: Optional[str] = None
+        while True:
+            response = (
+                service.tasks()
+                .list(pageToken=page_token, **params)
+                .execute()
+            )
+            items.extend(response.get("items", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        return items
+
+    def insert(self, title: str, notes: Optional[str], due: Optional[datetime]) -> Dict:
+        self.connect()
+        service = self.service
+        tasklist_id = self.tasklist_id
+        if service is None or tasklist_id is None:  # pragma: no cover - defensive
+            raise RuntimeError("Google Tasks service is not initialised")
+
+        body: Dict[str, Optional[str]] = {"title": title.strip() or "Задача"}
+        notes_value = (notes or "").strip()
+        if notes_value:
+            body["notes"] = notes_value
+        due_value = _format_due(due)
+        if due_value:
+            body["due"] = due_value
+        return service.tasks().insert(tasklist=tasklist_id, body=body).execute()
+
+    def patch(
+        self,
+        task_id: str,
+        *,
+        title: Optional[str] = None,
+        notes: Optional[str] = None,
+        due: Optional[datetime] = None,
+        status: Optional[str] = None,
+    ) -> Dict:
+        self.connect()
+        service = self.service
+        tasklist_id = self.tasklist_id
+        if service is None or tasklist_id is None:  # pragma: no cover - defensive
+            raise RuntimeError("Google Tasks service is not initialised")
+
+        body: Dict[str, Optional[str]] = {}
+        if title is not None:
+            body["title"] = title.strip() or "Задача"
+        if notes is not None:
+            notes_value = notes.strip()
+            body["notes"] = notes_value or None
+        if due is not None:
+            body["due"] = _format_due(due)
+        if status is not None:
+            body["status"] = status
+
+        return service.tasks().patch(tasklist=tasklist_id, task=task_id, body=body).execute()
+
+    def delete(self, task_id: str) -> None:
+        self.connect()
+        service = self.service
+        tasklist_id = self.tasklist_id
+        if service is None or tasklist_id is None:  # pragma: no cover - defensive
+            return
+        try:
+            service.tasks().delete(tasklist=tasklist_id, task=task_id).execute()
+        except HttpError as exc:
+            status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+            if status and int(status) == 404:
+                return
+            raise
 
 
-__all__ = ["GoogleTasksSync"]
+def _format_due(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = ensure_utc(value)
+    normalized = normalized.replace(hour=0, minute=0, second=0, microsecond=0)
+    return to_rfc3339_utc(normalized)
+
+
+__all__ = ["GoogleTasks"]
 
 ```
 
@@ -2499,25 +2299,30 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Iterable, List, Optional
 
 from sqlmodel import select
+from sqlalchemy import func
 
+from utils.datetime_utils import utc_now
 from models.pending_op import PendingOp
 from storage.db import get_session
 
 
-VALID_OPS = {"create", "update", "delete"}
-
-
-def _utcnow() -> datetime:
-    return datetime.utcnow()
+VALID_OPS = {
+    "gcal_create",
+    "gcal_update",
+    "gcal_delete",
+    "gtasks_create",
+    "gtasks_update",
+    "gtasks_delete",
+}
 
 
 def _next_try(attempts: int) -> datetime:
     delay = min(30, 2 ** max(attempts, 0))
-    return _utcnow() + timedelta(seconds=delay)
+    return utc_now() + timedelta(seconds=delay)
 
 
 @dataclass
@@ -2539,8 +2344,8 @@ class PendingOpsQueue:
             op=op,
             task_id=task_id,
             payload=json.dumps(payload, ensure_ascii=False),
-            created_at=_utcnow(),
-            next_try_at=_utcnow(),
+            created_at=utc_now(),
+            next_try_at=utc_now(),
         )
         with get_session() as session:
             session.add(record)
@@ -2565,7 +2370,7 @@ class PendingOpsQueue:
                 session.commit()
 
     def due(self, limit: int = 10) -> List[PendingOperation]:
-        now = _utcnow()
+        now = utc_now()
         with get_session() as session:
             stmt = (
                 select(PendingOp)
@@ -2593,6 +2398,10 @@ class PendingOpsQueue:
                 )
             )
         return result
+
+    def count(self) -> int:
+        with get_session() as session:
+            return int(session.exec(select(func.count()).select_from(PendingOp)).one())
 
 
 __all__ = ["PendingOpsQueue", "PendingOperation"]
@@ -2806,298 +2615,554 @@ class GoogleSync:
 ### services/sync_service.py
 ```python
 from __future__ import annotations
-
 import logging
-from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Optional
 
 from googleapiclient.errors import HttpError
 
-from datetime_utils import parse_rfc3339, to_rfc3339_utc
+from core.settings import GOOGLE_SYNC
+from utils.datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc, utc_now
+from models.task import Task
 from services.google_calendar import GoogleCalendar
-from services.google_sync import build_event_payload, parse_marker, parse_event_datetime, strip_marker, ensure_marker
+from services.google_tasks import GoogleTasks
+from services.google_sync import (
+    build_event_payload,
+    event_updated,
+    extract_event_times,
+    extract_notes,
+)
 from services.pending_ops_queue import PendingOpsQueue
 from services.sync_token_storage import SyncTokenStorage
-from services.task_repository import TaskRepository
-
-logger = logging.getLogger(__name__)
+from services.tasks import TaskService
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+RETRYABLE_STATUS = {409, 412, 429, 500, 502, 503, 504}
+SYNC_LOG_PATH = "logs/sync.log"
+
+
+def _ensure_logger() -> logging.Logger:
+    logger = logging.getLogger("planner.sync")
+    if not logger.handlers:
+        Path(SYNC_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(SYNC_LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    return logger
+
+
+def _is_scheduled(task: Task) -> bool:
+    return bool(task.start and task.duration_minutes)
+
+
+def _due_datetime(task: Task) -> Optional[datetime]:
+    if task.start is None:
+        return None
+    dt = ensure_utc(task.start)
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _duration_minutes(start: Optional[datetime], end: Optional[datetime]) -> Optional[int]:
+    if not start or not end:
+        return None
+    delta = end - start
+    minutes = int(delta.total_seconds() // 60)
+    return minutes if minutes > 0 else None
 
 
 class SyncService:
     def __init__(
         self,
         gcal: GoogleCalendar,
-        repo: TaskRepository,
-        ops: PendingOpsQueue,
-        tokens: SyncTokenStorage,
+        gtasks: GoogleTasks,
+        repo: TaskService,
+        token_store: SyncTokenStorage,
+        queue: Optional[PendingOpsQueue] = None,
     ) -> None:
         self.gcal = gcal
+        self.gtasks = gtasks
         self.repo = repo
-        self.ops = ops
-        self.tokens = tokens
+        self.tokens = token_store
+        self.queue = queue or PendingOpsQueue()
+        self.logger = _ensure_logger()
 
-    # Pull: забрать изменения из Google и смержить в локальную БД
-    def pull(self) -> int:
-        calendar_id = getattr(self.gcal, "calendar_id", None)
-        if not calendar_id:
-            return 0
+    # ------------------------------------------------------------------
+    # Event hooks from TaskService
+    def on_task_created(self, task_id: int) -> None:
+        if not GOOGLE_SYNC.enabled:
+            return
+        task = self.repo.get(task_id)
+        if not task:
+            return
+        self.logger.debug("Task created: %s", task_id)
+        if _is_scheduled(task):
+            self._ensure_tasks_delete(task)
+            self._queue_calendar_sync(task)
+        else:
+            self._ensure_calendar_delete(task)
+            self._queue_tasks_sync(task)
 
-        self.gcal._maybe_build_service(strict=True)  # type: ignore[attr-defined]
-        token = self.tokens.get()
+    def on_task_updated(self, task_id: int) -> None:
+        if not GOOGLE_SYNC.enabled:
+            return
+        task = self.repo.get(task_id)
+        if not task:
+            return
+        self.logger.debug("Task updated: %s", task_id)
+        if _is_scheduled(task):
+            self._ensure_tasks_delete(task)
+            self._queue_calendar_sync(task)
+        else:
+            self._ensure_calendar_delete(task)
+            self._queue_tasks_sync(task)
+
+    def on_task_deleted(self, task_id: int) -> None:
+        if not GOOGLE_SYNC.enabled:
+            return
+        task = self.repo.get(task_id)
+        if not task:
+            return
+        self.logger.debug("Task deleted: %s", task_id)
+        if task.gcal_event_id:
+            self.queue.enqueue("gcal_delete", task_id, {"eventId": task.gcal_event_id})
+        if task.gtasks_id:
+            self.queue.enqueue("gtasks_delete", task_id, {"taskId": task.gtasks_id})
+
+    # ------------------------------------------------------------------
+    # Public API
+    def pull_all(self) -> bool:
+        if not GOOGLE_SYNC.enabled:
+            return False
+        changed = False
+        try:
+            changed |= self._pull_calendar()
+        except HttpError as exc:
+            status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+            if status == 410:
+                self.logger.warning("Calendar sync token expired, triggering full resync")
+                self.reset_calendar_sync_token()
+                changed |= self._pull_calendar()
+            else:
+                self.logger.error("Calendar pull failed: %s", exc)
+                raise
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.error("Calendar pull error: %s", exc)
+            raise
+
+        try:
+            changed |= self._pull_tasks()
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.error("Tasks pull error: %s", exc)
+            raise
+
+        return changed
+
+    def push_queue_worker(self) -> int:
+        processed = 0
+        for entry in self.queue.due():
+            try:
+                if self._execute_op(entry):
+                    processed += 1
+                    self.queue.remove(entry.id)
+                    self.tokens.set_last_push_timestamp()
+                else:
+                    self.queue.requeue(entry.id, "invalid payload")
+            except HttpError as exc:
+                status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+                code = int(status or 0)
+                self.logger.warning("Push op %s failed with %s", entry.op, code)
+                if code in RETRYABLE_STATUS:
+                    self.queue.requeue(entry.id, str(exc))
+                else:
+                    self.queue.requeue(entry.id, str(exc))
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.error("Push op %s crashed: %s", entry.op, exc)
+                self.queue.requeue(entry.id, str(exc))
+        return processed
+
+    def force_full_resync(self) -> None:
+        self.logger.info("Force full resync requested")
+        self.tokens.clear_all()
+        self.pull_all()
+
+    def reset_calendar_sync_token(self) -> None:
+        self.logger.info("Resetting calendar sync token")
+        self.tokens.clear_calendar_token()
+
+    def status(self) -> dict:
+        return {
+            "calendar": {
+                "calendarId": getattr(self.gcal, "calendar_id", None),
+                "syncToken": bool(self.tokens.get_calendar_token()),
+                "lastPullAt": self.tokens.get_calendar_pull_timestamp(),
+            },
+            "tasks": {
+                "tasklist": getattr(self.gtasks, "tasklist_id", None),
+                "updatedMin": self.tokens.get_tasks_updated_min(),
+                "lastPullAt": self.tokens.get_tasks_pull_timestamp(),
+            },
+            "lastPushAt": self.tokens.get_last_push_timestamp(),
+            "queueSize": self.queue.count(),
+        }
+
+    # ------------------------------------------------------------------
+    # Pull helpers
+    def _pull_calendar(self) -> bool:
+        self.logger.debug("Pulling Google Calendar")
+        self.gcal.connect()
+        service = getattr(self.gcal, "service", None)
+        if service is None:
+            return False
+
         params = dict(
-            calendarId=calendar_id,
+            calendarId=self.gcal.calendar_id,
             singleEvents=True,
             showDeleted=True,
             maxResults=250,
         )
+        token = self.tokens.get_calendar_token()
         if token:
             params["syncToken"] = token
         else:
-            params["timeMin"] = to_rfc3339_utc(_utcnow() - timedelta(days=90))
+            params["timeMin"] = to_rfc3339_utc(utc_now() - timedelta(days=90))
 
-        changes = 0
-
+        changed = False
         while True:
-            try:
-                response = self.gcal.service.events().list(**params).execute()  # type: ignore[attr-defined]
-            except HttpError as exc:
-                if getattr(exc, "resp", None) and getattr(exc.resp, "status", None) == 410:
-                    logger.warning("Sync token expired, performing full resync")
-                    self.reset_sync_token()
-                    return self.pull()
-                raise
-
+            response = service.events().list(**params).execute()
             for event in response.get("items", []):
-                if self._apply_remote_event(event):
-                    changes += 1
-
+                if self._apply_calendar_event(event):
+                    changed = True
             if "nextPageToken" in response:
                 params.pop("syncToken", None)
                 params.pop("timeMin", None)
                 params["pageToken"] = response["nextPageToken"]
                 continue
-
             if "nextSyncToken" in response:
-                self.tokens.set(response["nextSyncToken"])
+                self.tokens.set_calendar_token(response["nextSyncToken"])
             break
 
-        return changes
+        self.tokens.set_calendar_pull_timestamp()
+        return changed
 
-    def _apply_remote_event(self, event: dict) -> bool:
-        status = event.get("status")
+    def _apply_calendar_event(self, event: dict) -> bool:
         event_id = event.get("id")
         if not event_id:
             return False
 
-        description = event.get("description") or ""
-        marker = parse_marker(description)
-        task = None
-        if marker:
-            task = self.repo.get(marker)
-        if task is None:
-            task = self.repo.get_by_event_id(event_id)
-
-        updated_remote = parse_rfc3339(event.get("updated"))
-        notes = strip_marker(description)
+        status = event.get("status")
+        task = self.repo.get_by_event_id(event_id)
+        remote_updated = event_updated(event) or utc_now()
 
         if status == "cancelled":
-            if task:
-                self.repo.mark_unscheduled(task.id)
-                return True
-            return False
-
-        start = parse_event_datetime(event.get("start", {}))
-        end = parse_event_datetime(event.get("end", {}))
-        duration = None
-        if start and end and end > start:
-            duration = int((end - start).total_seconds() // 60)
-
-        if not task:
-            title = event.get("summary") or "Без названия"
-            task = self.repo.add(
-                title=title,
-                notes=notes or None,
-                start=start,
-                duration_minutes=duration,
+            if not task:
+                return False
+            self.logger.info("Calendar event deleted remotely for task %s", task.id)
+            updated_task = self.repo.update_from_sync(
+                task.id,
+                start=None,
+                duration_minutes=None,
+                gcal_event_id=None,
+                gcal_etag=None,
+                gcal_updated=remote_updated,
+                updated_at=remote_updated,
             )
-            self.repo.update(
-                task,
-                gcal_event_id=event_id,
-                gcal_etag=event.get("etag"),
-                gcal_updated_utc=to_rfc3339_utc(updated_remote) if updated_remote else None,
-            )
-            self._ensure_marker_on_event(event, task.id, notes)
+            self._queue_tasks_sync(updated_task or task)
             return True
 
-        local_updated = task.updated_at.replace(tzinfo=timezone.utc)
-        remote_updated = updated_remote or local_updated
-        known_remote = parse_rfc3339(task.gcal_updated_utc) if task.gcal_updated_utc else None
+        start, end = extract_event_times(event)
+        duration = _duration_minutes(start, end)
+        notes = extract_notes(event)
+        summary = event.get("summary") or "Без названия"
 
+        if not task:
+            self.logger.info("New calendar event -> creating task")
+            self.repo.create_from_sync(
+                title=summary,
+                notes=notes,
+                start=start,
+                duration_minutes=duration,
+                status="todo",
+                gcal_event_id=event_id,
+                gcal_etag=event.get("etag"),
+                gcal_updated=remote_updated,
+            )
+            return True
+
+        local_updated = ensure_utc(task.updated_at)
+        known_remote = ensure_utc(task.gcal_updated)
         if known_remote and remote_updated <= known_remote:
             return False
 
         if remote_updated >= local_updated:
-            self.repo.update(
-                task,
-                title=event.get("summary") or task.title,
+            self.logger.info("Calendar event %s newer than local task %s", event_id, task.id)
+            self.repo.update_from_sync(
+                task.id,
+                title=summary,
                 notes=notes or None,
                 start=start,
                 duration_minutes=duration,
                 gcal_event_id=event_id,
                 gcal_etag=event.get("etag"),
-                gcal_updated_utc=to_rfc3339_utc(remote_updated),
+                gcal_updated=remote_updated,
+                updated_at=remote_updated,
             )
-            self._ensure_marker_on_event(event, task.id, notes)
             return True
 
-        # локальная версия новее — отправим апдейт обратно
-        body = build_event_payload(task)
-        self.ops.enqueue("update", task.id, {"eventId": event_id, "body": body})
+        self.logger.debug("Local task %s wins over calendar event %s", task.id, event_id)
+        self._queue_calendar_sync(task)
         return False
 
-    def _ensure_marker_on_event(self, event: dict, task_id: int, notes: str) -> None:
-        description = event.get("description") or ""
-        if f"planner_task_id:{task_id}" in description:
-            return
-        new_description = ensure_marker(notes or "", task_id)
-        try:
-            self.gcal.service.events().patch(  # type: ignore[attr-defined]
-                calendarId=self.gcal.calendar_id,
-                eventId=event.get("id"),
-                body={"description": new_description},
-            ).execute()
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.debug("Failed to patch marker: %s", exc)
+    def _pull_tasks(self) -> bool:
+        self.logger.debug("Pulling Google Tasks")
+        self.gtasks.connect()
+        updated_min = self.tokens.get_tasks_updated_min()
+        items = self.gtasks.list(updated_min=updated_min)
+        if not items:
+            self.tokens.set_tasks_pull_timestamp()
+            return False
 
-    # Вызывается подпиской на события TaskService
-    def on_task_created(self, task_id: int):
-        task = self.repo.get(task_id)
-        if not task:
-            return
-        if not task.start or not task.duration_minutes:
-            return
-        payload = build_event_payload(task)
-        self.ops.enqueue("create", task_id, {"body": payload})
+        changed = False
+        latest_remote: Optional[datetime] = updated_min
+        for entry in items:
+            if self._apply_task_entry(entry):
+                changed = True
+            remote_updated = ensure_utc(parse_rfc3339(entry.get("updated")))
+            if remote_updated and (latest_remote is None or remote_updated > latest_remote):
+                latest_remote = remote_updated
 
-    def on_task_updated(self, task_id: int):
-        task = self.repo.get(task_id)
+        if latest_remote:
+            self.tokens.set_tasks_updated_min(latest_remote)
+        self.tokens.set_tasks_pull_timestamp()
+        return changed
+
+    def _apply_task_entry(self, entry: dict) -> bool:
+        task_id = entry.get("id")
+        if not task_id:
+            return False
+        deleted = entry.get("deleted") or entry.get("status") == "deleted"
+        remote_updated = ensure_utc(parse_rfc3339(entry.get("updated"))) or utc_now()
+        title = entry.get("title") or "Без названия"
+        notes = entry.get("notes") or None
+        due_raw = entry.get("due")
+        due_dt = ensure_utc(parse_rfc3339(due_raw)) if due_raw else None
+        if due_dt:
+            due_dt = due_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        task = self.repo.get_by_gtasks_id(task_id)
+
+        if deleted:
+            if task:
+                self.logger.info("Remote task deleted -> removing local task %s", task.id)
+                self.repo.delete_from_sync(task.id)
+                return True
+            return False
+
         if not task:
-            return
-        event_id = task.gcal_event_id
-        if not task.start or not task.duration_minutes:
-            if event_id:
-                self.ops.enqueue("delete", task_id, {"eventId": event_id})
-            return
-        payload = build_event_payload(task)
-        if event_id:
-            self.ops.enqueue("update", task_id, {"eventId": event_id, "body": payload})
+            self.logger.info("New Google Task -> creating local task")
+            self.repo.create_from_sync(
+                title=title,
+                notes=notes,
+                start=due_dt,
+                duration_minutes=None,
+                status="todo",
+                gtasks_id=task_id,
+                gtasks_updated=remote_updated,
+            )
+            return True
+
+        local_updated = ensure_utc(task.updated_at)
+        known_remote = ensure_utc(task.gtasks_updated)
+        if known_remote and remote_updated <= known_remote:
+            return False
+
+        if remote_updated >= local_updated:
+            self.logger.info("Google Task %s newer than local task %s", task_id, task.id)
+            self.repo.update_from_sync(
+                task.id,
+                title=title,
+                notes=notes,
+                start=due_dt,
+                duration_minutes=None,
+                gtasks_id=task_id,
+                gtasks_updated=remote_updated,
+                gcal_event_id=None if not _is_scheduled(task) else task.gcal_event_id,
+                updated_at=remote_updated,
+            )
+            return True
+
+        self.logger.debug("Local task %s wins over Google Task %s", task.id, task_id)
+        self._queue_tasks_sync(task)
+        return False
+
+    # ------------------------------------------------------------------
+    # Queue helpers
+    def _queue_calendar_sync(self, task: Task) -> None:
+        if task.gcal_event_id:
+            self.queue.enqueue("gcal_update", task.id, {"eventId": task.gcal_event_id})
         else:
-            self.ops.enqueue("create", task_id, {"body": payload})
+            self.queue.enqueue("gcal_create", task.id, {})
 
-    def on_task_deleted(self, task_id: int):
-        task = self.repo.get(task_id)
-        if not task or not task.gcal_event_id:
+    def _queue_tasks_sync(self, task: Optional[Task]) -> None:
+        if not task:
             return
-        self.ops.enqueue("delete", task_id, {"eventId": task.gcal_event_id})
+        if task.gtasks_id:
+            self.queue.enqueue("gtasks_update", task.id, {"taskId": task.gtasks_id})
+        else:
+            self.queue.enqueue("gtasks_create", task.id, {})
 
-    # Служебное
-    def force_full_resync(self) -> None:
-        self.reset_sync_token()
-        self.pull()
+    def _ensure_calendar_delete(self, task: Task) -> None:
+        if task.gcal_event_id:
+            self.queue.enqueue("gcal_delete", task.id, {"eventId": task.gcal_event_id})
 
-    def reset_sync_token(self) -> None:
-        self.tokens.clear()
+    def _ensure_tasks_delete(self, task: Task) -> None:
+        if task.gtasks_id:
+            self.queue.enqueue("gtasks_delete", task.id, {"taskId": task.gtasks_id})
 
-    def process_pending(self, batch_size: int = 10) -> int:
-        processed = 0
-        for entry in self.ops.due(limit=batch_size):
-            try:
-                if self._execute_op(entry):
-                    processed += 1
-                    self.ops.remove(entry.id)
-                else:
-                    self.ops.requeue(entry.id, "invalid payload")
-            except HttpError as exc:
-                status = getattr(exc.resp, "status", None)
-                if status and int(status) in {429, 500, 502, 503, 504}:
-                    self.ops.requeue(entry.id, str(exc))
-                else:
-                    self.ops.requeue(entry.id, str(exc))
-            except Exception as exc:  # pragma: no cover - best effort
-                self.ops.requeue(entry.id, str(exc))
-        return processed
-
+    # ------------------------------------------------------------------
     def _execute_op(self, entry) -> bool:
+        op = entry.op
         payload = entry.payload or {}
-        if entry.op == "create":
-            body = payload.get("body", {})
-            response = self.gcal.service.events().insert(  # type: ignore[attr-defined]
-                calendarId=self.gcal.calendar_id,
-                body=body,
-            ).execute()
-            task = self.repo.get(entry.task_id)
-            if task:
-                self.repo.update(
-                    task,
-                    gcal_event_id=response.get("id"),
-                    gcal_etag=response.get("etag"),
-                    gcal_updated_utc=response.get("updated"),
-                )
-            return True
 
-        if entry.op == "update":
-            body = payload.get("body", {})
-            event_id = payload.get("eventId")
-            if not event_id:
+        if op == "gcal_create":
+            task = self.repo.get(entry.task_id)
+            if not task or not _is_scheduled(task):
+                return True
+            self.gcal.connect()
+            service = getattr(self.gcal, "service", None)
+            if service is None:
                 return False
-            response = self.gcal.service.events().patch(  # type: ignore[attr-defined]
-                calendarId=self.gcal.calendar_id,
-                eventId=event_id,
-                body=body,
-            ).execute()
-            task = self.repo.get(entry.task_id)
-            if task:
-                self.repo.update(
-                    task,
-                    gcal_event_id=response.get("id", event_id),
-                    gcal_etag=response.get("etag"),
-                    gcal_updated_utc=response.get("updated"),
-                )
+            body = build_event_payload(task)
+            response = service.events().insert(calendarId=self.gcal.calendar_id, body=body).execute()
+            updated = event_updated(response) or utc_now()
+            self.repo.update_from_sync(
+                task.id,
+                gcal_event_id=response.get("id"),
+                gcal_etag=response.get("etag"),
+                gcal_updated=updated,
+                updated_at=updated,
+            )
             return True
 
-        if entry.op == "delete":
-            event_id = payload.get("eventId")
+        if op == "gcal_update":
+            task = self.repo.get(entry.task_id)
+            if not task or not _is_scheduled(task):
+                return True
+            event_id = payload.get("eventId") or task.gcal_event_id
             if not event_id:
                 return True
+            self.gcal.connect()
+            service = getattr(self.gcal, "service", None)
+            if service is None:
+                return False
+            body = build_event_payload(task)
+            response = service.events().patch(
+                calendarId=self.gcal.calendar_id, eventId=event_id, body=body
+            ).execute()
+            updated = event_updated(response) or utc_now()
+            self.repo.update_from_sync(
+                task.id,
+                gcal_event_id=response.get("id", event_id),
+                gcal_etag=response.get("etag"),
+                gcal_updated=updated,
+                updated_at=updated,
+            )
+            return True
+
+        if op == "gcal_delete":
+            event_id = payload.get("eventId")
+            task = self.repo.get(entry.task_id)
+            if not event_id and task:
+                event_id = task.gcal_event_id
+            if not event_id:
+                return True
+            self.gcal.connect()
+            service = getattr(self.gcal, "service", None)
+            if service is None:
+                return False
             try:
-                self.gcal.service.events().delete(  # type: ignore[attr-defined]
-                    calendarId=self.gcal.calendar_id,
-                    eventId=event_id,
-                ).execute()
+                service.events().delete(calendarId=self.gcal.calendar_id, eventId=event_id).execute()
             except HttpError as exc:
-                status = getattr(exc.resp, "status", None)
+                status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
                 if status and int(status) == 404:
                     pass
                 else:
                     raise
-            task = self.repo.get(entry.task_id)
             if task:
-                self.repo.update(
-                    task,
+                self.repo.update_from_sync(
+                    task.id,
                     gcal_event_id=None,
                     gcal_etag=None,
-                    gcal_updated_utc=None,
+                    gcal_updated=utc_now(),
+                )
+            return True
+
+        if op == "gtasks_create":
+            task = self.repo.get(entry.task_id)
+            if not task or _is_scheduled(task):
+                return True
+            due = _due_datetime(task)
+            response = self.gtasks.insert(task.title, task.notes, due)
+            remote_updated = ensure_utc(parse_rfc3339(response.get("updated"))) or utc_now()
+            self.repo.update_from_sync(
+                task.id,
+                gtasks_id=response.get("id"),
+                gtasks_updated=remote_updated,
+                updated_at=remote_updated,
+            )
+            return True
+
+        if op == "gtasks_update":
+            task = self.repo.get(entry.task_id)
+            if not task:
+                return True
+            task_id = payload.get("taskId") or task.gtasks_id
+            if not task_id:
+                return True
+            due = _due_datetime(task)
+            self.gtasks.patch(
+                task_id,
+                title=task.title,
+                notes=task.notes,
+                due=due,
+            )
+            self.repo.update_from_sync(
+                task.id,
+                gtasks_id=task_id,
+                gtasks_updated=utc_now(),
+            )
+            return True
+
+        if op == "gtasks_delete":
+            task_id = payload.get("taskId")
+            task = self.repo.get(entry.task_id)
+            if not task_id and task:
+                task_id = task.gtasks_id
+            if not task_id:
+                return True
+            try:
+                self.gtasks.delete(task_id)
+            except HttpError as exc:
+                status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+                if status and int(status) == 404:
+                    pass
+                else:
+                    raise
+            if task:
+                self.repo.update_from_sync(
+                    task.id,
+                    gtasks_id=None,
+                    gtasks_updated=utc_now(),
                 )
             return True
 
         return False
 
 
-__all__ = ["SyncService"]
+__all__ = ["SyncService", "SYNC_LOG_PATH"]
 
 ```
 
@@ -3107,37 +3172,269 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from utils.datetime_utils import ensure_utc, to_rfc3339_utc, utc_now
 from core.settings import GOOGLE_SYNC
+
+
+def _parse_datetime(value: Optional[str]):
+    from utils.datetime_utils import parse_rfc3339
+
+    return ensure_utc(parse_rfc3339(value)) if value else None
 
 
 class SyncTokenStorage:
     def __init__(self, path: Path | str | None = None):
         self.path = Path(path or GOOGLE_SYNC.sync_token_path)
 
-    def get(self) -> Optional[str]:
+    # ------------------------------------------------------------------
+    # generic helpers
+    def _load(self) -> Dict[str, Any]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return None
+            return {}
         except json.JSONDecodeError:
-            return None
-        return data.get("syncToken")
+            return {}
+        if isinstance(data, str):
+            return {"calendar": {"syncToken": data}}
+        if isinstance(data, dict):
+            return data
+        return {}
 
-    def set(self, token: str) -> None:
+    def _save(self, data: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"syncToken": token}
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
+        self.path.write_text(json.dumps(data), encoding="utf-8")
 
-    def clear(self) -> None:
-        try:
+    # ------------------------------------------------------------------
+    # Calendar token helpers
+    def get_calendar_token(self) -> Optional[str]:
+        data = self._load()
+        calendar = data.get("calendar", {})
+        if isinstance(calendar, dict):
+            token = calendar.get("syncToken")
+            if token:
+                return str(token)
+        if "syncToken" in data:
+            return str(data["syncToken"])
+        return None
+
+    def set_calendar_token(self, token: str) -> None:
+        data = self._load()
+        calendar = data.setdefault("calendar", {})
+        if isinstance(calendar, dict):
+            calendar["syncToken"] = token
+        else:
+            data["calendar"] = {"syncToken": token}
+        self._save(data)
+
+    def clear_calendar_token(self) -> None:
+        data = self._load()
+        calendar = data.get("calendar")
+        if isinstance(calendar, dict) and "syncToken" in calendar:
+            calendar.pop("syncToken", None)
+        if "syncToken" in data:
+            data.pop("syncToken", None)
+        self._save(data)
+
+    def set_calendar_pull_timestamp(self, moment=None) -> None:
+        data = self._load()
+        calendar = data.setdefault("calendar", {})
+        if isinstance(calendar, dict):
+            calendar["lastPullAt"] = to_rfc3339_utc(ensure_utc(moment) if moment else utc_now())
+        self._save(data)
+
+    def get_calendar_pull_timestamp(self):
+        data = self._load()
+        calendar = data.get("calendar", {})
+        if isinstance(calendar, dict):
+            return _parse_datetime(calendar.get("lastPullAt"))
+        return None
+
+    # ------------------------------------------------------------------
+    # Tasks helpers
+    def get_tasks_updated_min(self):
+        data = self._load()
+        tasks = data.get("tasks", {})
+        if isinstance(tasks, dict):
+            value = tasks.get("updatedMin")
+            return _parse_datetime(value)
+        return None
+
+    def set_tasks_updated_min(self, value) -> None:
+        data = self._load()
+        tasks = data.setdefault("tasks", {})
+        if isinstance(tasks, dict):
+            tasks["updatedMin"] = to_rfc3339_utc(ensure_utc(value)) if value else None
+        self._save(data)
+
+    def set_tasks_pull_timestamp(self, moment=None) -> None:
+        data = self._load()
+        tasks = data.setdefault("tasks", {})
+        if isinstance(tasks, dict):
+            tasks["lastPullAt"] = to_rfc3339_utc(ensure_utc(moment) if moment else utc_now())
+        self._save(data)
+
+    def get_tasks_pull_timestamp(self):
+        data = self._load()
+        tasks = data.get("tasks", {})
+        if isinstance(tasks, dict):
+            return _parse_datetime(tasks.get("lastPullAt"))
+        return None
+
+    # ------------------------------------------------------------------
+    # Push helpers
+    def set_last_push_timestamp(self, moment=None) -> None:
+        data = self._load()
+        data["lastPushAt"] = to_rfc3339_utc(ensure_utc(moment) if moment else utc_now())
+        self._save(data)
+
+    def get_last_push_timestamp(self):
+        data = self._load()
+        return _parse_datetime(data.get("lastPushAt"))
+
+    # ------------------------------------------------------------------
+    def clear_all(self) -> None:
+        if self.path.exists():
             self.path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 __all__ = ["SyncTokenStorage"]
+
+```
+
+### services/tags.py
+```python
+# planner/services/tags.py
+from __future__ import annotations
+
+import re
+from typing import List, Optional
+
+from sqlmodel import select
+
+from models.tag import Tag, TaskTag
+from storage.db import get_session
+from utils.datetime_utils import utc_now
+
+
+NAME_RE = re.compile(r"^.{1,40}$")
+COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+class TagService:
+    def list(self) -> List[Tag]:
+        with get_session() as session:
+            stmt = select(Tag).order_by(Tag.name.asc())
+            return list(session.exec(stmt))
+
+    def create(self, name: str, color_hex: str) -> Tag:
+        name = name.strip()
+        self._validate_inputs(name, color_hex)
+        normalized_color = color_hex.upper()
+        with get_session() as session:
+            tag = Tag(name=name, color_hex=normalized_color)
+            session.add(tag)
+            session.commit()
+            session.refresh(tag)
+            return tag
+
+    def rename(self, tag_id: int, new_name: str) -> Optional[Tag]:
+        new_name = new_name.strip()
+        self._validate_name(new_name)
+        with get_session() as session:
+            tag = session.get(Tag, tag_id)
+            if not tag:
+                return None
+            tag.name = new_name
+            tag.updated_at = utc_now()
+            session.add(tag)
+            session.commit()
+            session.refresh(tag)
+            return tag
+
+    def recolor(self, tag_id: int, color_hex: str) -> Optional[Tag]:
+        self._validate_color(color_hex)
+        normalized_color = color_hex.upper()
+        with get_session() as session:
+            tag = session.get(Tag, tag_id)
+            if not tag:
+                return None
+            tag.color_hex = normalized_color
+            tag.updated_at = utc_now()
+            session.add(tag)
+            session.commit()
+            session.refresh(tag)
+            return tag
+
+    def delete(self, tag_id: int) -> None:
+        with get_session() as session:
+            tag = session.get(Tag, tag_id)
+            if not tag:
+                return
+            # Remove associations first due to composite PK
+            stmt = select(TaskTag).where(TaskTag.tag_id == tag_id)
+            for link in session.exec(stmt):
+                session.delete(link)
+            session.delete(tag)
+            session.commit()
+
+    def set_for_task(self, task_id: int, tag_ids: List[int]) -> None:
+        unique_ids = set(tag_ids)
+        with get_session() as session:
+            # Remove old associations
+            stmt = select(TaskTag).where(TaskTag.task_id == task_id)
+            existing = list(session.exec(stmt))
+            for link in existing:
+                if link.tag_id not in unique_ids:
+                    session.delete(link)
+            # Add new links
+            existing_ids = {link.tag_id for link in existing}
+            for tag_id in unique_ids - existing_ids:
+                session.add(TaskTag(task_id=task_id, tag_id=tag_id))
+            session.commit()
+
+    def add_to_task(self, task_id: int, tag_id: int) -> None:
+        with get_session() as session:
+            link = session.get(TaskTag, (task_id, tag_id))
+            if link:
+                return
+            session.add(TaskTag(task_id=task_id, tag_id=tag_id))
+            session.commit()
+
+    def remove_from_task(self, task_id: int, tag_id: int) -> None:
+        with get_session() as session:
+            link = session.get(TaskTag, (task_id, tag_id))
+            if link:
+                session.delete(link)
+                session.commit()
+
+    def get_for_task(self, task_id: int) -> List[Tag]:
+        with get_session() as session:
+            stmt = (
+                select(Tag)
+                .join(TaskTag, Tag.id == TaskTag.tag_id)
+                .where(TaskTag.task_id == task_id)
+                .order_by(Tag.name.asc())
+            )
+            return list(session.exec(stmt))
+
+    # ------------------------------------------------------------------
+    def _validate_inputs(self, name: str, color_hex: str) -> None:
+        self._validate_name(name)
+        self._validate_color(color_hex)
+
+    def _validate_name(self, name: str) -> None:
+        if not NAME_RE.match(name):
+            raise ValueError("Tag name must be between 1 and 40 characters")
+
+    def _validate_color(self, color_hex: str) -> None:
+        if not COLOR_RE.match(color_hex):
+            raise ValueError("Color must be in #RRGGBB format")
+
+
+__all__ = ["TagService"]
 
 ```
 
@@ -3150,12 +3447,9 @@ from typing import Optional
 
 from sqlmodel import select
 
+from utils.datetime_utils import ensure_utc, utc_now
 from models.task import Task
 from storage.db import get_session
-
-
-def _utcnow() -> datetime:
-    return datetime.utcnow()
 
 
 class TaskRepository:
@@ -3184,8 +3478,11 @@ class TaskRepository:
             if not obj:
                 raise ValueError("Task not found")
             for key, value in fields.items():
-                setattr(obj, key, value)
-            obj.updated_at = _utcnow()
+                if isinstance(value, datetime):
+                    setattr(obj, key, ensure_utc(value))
+                else:
+                    setattr(obj, key, value)
+            obj.updated_at = utc_now()
             session.add(obj)
             session.commit()
             session.refresh(obj)
@@ -3207,8 +3504,8 @@ class TaskRepository:
             obj.duration_minutes = None
             obj.gcal_event_id = None
             obj.gcal_etag = None
-            obj.gcal_updated_utc = None
-            obj.updated_at = _utcnow()
+            obj.gcal_updated = None
+            obj.updated_at = utc_now()
             session.add(obj)
             session.commit()
             session.refresh(obj)
@@ -3348,6 +3645,7 @@ from sqlalchemy import and_, or_, case
 from storage.db import get_session
 from models.task import Task
 from core.priorities import normalize_priority
+from utils.datetime_utils import ensure_utc, utc_now
 
 
 class TaskService:
@@ -3385,22 +3683,25 @@ class TaskService:
         start: Optional[datetime] = None,
         duration_minutes: Optional[int] = None,
         priority: int = 0,
+        *,
+        emit: bool = True,
     ) -> Task:
         with get_session() as s:
             t = Task(
                 title=title.strip(),
                 notes=notes or None,
-                start=start,
+                start=ensure_utc(start),
                 duration_minutes=duration_minutes or None,
                 priority=normalize_priority(priority),
             )
             s.add(t)
             s.commit()
             s.refresh(t)
-            try:
-                self._emit("after_create", t.id)
-            except Exception:
-                pass
+            if emit:
+                try:
+                    self._emit("after_create", t.id)
+                except Exception:
+                    pass
             return t
 
     def get(self, task_id: int) -> Optional[Task]:
@@ -3416,6 +3717,7 @@ class TaskService:
         start: Optional[datetime] = None,
         duration_minutes: Optional[int] = None,
         priority: Optional[int] = None,
+        emit: bool = True,
     ) -> Optional[Task]:
         with get_session() as s:
             t = s.get(Task, task_id)
@@ -3426,19 +3728,20 @@ class TaskService:
             if notes is not None:
                 t.notes = notes or None
             if start is not None or start is None:
-                t.start = start
+                t.start = ensure_utc(start)
             if duration_minutes is not None or duration_minutes is None:
                 t.duration_minutes = duration_minutes
             if priority is not None:
                 t.priority = normalize_priority(priority)
-            t.updated_at = datetime.utcnow()
+            t.updated_at = utc_now()
             s.add(t)
             s.commit()
             s.refresh(t)
-            try:
-                self._emit("after_update", t.id)
-            except Exception:
-                pass
+            if emit:
+                try:
+                    self._emit("after_update", t.id)
+                except Exception:
+                    pass
             return t
 
     def set_event_id(self, task_id: int, event_id: Optional[str]):
@@ -3446,7 +3749,7 @@ class TaskService:
             t = s.get(Task, task_id)
             if t:
                 t.gcal_event_id = event_id
-                t.updated_at = datetime.utcnow()
+                t.updated_at = utc_now()
                 s.add(t)
                 s.commit()
 
@@ -3455,18 +3758,19 @@ class TaskService:
             t = s.get(Task, task_id)
             if t:
                 t.status = status
-                t.updated_at = datetime.utcnow()
+                t.updated_at = utc_now()
                 s.add(t)
                 s.commit()
 
-    def delete(self, task_id: int):
+    def delete(self, task_id: int, *, emit: bool = True):
         with get_session() as s:
             t = s.get(Task, task_id)
             if t:
-                try:
-                    self._emit("after_delete", task_id)
-                except Exception:
-                    pass
+                if emit:
+                    try:
+                        self._emit("after_delete", task_id)
+                    except Exception:
+                        pass
                 s.delete(t)
                 s.commit()
 
@@ -3511,6 +3815,78 @@ class TaskService:
         with get_session() as s:
             stmt = select(Task).where(Task.gcal_event_id == gcal_event_id)
             return s.exec(stmt).first()
+
+    def get_by_gtasks_id(self, gtasks_id: str | None):
+        if not gtasks_id:
+            return None
+        with get_session() as s:
+            stmt = select(Task).where(Task.gtasks_id == gtasks_id)
+            return s.exec(stmt).first()
+
+    def create_from_sync(
+        self,
+        *,
+        title: str,
+        notes: Optional[str] = None,
+        start: Optional[datetime] = None,
+        duration_minutes: Optional[int] = None,
+        priority: int = 0,
+        status: Optional[str] = None,
+        gcal_event_id: Optional[str] = None,
+        gcal_etag: Optional[str] = None,
+        gcal_updated: Optional[datetime] = None,
+        gtasks_id: Optional[str] = None,
+        gtasks_updated: Optional[datetime] = None,
+    ) -> Task:
+        with get_session() as s:
+            task = Task(
+                title=title.strip() or "Задача",
+                notes=notes or None,
+                start=ensure_utc(start),
+                duration_minutes=duration_minutes,
+                priority=normalize_priority(priority),
+                status=status or "todo",
+                gcal_event_id=gcal_event_id,
+                gcal_etag=gcal_etag,
+                gcal_updated=ensure_utc(gcal_updated),
+                gtasks_id=gtasks_id,
+                gtasks_updated=ensure_utc(gtasks_updated),
+            )
+            if task.start is None:
+                task.duration_minutes = None
+            s.add(task)
+            s.commit()
+            s.refresh(task)
+            return task
+
+    def update_from_sync(
+        self,
+        task_id: int,
+        *,
+        updated_at: Optional[datetime] = None,
+        **fields,
+    ) -> Optional[Task]:
+        with get_session() as s:
+            task = s.get(Task, task_id)
+            if not task:
+                return None
+            for key, value in fields.items():
+                if hasattr(task, key):
+                    if isinstance(value, datetime):
+                        setattr(task, key, ensure_utc(value))
+                    else:
+                        setattr(task, key, value)
+            if updated_at is not None:
+                task.updated_at = ensure_utc(updated_at)
+            else:
+                task.updated_at = utc_now()
+            s.add(task)
+            s.commit()
+            s.refresh(task)
+            return task
+
+    def delete_from_sync(self, task_id: int) -> None:
+        self.delete(task_id, emit=False)
 
     def unschedule(self, task_id: int):
         """Снять расписание и отвязать от Google-события (но задачу не удалять)."""
@@ -4897,6 +5273,7 @@ from storage.backup import ensure_daily_backup
 # Ensure SQLModel metadata is populated
 import models.task  # noqa: F401
 import models.pending_op  # noqa: F401
+import models.tag  # noqa: F401
 from storage import migrations
 
 
@@ -5052,9 +5429,55 @@ def ensure_pending_ops_table(conn) -> None:
     )
 
 
+def ensure_task_uid(conn) -> None:
+    if not _column_exists(conn, "task", "uid"):
+        conn.execute(text("ALTER TABLE task ADD COLUMN uid TEXT"))
+    conn.execute(
+        text(
+            """
+            UPDATE task
+            SET uid = lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(6)))
+            WHERE uid IS NULL OR uid=''
+            """
+        )
+    )
+    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_uid ON task(uid)"))
+
+
+def ensure_tag_tables(conn) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                color_hex TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS task_tags (
+                task_id INTEGER NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                PRIMARY KEY (task_id, tag_id)
+            )
+            """
+        )
+    )
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_task_tags_task ON task_tags(task_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_task_tags_tag ON task_tags(tag_id)"))
+
+
 def run_all(engine) -> None:
     with engine.begin() as conn:
         ensure_task_columns(conn)
+        ensure_task_uid(conn)
+        ensure_tag_tables(conn)
         # SQLModel creates the pendingop table, but ensure indexes exist in legacy DBs
         ensure_pending_ops_table(conn)
 
@@ -5878,6 +6301,10 @@ class AppShell:
             self._today.load()
 
     # ---------- публичные утилиты для страниц ----------
+    def push_tasks_to_google(self) -> None:
+        """Expose push-to-Google routine for UI pages."""
+        self._push_to_google()
+
     def connect_google_services(self) -> bool:
         try:
             self.auth.ensure_credentials()
@@ -7344,7 +7771,7 @@ class SettingsPage:
                 ft.Row([self.connect_btn, self.reset_token_btn, self.resync_btn], spacing=12),
                 ft.Column([
                     ft.Text("Лог синхронизации", size=18, weight=ft.FontWeight.W_600),
-                    ft.Container(self.log_view, height=200, padding=10, bgcolor=ft.colors.SURFACE_VARIANT),
+                    ft.Container(self.log_view, height=200, padding=10, bgcolor=ft.Colors.ON_SURFACE_VARIANT),
                     self.refresh_log_btn,
                 ], spacing=8),
             ],
@@ -8119,6 +8546,115 @@ class TodayPage:
             pass
         self.app.page.update()
         self.app.cleanup_overlays()
+
+```
+
+### utils/__init__.py
+```python
+"""Helper utilities for Planner."""
+
+__all__ = ["datetime_utils"]
+
+```
+
+### utils/datetime_utils.py
+```python
+"""Utilities for working with RFC3339 timestamps and UTC datetimes."""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timezone
+from typing import Optional, Union
+
+UTC = timezone.utc
+
+
+def parse_rfc3339(s: Optional[str]) -> Optional[datetime]:
+    """Parse a RFC3339 string and return a timezone-aware UTC datetime."""
+
+    if not s:
+        return None
+
+    value = s.strip()
+    if not value:
+        return None
+
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    if "." in value:
+        head, tail = value.split(".", 1)
+        if "+" in tail:
+            frac, tz = tail.split("+", 1)
+            sign = "+"
+        elif "-" in tail:
+            frac, tz = tail.split("-", 1)
+            sign = "-"
+        else:
+            frac, tz = tail, "+00:00"
+            sign = "+"
+        frac = (frac + "000000")[:6]
+        value = f"{head}.{frac}{sign}{tz}"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt
+
+
+def to_rfc3339_utc(dt: Optional[Union[datetime, str]]) -> Optional[str]:
+    """Convert a datetime (or string) to RFC3339 in UTC with second precision."""
+
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        dt = parse_rfc3339(dt)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def midnight_utc(d: date) -> datetime:
+    return datetime.combine(d, time.min, tzinfo=UTC)
+
+
+def normalize_midnight(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    normalized = ensure_utc(dt)
+    return normalized.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+__all__ = [
+    "UTC",
+    "ensure_utc",
+    "midnight_utc",
+    "normalize_midnight",
+    "parse_rfc3339",
+    "to_rfc3339_utc",
+    "utc_now",
+]
 
 ```
 
