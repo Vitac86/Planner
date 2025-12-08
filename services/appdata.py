@@ -132,7 +132,7 @@ class AppDataClient:
             return
         creds = self._find_creds(DEFAULT_SCOPES())
         if creds and getattr(creds, "valid", False):
-            self.service = build("drive", "v3", credentials=creds)
+            self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
         elif strict:
             raise RuntimeError("AppDataClient: credentials are unavailable")
 

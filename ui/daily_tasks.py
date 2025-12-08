@@ -23,8 +23,8 @@ except locale.Error:
 
 
 class DailyTasksPanel:
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, app_shell):
+        self.app = app_shell
         self.svc = DailyTaskService()
         self._tasks: list[DailyTask] = []
         self._dialog: ft.AlertDialog | None = None

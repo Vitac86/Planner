@@ -74,7 +74,7 @@ def _find_creds_in_auth(auth: Any, scopes: Optional[Iterable[str]] = None):
 def _build_service(creds: Any):
     if creds is None:
         return None
-    return build("tasks", "v1", credentials=creds)
+    return build("tasks", "v1", credentials=creds, cache_discovery=False)
 
 
 def _split_notes(raw_notes: Optional[str]) -> Tuple[Dict[str, Any], str, bool]:

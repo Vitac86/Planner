@@ -17,8 +17,9 @@ from core.settings import UI, GOOGLE_SYNC
 class TodayPage:
     LIST_SECTION_HEIGHT = UI.today.list_section_height
 
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, app_shell):
+        self.app = app_shell
+        self.page = app_shell.page
         self.svc = TaskService()
         self.edit_dialog: ft.AlertDialog | None = None
 
@@ -108,7 +109,7 @@ class TodayPage:
 
         self.today_list = ft.ListView(expand=True, spacing=12)
         self.unscheduled_list = ft.ListView(expand=True, spacing=12)
-        self.daily_tasks_panel = DailyTasksPanel(self)
+        self.daily_tasks_panel = DailyTasksPanel(self.app)
 
         today_card = ft.Card(
             content=ft.Container(
@@ -159,12 +160,12 @@ class TodayPage:
             padding=20,
         )
 
-        self.refresh_lists()
-        self.refresh_daily_tasks()
-    
+    def mount(self):
+        self.load()
+
     # --- вызов из меню/автообновления ---
     def activate_from_menu(self):
-        self.load()
+        self.mount()
 
     def load(self):
         # алиас для унификации с календарём
