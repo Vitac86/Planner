@@ -112,25 +112,25 @@ class TodayPage:
 
         today_card = ft.Card(
             content=ft.Container(
-                padding=12,
+                padding=ft.padding.symmetric(horizontal=12, vertical=10),
                 content=ft.Column(
                     [
                         ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600),
                         ft.Container(content=self.today_list, height=self.LIST_SECTION_HEIGHT),
                     ],
-                    spacing=10,
+                    spacing=8,
                 ),
             )
         )
         unscheduled_card = ft.Card(
             content=ft.Container(
-                padding=12,
+                padding=ft.padding.symmetric(horizontal=12, vertical=10),
                 content=ft.Column(
                     [
                         ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600),
                         ft.Container(content=self.unscheduled_list, height=self.LIST_SECTION_HEIGHT),
                     ],
-                    spacing=10,
+                    spacing=8,
                 ),
             )
         )
@@ -152,7 +152,7 @@ class TodayPage:
                     lists_row,
                     self.daily_tasks_panel.view,
                 ],
-                spacing=14,
+                spacing=12,
                 expand=True,
             ),
             expand=True,
