@@ -224,46 +224,36 @@ class DailyTasksPanel:
                     mask |= 1 << i
             return mask
 
-        def close_dialog():
-            if self._dialog:
-                self._dialog.open = False
-                self.app.page.update()
-                try:
-                    self.app.page.overlay.remove(self._dialog)
-                except Exception:
-                    pass
-                self._dialog = None
+        save_btn: ft.TextButton | None = None
 
         def on_save(_):
-            title = (title_tf.value or "").strip()
-            if not title:
-                return self._toast("Введите название задачи")
-
-            mask = collect_weekdays()
-            if mask == 0:
-                return self._toast("Выберите хотя бы один день недели")
-
+            nonlocal save_btn
             try:
+                if save_btn:
+                    save_btn.disabled = True
+                title = (title_tf.value or "").strip()
+                if not title:
+                    self.app.toast("Укажите название", success=False)
+                    return
+
+                mask = collect_weekdays()
+                if mask == 0:
+                    self.app.toast("Выберите хотя бы один день недели", success=False)
+                    return
+
                 if task:
                     self.svc.update(task.id, title=title, weekdays=mask)
                 else:
                     self.svc.create(title=title, weekdays=mask)
-            except ValueError as e:
-                return self._toast(str(e))
 
-            close_dialog()
-            self.refresh()
-
-        def on_cancel(_=None):
-            close_dialog()
-
-        actions = ft.Row(
-            [
-                ft.TextButton("Отмена", on_click=on_cancel),
-                ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
-            ],
-            alignment=ft.MainAxisAlignment.END,
-        )
+                self.refresh()
+                self.app.toast("Сохранено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", success=False)
+            finally:
+                if save_btn:
+                    save_btn.disabled = False
+                self.app.overlays.pop_top()
 
         dialog_content = ft.Container(
             width=420,
@@ -277,59 +267,54 @@ class DailyTasksPanel:
                         spacing=12,
                         run_spacing=8,
                     ),
-                    actions,
                 ],
                 spacing=12,
                 tight=True,
             ),
         )
 
-        self._dialog = ft.AlertDialog(
+        save_btn = ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save)
+        dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Редактировать задачу" if task else "Новая ежедневная задача"),
             content=dialog_content,
-            on_dismiss=on_cancel,
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda e: self.app.overlays.pop_top()),
+                save_btn,
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
         )
 
-        if self._dialog not in self.app.page.overlay:
-            self.app.page.overlay.append(self._dialog)
-        self._dialog.open = True
-        self.app.page.update()
+        self.app.page.snack_bar.open = False
+        self.app.overlays.push_dialog(dlg)
 
     def _confirm_delete(self, task_id: str):
         dlg = ft.AlertDialog(modal=True)
 
-        def close(_=None):
-            dlg.open = False
-            self.app.page.update()
-            try:
-                self.app.page.overlay.remove(dlg)
-            except Exception:
-                pass
-
         def on_delete(_):
-            self.svc.delete(task_id)
-            close()
-            self.refresh()
+            try:
+                self.svc.delete(task_id)
+                self.refresh()
+                self.app.toast("Удалено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", success=False)
+            finally:
+                self.app.overlays.pop_top()
 
         dlg.title = ft.Text("Удалить задачу?")
         dlg.content = ft.Text("Действие нельзя отменить")
         dlg.actions = [
-            ft.TextButton("Отмена", on_click=close),
+            ft.TextButton("Отмена", on_click=lambda e: self.app.overlays.pop_top()),
             ft.FilledButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=on_delete),
         ]
         dlg.actions_alignment = ft.MainAxisAlignment.END
 
-        if dlg not in self.app.page.overlay:
-            self.app.page.overlay.append(dlg)
-        dlg.open = True
-        self.app.page.update()
+        self.app.page.snack_bar.open = False
+        self.app.overlays.push_dialog(dlg)
 
     # ---------- Helpers ----------
     def _toast(self, text: str):
-        self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
-        self.app.page.snack_bar.open = True
-        self.app.page.update()
+        self.app.toast(text)
 
     # ---------- Rollover scheduling ----------
     def _seconds_until_midnight(self) -> float:

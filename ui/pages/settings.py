@@ -92,9 +92,7 @@ class SettingsPage:
         try:
             self.app.connect_google_services()
             self.refresh_status()
-            self.app.page.snack_bar = ft.SnackBar(ft.Text("Google подключён"))
-            self.app.page.snack_bar.open = True
-            self.app.page.update()
+            self.app.toast("Google подключён")
         except Exception as e:
             self.status_calendar.value = f"Ошибка: {e}"
             self.app.page.update()
@@ -103,9 +101,7 @@ class SettingsPage:
         try:
             self.app.reset_calendar_sync()
             self.refresh_status()
-            self.app.page.snack_bar = ft.SnackBar(ft.Text("syncToken сброшен"))
-            self.app.page.snack_bar.open = True
-            self.app.page.update()
+            self.app.toast("syncToken сброшен")
         except Exception as e:
             self.status_calendar.value = f"Ошибка сброса: {e}"
             self.app.page.update()
@@ -114,9 +110,7 @@ class SettingsPage:
         try:
             self.app.force_full_resync()
             self.refresh_status()
-            self.app.page.snack_bar = ft.SnackBar(ft.Text("Полная синхронизация завершена"))
-            self.app.page.snack_bar.open = True
-            self.app.page.update()
+            self.app.toast("Полная синхронизация завершена")
         except Exception as e:
             self.status_tasks.value = f"Ошибка: {e}"
             self.app.page.update()

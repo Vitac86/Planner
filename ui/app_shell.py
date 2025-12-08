@@ -5,6 +5,7 @@ import asyncio
 import flet as ft
 
 from core.settings import UI, GOOGLE_SYNC
+from ui.overlay import OverlayManager
 
 # страницы
 from .pages.today import TodayPage
@@ -25,6 +26,10 @@ from services.tasks import TaskService
 class AppShell:
     def __init__(self, page: ft.Page):
         self.page = page
+        self.overlays = OverlayManager(self.page)
+
+        # единый snackbar для всего приложения
+        self.page.snack_bar = ft.SnackBar(ft.Text(""), open=False)
 
         # базовые настройки окна
         self.page.title = UI.app_title
@@ -137,6 +142,13 @@ class AppShell:
 
         if changed:
             self.page.update()
+
+    def toast(self, text: str, *, success: bool = True):
+        sb = self.page.snack_bar
+        sb.bgcolor = ft.colors.GREEN_600 if success else ft.colors.RED_600
+        sb.content = ft.Text(text)
+        sb.open = True
+        self.page.update()
 
     # ---------- утилиты ----------
     def _has_open_overlay(self) -> bool:
