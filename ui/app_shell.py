@@ -228,6 +228,8 @@ class AppShell:
         self.content.content = self._today.view
         self.page.update()
 
+        self._today.mount()
+
         self._pull_from_google()
         self._today.activate_from_menu()
         self._start_auto_refresh("today", self._today.load, run_immediately=False)
