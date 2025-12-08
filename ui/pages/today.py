@@ -569,45 +569,57 @@ class TodayPage:
                 except Exception:
                     pass
 
-        def _finalize_dialog():
-            dlg = self.edit_dialog
-            self.edit_dialog = None
-            self._close_alert_dialog(dlg)
+        save_btn: ft.Control | None = None
+
+        def _close_dialog():
+            _remove_pickers()
+            self.app.overlays.pop_top()
 
         def on_save(_):
-            new_title = (title_tf.value or "").strip()
-            if not new_title:
-                return self._toast("Введите название")
-            if date_tf.value and self._parse_date_tf(date_tf.value) is None:
-                return self._toast("Неверный формат даты. Пример: 10.10.2025")
-            if time_tf.value and self._parse_time_tf(time_tf.value) is None:
-                return self._toast("Неверный формат времени. Пример: 09:30")
-
-            new_start = self._combine_dt(date_tf.value, time_tf.value)
+            nonlocal save_btn
             try:
-                new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
-            except ValueError:
-                return self._toast("Длительность должна быть числом (мин)")
+                if save_btn:
+                    save_btn.disabled = True
+                new_title = (title_tf.value or "").strip()
+                if not new_title:
+                    self.app.toast("Укажите название", success=False)
+                    return
+                if date_tf.value and self._parse_date_tf(date_tf.value) is None:
+                    self.app.toast("Неверный формат даты. Пример: 10.10.2025", success=False)
+                    return
+                if time_tf.value and self._parse_time_tf(time_tf.value) is None:
+                    self.app.toast("Неверный формат времени. Пример: 09:30", success=False)
+                    return
 
-            updated = self.svc.update(
-                task_id,
-                title=new_title,
-                notes=notes_tf.value,
-                start=new_start,
-                duration_minutes=new_dur,
-                priority=normalize_priority(priority_dd.value),
-            )
+                new_start = self._combine_dt(date_tf.value, time_tf.value)
+                try:
+                    new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
+                except ValueError:
+                    self.app.toast("Длительность должна быть числом (мин)", success=False)
+                    return
 
-            _remove_pickers()
-            _finalize_dialog()
-            self.refresh_lists()
-            if GOOGLE_SYNC.auto_push_on_edit:
-                self.app.push_tasks_to_google()
-            self._toast("Сохранено")
+                self.svc.update(
+                    task_id,
+                    title=new_title,
+                    notes=notes_tf.value,
+                    start=new_start,
+                    duration_minutes=new_dur,
+                    priority=normalize_priority(priority_dd.value),
+                )
+
+                self.refresh_lists()
+                if GOOGLE_SYNC.auto_push_on_edit:
+                    self.app.push_tasks_to_google()
+                self.app.toast("Сохранено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", success=False)
+            finally:
+                if save_btn:
+                    save_btn.disabled = False
+                _close_dialog()
 
         def on_cancel(_=None):
-            _remove_pickers()
-            _finalize_dialog()
+            _close_dialog()
 
         # --- КОМПАКТНАЯ ВЁРСТКА ---
 
@@ -637,8 +649,9 @@ class TodayPage:
         )
 
         MAX_W = 520
-        self.edit_dialog = ft.AlertDialog(
-            modal=False,
+        save_btn = buttons_row.controls[1]
+        dlg = ft.AlertDialog(
+            modal=True,
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text("Редактировать задачу"),
@@ -653,11 +666,8 @@ class TodayPage:
             ),
         )
 
-        if self.edit_dialog not in self.app.page.overlay:
-            self.app.page.overlay.append(self.edit_dialog)
-        self.edit_dialog.open = True
-        self.edit_dialog.on_dismiss = on_cancel
-        self.app.page.update()
+        self.app.page.snack_bar.open = False
+        self.app.overlays.push_dialog(dlg)
 
 
 
@@ -683,21 +693,11 @@ class TodayPage:
         )
 
     def _toast(self, text: str):
-        self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
-        self.app.page.snack_bar.open = True
-        self.app.page.update()
+        self.app.toast(text)
 
     def _close_alert_dialog(self, dlg: ft.AlertDialog | None):
+        # совместимость со старым кодом (не используется после миграции оверлеев)
         if not dlg:
             return
-        try:
-            dlg.open = False
-        except Exception:
-            pass
-        try:
-            if dlg in self.app.page.overlay:
-                self.app.page.overlay.remove(dlg)
-        except Exception:
-            pass
+        dlg.open = False
         self.app.page.update()
-        self.app.cleanup_overlays()
