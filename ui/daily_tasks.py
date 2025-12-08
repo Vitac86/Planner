@@ -106,8 +106,14 @@ class DailyTasksPanel:
             size=14,
             weight=ft.FontWeight.W_600,
             color=ft.Colors.with_opacity(title_opacity, title_color or ft.Colors.ON_SURFACE),
-            decoration=ft.TextDecoration.LINE_THROUGH if checked else None,
             tooltip=task.title,
+            style=ft.TextStyle(
+                decoration=(
+                    ft.TextDecoration.LINE_THROUGH
+                    if getattr(task, "done", False)
+                    else None
+                ),
+            ),
         )
 
         subtitle = ft.Text(
@@ -121,14 +127,12 @@ class DailyTasksPanel:
             tooltip="Редактировать",
             on_click=lambda e, tid=task.id: self._open_dialog(task_id=tid),
             style=ft.ButtonStyle(padding=ft.padding.all(6)),
-            semantics_label="Редактировать",
         )
         delete_btn = ft.IconButton(
             icon=ft.Icons.DELETE_OUTLINE,
             tooltip="Удалить",
             on_click=lambda e, tid=task.id: self._confirm_delete(tid),
             style=ft.ButtonStyle(padding=ft.padding.all(6)),
-            semantics_label="Удалить",
         )
 
         actions = ft.Row([edit_btn, delete_btn], spacing=4, alignment=ft.MainAxisAlignment.END)
@@ -267,7 +271,12 @@ class DailyTasksPanel:
                 [
                     title_tf,
                     ft.Text("Дни недели", weight=ft.FontWeight.W_600),
-                    ft.Wrap(weekday_checkboxes, spacing=12, run_spacing=8),
+                    ft.Row(
+                        controls=weekday_checkboxes,
+                        wrap=True,
+                        spacing=12,
+                        run_spacing=8,
+                    ),
                     actions,
                 ],
                 spacing=12,

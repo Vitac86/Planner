@@ -161,16 +161,16 @@ class TodayPage:
         )
 
     def mount(self):
+        self.refresh_daily_tasks()
         self.load()
 
     # --- вызов из меню/автообновления ---
     def activate_from_menu(self):
-        self.mount()
+        self.load()
 
     def load(self):
         # алиас для унификации с календарём
         self.refresh_lists()
-        self.refresh_daily_tasks()
 
     # ---------- Утилиты ----------
     def _new_time_picker(self) -> ft.TimePicker:
