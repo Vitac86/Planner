@@ -4,6 +4,7 @@ from datetime import datetime, date, timedelta, time as dt_time
 import flet as ft
 
 from services.tasks import TaskService
+from ui.daily_tasks import DailyTasksPanel
 from core.priorities import (
     priority_options,
     priority_label,
@@ -107,28 +108,29 @@ class TodayPage:
 
         self.today_list = ft.ListView(expand=True, spacing=12)
         self.unscheduled_list = ft.ListView(expand=True, spacing=12)
+        self.daily_tasks_panel = DailyTasksPanel(self)
 
         today_card = ft.Card(
             content=ft.Container(
-                padding=16,
+                padding=12,
                 content=ft.Column(
                     [
                         ft.Text("Сегодня", size=18, weight=ft.FontWeight.W_600),
                         ft.Container(content=self.today_list, height=self.LIST_SECTION_HEIGHT),
                     ],
-                    spacing=12,
+                    spacing=10,
                 ),
             )
         )
         unscheduled_card = ft.Card(
             content=ft.Container(
-                padding=16,
+                padding=12,
                 content=ft.Column(
                     [
                         ft.Text("Без даты", size=18, weight=ft.FontWeight.W_600),
                         ft.Container(content=self.unscheduled_list, height=self.LIST_SECTION_HEIGHT),
                     ],
-                    spacing=12,
+                    spacing=10,
                 ),
             )
         )
@@ -148,8 +150,9 @@ class TodayPage:
                     ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD),
                     quick_add,
                     lists_row,
+                    self.daily_tasks_panel.view,
                 ],
-                spacing=16,
+                spacing=14,
                 expand=True,
             ),
             expand=True,
@@ -157,6 +160,7 @@ class TodayPage:
         )
 
         self.refresh_lists()
+        self.refresh_daily_tasks()
     
     # --- вызов из меню/автообновления ---
     def activate_from_menu(self):
@@ -165,6 +169,7 @@ class TodayPage:
     def load(self):
         # алиас для унификации с календарём
         self.refresh_lists()
+        self.refresh_daily_tasks()
 
     # ---------- Утилиты ----------
     def _new_time_picker(self) -> ft.TimePicker:
@@ -383,6 +388,10 @@ class TodayPage:
             self.unscheduled_list.controls.append(self._row_for_task(t))
         self.app.cleanup_overlays()
         self.app.page.update()
+
+    def refresh_daily_tasks(self):
+        self.daily_tasks_panel.refresh()
+        self.app.cleanup_overlays()
 
     def _row_for_task(self, t):
         meta = self._human_time(t)
