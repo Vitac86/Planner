@@ -66,7 +66,7 @@ class AppDataStore:
             )
         if creds is None:
             raise RuntimeError("Google credentials are not available for appData access")
-        self.service = build("drive", "v3", credentials=creds)
+        self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     def _list_files(self) -> Dict[str, Dict[str, Optional[str]]]:
         service = self.service

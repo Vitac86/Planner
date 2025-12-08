@@ -135,13 +135,15 @@ class CalendarPage:
             expand=True, padding=20,
         )
 
-        self.load()
-
     # ===== публичное: вызывать из бокового меню =====
     def activate_from_menu(self):
         self._close_any_dialog()
         self.week_start = self._monday_of(date.today())
         self._need_scroll_now = True
+
+        self.mount()
+
+    def mount(self):
         self.load()
 
     # ===== Диалоги через overlay (как у тебя раньше) =====

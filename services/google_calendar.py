@@ -38,7 +38,7 @@ def _path_exists(p) -> bool:
 def _build_service_from_creds(creds) -> Any:
     if creds is None:
         return None
-    return build("calendar", "v3", credentials=creds)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 def _find_creds_in_auth(auth, scopes: Optional[List[str]] = None):
     for name in ("get_credentials", "credentials", "creds"):
