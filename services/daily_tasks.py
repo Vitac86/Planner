@@ -137,12 +137,10 @@ class DailyTaskService:
                 task.status_today = "done_today"
                 task.last_status_calc_at = today_str
             else:
-                # Разрешаем сброс только для текущего дня
-                if task.last_status_calc_at == ctx.today_str:
-                    task.last_done_at = None
-                    task.status_today = self._calculate_status(task, ctx)
-                else:
-                    task.status_today = self._calculate_status(task, ctx)
+                if task.last_status_calc_at != ctx.today_str or task.last_done_at != ctx.today_str:
+                    raise ValueError("Снять отметку можно только в текущий день")
+                task.last_done_at = None
+                task.status_today = self._calculate_status(task, ctx)
                 task.last_status_calc_at = ctx.today_str
 
             task.updated_at = datetime.utcnow().isoformat()

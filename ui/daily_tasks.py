@@ -1,6 +1,9 @@
 # planner/ui/daily_tasks.py
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta
+import locale
 from typing import List
 
 import flet as ft
@@ -12,6 +15,12 @@ from models.daily_task import DailyTask
 
 WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+try:
+    locale.setlocale(locale.LC_COLLATE, "ru_RU.UTF-8")
+except locale.Error:
+    # если локаль недоступна в окружении — используем системную по умолчанию
+    pass
+
 
 class DailyTasksPanel:
     def __init__(self, app):
@@ -19,6 +28,7 @@ class DailyTasksPanel:
         self.svc = DailyTaskService()
         self._tasks: list[DailyTask] = []
         self._dialog: ft.AlertDialog | None = None
+        self._rollover_task: asyncio.Task | None = None
 
         self._list_holder = ft.ResponsiveRow(run_spacing=10, spacing=14)
 
@@ -40,6 +50,7 @@ class DailyTasksPanel:
         self.svc.rollover_if_needed()
         self._tasks = self.svc.list_all()
         self._render_list()
+        self._ensure_rollover_timer()
 
     # ---------- Rendering ----------
     def _render_list(self):
@@ -51,20 +62,9 @@ class DailyTasksPanel:
         else:
             controls.append(add_button)
 
-        left_column: list[ft.Control] = []
-        right_column: list[ft.Control] = []
-        for idx, ctrl in enumerate(controls):
-            (left_column if idx % 2 == 0 else right_column).append(ctrl)
-
         self._list_holder.controls = [
-            ft.Container(
-                content=ft.Column(left_column, spacing=8, tight=True),
-                col={"xs": 12, "md": 12, "lg": 6},
-            ),
-            ft.Container(
-                content=ft.Column(right_column, spacing=8, tight=True),
-                col={"xs": 12, "md": 12, "lg": 6},
-            ),
+            ft.Container(ctrl, col={"xs": 12, "md": 12, "lg": 6, "xl": 6})
+            for ctrl in controls
         ]
         self.app.page.update()
 
@@ -73,7 +73,7 @@ class DailyTasksPanel:
             return {"active": 0, "done_today": 1, "inactive": 2}.get(task.status_today, 3)
 
         def title_key(task: DailyTask) -> str:
-            return task.title.casefold()
+            return locale.strxfrm(task.title.casefold())
 
         return sorted(self._tasks, key=lambda t: (group_key(t), title_key(t)))
 
@@ -93,6 +93,7 @@ class DailyTasksPanel:
             on_change=lambda e, tid=task.id: self._on_toggle(tid, e.control.value),
             tooltip="Отметить как выполнено",
             disabled=is_inactive,
+            semantics_label=f"Отметить ежедневную задачу {task.title}",
         )
 
         title_color = UI.theme.text_subtle if checked else None
@@ -146,6 +147,7 @@ class DailyTasksPanel:
             bgcolor=ft.Colors.SURFACE,
             border_radius=10,
             border=ft.border.all(1, ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE)),
+            animate_opacity=150,
         )
 
         if is_inactive:
@@ -319,3 +321,29 @@ class DailyTasksPanel:
         self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
         self.app.page.snack_bar.open = True
         self.app.page.update()
+
+    # ---------- Rollover scheduling ----------
+    def _seconds_until_midnight(self) -> float:
+        now = datetime.now().astimezone()
+        tomorrow = now.date() + timedelta(days=1)
+        midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=now.tzinfo)
+        return max((midnight - now).total_seconds(), 1.0)
+
+    async def _rollover_loop(self):
+        while True:
+            await asyncio.sleep(self._seconds_until_midnight())
+            try:
+                self.svc.rollover_if_needed()
+                self._tasks = self.svc.list_all()
+                self._render_list()
+            except Exception:
+                # Фолбэк на случай ошибок планировщика, чтобы не падало приложение
+                pass
+
+    def _ensure_rollover_timer(self):
+        if self._rollover_task and not self._rollover_task.done():
+            return
+        try:
+            self._rollover_task = self.app.page.run_task(self._rollover_loop)
+        except Exception:
+            self._rollover_task = asyncio.create_task(self._rollover_loop())
