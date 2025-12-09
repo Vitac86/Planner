@@ -9,6 +9,8 @@ from typing import List
 import flet as ft
 
 from core.settings import UI
+from ui import compat
+from ui.dialogs import close_alert_dialog, open_alert_dialog
 from services.daily_tasks import DailyTaskService
 from models.daily_task import DailyTask
 
@@ -99,22 +101,12 @@ class DailyTasksPanel:
         title_color = UI.theme.text_subtle if checked else None
         title_opacity = 0.7 if checked else 1.0
 
-        title = ft.Text(
-            task.title,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-            size=14,
-            weight=ft.FontWeight.W_600,
-            color=ft.Colors.with_opacity(title_opacity, title_color or ft.Colors.ON_SURFACE),
-            tooltip=task.title,
-            style=ft.TextStyle(
-                decoration=(
-                    ft.TextDecoration.LINE_THROUGH
-                    if getattr(task, "done", False)
-                    else None
-                ),
-            ),
-        )
+        title = compat.strike_text(task.title, tooltip=task.title, strike=getattr(task, "done", False))
+        title.max_lines = 1
+        title.overflow = ft.TextOverflow.ELLIPSIS
+        title.size = 14
+        title.weight = ft.FontWeight.W_600
+        title.color = ft.Colors.with_opacity(title_opacity, title_color or ft.Colors.ON_SURFACE)
 
         subtitle = ft.Text(
             self._weekday_flags(task),
@@ -233,12 +225,12 @@ class DailyTasksPanel:
                     save_btn.disabled = True
                 title = (title_tf.value or "").strip()
                 if not title:
-                    self.app.toast("Укажите название", success=False)
+                    self.app.toast("Укажите название", ok=False)
                     return
 
                 mask = collect_weekdays()
                 if mask == 0:
-                    self.app.toast("Выберите хотя бы один день недели", success=False)
+                    self.app.toast("Выберите хотя бы один день недели", ok=False)
                     return
 
                 if task:
@@ -249,11 +241,11 @@ class DailyTasksPanel:
                 self.refresh()
                 self.app.toast("Сохранено")
             except Exception as ex:
-                self.app.toast(f"Ошибка: {ex}", success=False)
+                self.app.toast(f"Ошибка: {ex}", ok=False)
             finally:
                 if save_btn:
                     save_btn.disabled = False
-                self.app.overlays.pop_top()
+                close_alert_dialog(self.app.page)
 
         dialog_content = ft.Container(
             width=420,
@@ -274,43 +266,42 @@ class DailyTasksPanel:
         )
 
         save_btn = ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save)
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Редактировать задачу" if task else "Новая ежедневная задача"),
-            content=dialog_content,
-            actions=[
-                ft.TextButton("Отмена", on_click=lambda e: self.app.overlays.pop_top()),
-                save_btn,
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
+        actions = [
+            ft.TextButton("Отмена", on_click=lambda e: close_alert_dialog(self.app.page)),
+            save_btn,
+        ]
 
         self.app.page.snack_bar.open = False
-        self.app.overlays.push_dialog(dlg)
+        open_alert_dialog(
+            self.app.page,
+            title="Редактировать задачу" if task else "Новая ежедневная задача",
+            content=dialog_content,
+            actions=actions,
+        )
 
     def _confirm_delete(self, task_id: str):
-        dlg = ft.AlertDialog(modal=True)
-
         def on_delete(_):
             try:
                 self.svc.delete(task_id)
                 self.refresh()
                 self.app.toast("Удалено")
             except Exception as ex:
-                self.app.toast(f"Ошибка: {ex}", success=False)
+                self.app.toast(f"Ошибка: {ex}", ok=False)
             finally:
-                self.app.overlays.pop_top()
+                close_alert_dialog(self.app.page)
 
-        dlg.title = ft.Text("Удалить задачу?")
-        dlg.content = ft.Text("Действие нельзя отменить")
-        dlg.actions = [
-            ft.TextButton("Отмена", on_click=lambda e: self.app.overlays.pop_top()),
+        actions = [
+            ft.TextButton("Отмена", on_click=lambda e: close_alert_dialog(self.app.page)),
             ft.FilledButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=on_delete),
         ]
-        dlg.actions_alignment = ft.MainAxisAlignment.END
 
         self.app.page.snack_bar.open = False
-        self.app.overlays.push_dialog(dlg)
+        open_alert_dialog(
+            self.app.page,
+            title="Удалить задачу?",
+            content=ft.Text("Действие нельзя отменить"),
+            actions=actions,
+        )
 
     # ---------- Helpers ----------
     def _toast(self, text: str):

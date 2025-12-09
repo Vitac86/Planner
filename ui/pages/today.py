@@ -4,7 +4,9 @@ from datetime import datetime, date, timedelta, time as dt_time
 import flet as ft
 
 from services.tasks import TaskService
+from ui import compat
 from ui.daily_tasks import DailyTasksPanel
+from ui.dialogs import close_alert_dialog, open_alert_dialog
 from core.priorities import (
     priority_options,
     priority_label,
@@ -159,6 +161,7 @@ class TodayPage:
             ),
             expand=True,
             padding=20,
+            scroll=ft.ScrollMode.AUTO,
         )
 
     def mount(self):
@@ -376,19 +379,19 @@ class TodayPage:
             if GOOGLE_SYNC.auto_push_on_edit:
                 self.app.push_tasks_to_google()
             self._toast("Задача удалена")
-            self.app.overlays.pop_top()
+            close_alert_dialog(self.app.page)
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Удалить задачу?"),
+        actions = [
+            ft.TextButton("Отмена", on_click=lambda _: close_alert_dialog(self.app.page)),
+            ft.FilledButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=confirm),
+        ]
+
+        open_alert_dialog(
+            self.app.page,
+            title="Удалить задачу?",
             content=ft.Text("Действие нельзя отменить."),
-            actions=[
-                ft.TextButton("Отмена", on_click=lambda _: self.app.overlays.pop_top()),
-                ft.FilledButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=confirm),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
+            actions=actions,
         )
-        self.app.overlays.push_dialog(dlg)
 
     def on_edit_click(self, e: ft.ControlEvent):
         self.open_edit_dialog(int(e.control.data))
@@ -595,14 +598,9 @@ class TodayPage:
 
         save_btn: ft.Control | None = None
 
-        closer: callable | None = None
-
         def _close_dialog():
-            nonlocal closer
             _remove_pickers()
-            if closer:
-                closer()
-                closer = None
+            close_alert_dialog(self.app.page)
 
         def on_save(_):
             nonlocal save_btn
@@ -611,20 +609,20 @@ class TodayPage:
                     save_btn.disabled = True
                 new_title = (title_tf.value or "").strip()
                 if not new_title:
-                    self.app.toast("Укажите название", success=False)
+                    self.app.toast("Укажите название", ok=False)
                     return
                 if date_tf.value and self._parse_date_tf(date_tf.value) is None:
-                    self.app.toast("Неверный формат даты. Пример: 10.10.2025", success=False)
+                    self.app.toast("Неверный формат даты. Пример: 10.10.2025", ok=False)
                     return
                 if time_tf.value and self._parse_time_tf(time_tf.value) is None:
-                    self.app.toast("Неверный формат времени. Пример: 09:30", success=False)
+                    self.app.toast("Неверный формат времени. Пример: 09:30", ok=False)
                     return
 
                 new_start = self._combine_dt(date_tf.value, time_tf.value)
                 try:
                     new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
                 except ValueError:
-                    self.app.toast("Длительность должна быть числом (мин)", success=False)
+                    self.app.toast("Длительность должна быть числом (мин)", ok=False)
                     return
 
                 self.svc.update(
@@ -641,7 +639,7 @@ class TodayPage:
                     self.app.push_tasks_to_google()
                 self.app.toast("Сохранено")
             except Exception as ex:
-                self.app.toast(f"Ошибка: {ex}", success=False)
+                self.app.toast(f"Ошибка: {ex}", ok=False)
             finally:
                 if save_btn:
                     save_btn.disabled = False
@@ -671,16 +669,13 @@ class TodayPage:
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        buttons_row = ft.Row(
-            [
-                ft.TextButton("Отмена", on_click=on_cancel),
-                ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
-            ],
-            alignment=ft.MainAxisAlignment.END,
-        )
+        actions = [
+            ft.TextButton("Отмена", on_click=on_cancel),
+            ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
+        ]
 
         MAX_W = 520
-        save_btn = buttons_row.controls[1]
+        save_btn = actions[1]
         modal_body = ft.Container(
             width=MAX_W,
             bgcolor=ft.Colors.SURFACE,
@@ -692,7 +687,6 @@ class TodayPage:
                     title_tf,
                     utils_row,
                     notes_tf,
-                    buttons_row,
                 ],
                 spacing=10,
                 tight=True,
@@ -700,25 +694,14 @@ class TodayPage:
             ),
         )
 
-        portal = ft.Portal(
-            target=self.app.page.overlay,
-            content=ft.Container(
-                expand=True,
-                alignment=ft.alignment.center,
-                content=modal_body,
-            ),
-        )
-
         self.app.page.snack_bar.open = False
-        closer = self.app.overlays.push_overlay(portal)
-
-        def _esc_close():
-            _close_dialog()
-
-        try:
-            self.app.overlays._stack[-1] = _esc_close
-        except Exception:
-            pass
+        dlg = open_alert_dialog(
+            self.app.page,
+            title="Редактировать задачу",
+            content=modal_body,
+            actions=actions,
+        )
+        dlg.on_dismiss = lambda e: _remove_pickers()
 
         title_tf.on_submit = on_save
 
