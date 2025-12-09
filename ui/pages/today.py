@@ -22,6 +22,7 @@ class TodayPage:
         self.page = app_shell.page
         self.svc = TaskService()
         self.edit_dialog: ft.AlertDialog | None = None
+        self._current_task_id: int | None = None
 
         # ---------- Быстрый ввод ----------
         self.title_tf = ft.TextField(
@@ -369,14 +370,31 @@ class TodayPage:
             self.app.push_tasks_to_google()
 
     def on_delete(self, task_id: int):
-        self.svc.delete(task_id)
-        self.refresh_lists()
-        if GOOGLE_SYNC.auto_push_on_edit:
-            self.app.push_tasks_to_google()
-        self._toast("Задача удалена")
+        def confirm(_=None):
+            self.svc.delete(task_id)
+            self.refresh_lists()
+            if GOOGLE_SYNC.auto_push_on_edit:
+                self.app.push_tasks_to_google()
+            self._toast("Задача удалена")
+            self.app.overlays.pop_top()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Удалить задачу?"),
+            content=ft.Text("Действие нельзя отменить."),
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda _: self.app.overlays.pop_top()),
+                ft.FilledButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.app.overlays.push_dialog(dlg)
 
     def on_edit_click(self, e: ft.ControlEvent):
         self.open_edit_dialog(int(e.control.data))
+
+    def on_edit(self, task_id: int):
+        self.open_edit_dialog(task_id)
 
     # ---------- Рендер ----------
     def refresh_lists(self):
@@ -471,7 +489,7 @@ class TodayPage:
                     icon=ft.Icons.EDIT_OUTLINED,
                     tooltip="Редактировать",
                     data=t.id,
-                    on_click=self.on_edit_click,
+                    on_click=lambda e, tid=t.id: self.on_edit(tid),
                     style=ft.ButtonStyle(padding=ft.padding.all(8)),
                 ),
                 ft.IconButton(
@@ -501,12 +519,18 @@ class TodayPage:
 
     # ---------- Диалог редактирования ----------
     def open_edit_dialog(self, task_id: int):
+        self._current_task_id = task_id
         t = self.svc.get(task_id)
         if not t:
             return self._toast("Задача не найдена")
 
         # --- поля без expand, фикс-ширины только там, где нужно ---
-        title_tf = ft.TextField(label="Название", value=t.title, width=420)
+        title_tf = ft.TextField(
+            label="Название",
+            value=t.title,
+            width=420,
+            autofocus=True,
+        )
 
         date_val = t.start.strftime("%d.%m.%Y") if t.start else ""
         time_val = t.start.strftime("%H:%M") if (t.start and t.start.time() != datetime.min.time()) else ""
@@ -571,9 +595,14 @@ class TodayPage:
 
         save_btn: ft.Control | None = None
 
+        closer: callable | None = None
+
         def _close_dialog():
+            nonlocal closer
             _remove_pickers()
-            self.app.overlays.pop_top()
+            if closer:
+                closer()
+                closer = None
 
         def on_save(_):
             nonlocal save_btn
@@ -643,31 +672,55 @@ class TodayPage:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         buttons_row = ft.Row(
-            [ft.TextButton("Отмена", on_click=on_cancel),
-            ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save)],
+            [
+                ft.TextButton("Отмена", on_click=on_cancel),
+                ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
+            ],
             alignment=ft.MainAxisAlignment.END,
         )
 
         MAX_W = 520
         save_btn = buttons_row.controls[1]
-        dlg = ft.AlertDialog(
-            modal=True,
-            inset_padding=ft.padding.all(16),
-            content_padding=ft.padding.all(12),
-            title=ft.Text("Редактировать задачу"),
+        modal_body = ft.Container(
+            width=MAX_W,
+            bgcolor=ft.Colors.SURFACE,
+            border_radius=12,
+            padding=ft.padding.all(16),
+            content=ft.Column(
+                [
+                    ft.Text("Редактировать задачу", size=18, weight=ft.FontWeight.W_600),
+                    title_tf,
+                    utils_row,
+                    notes_tf,
+                    buttons_row,
+                ],
+                spacing=10,
+                tight=True,
+                scroll=ft.ScrollMode.ADAPTIVE,
+            ),
+        )
+
+        portal = ft.Portal(
+            target=self.app.page.overlay,
             content=ft.Container(
-                width=MAX_W,  # вместо constraints
-                content=ft.Column(
-                    [title_tf, utils_row, notes_tf, buttons_row],
-                    spacing=10,
-                    tight=True,
-                    scroll=ft.ScrollMode.ADAPTIVE,
-                ),
+                expand=True,
+                alignment=ft.alignment.center,
+                content=modal_body,
             ),
         )
 
         self.app.page.snack_bar.open = False
-        self.app.overlays.push_dialog(dlg)
+        closer = self.app.overlays.push_overlay(portal)
+
+        def _esc_close():
+            _close_dialog()
+
+        try:
+            self.app.overlays._stack[-1] = _esc_close
+        except Exception:
+            pass
+
+        title_tf.on_submit = on_save
 
 
 

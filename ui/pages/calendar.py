@@ -320,8 +320,13 @@ class CalendarPage:
                 tasks = self.idx.get((di, h), [])
                 is_now = is_today_col and (h == now.hour)
                 slot = self._slot_body(tasks, is_now, d, h)
-                drop = ft.DragTarget(group="task", content=slot,
-                                     on_accept=lambda e, _d=d, _h=h: self._on_drop_accept(_d, _h, e))
+                drop = ft.DragTarget(
+                    group="task",
+                    content=slot,
+                    on_accept=lambda e, _d=d, _h=h: self._on_drop_accept(_d, _h, e),
+                    on_will_accept=lambda e, _slot=slot: self._on_drop_hover(_slot, True),
+                    on_leave=lambda e, _slot=slot: self._on_drop_hover(_slot, False),
+                )
                 cell = ft.Container(
                     content=drop, width=DAY_COL_W, height=self.row_h[h],
                     bgcolor=CLR_TODAY_BG if is_today_col else None,
@@ -512,6 +517,18 @@ class CalendarPage:
         if task_id is None:
             return self._toast("Не удалось определить задачу")
         self._schedule_task(task_id, day, hour)
+
+    def _on_drop_hover(self, slot: ft.Control, active: bool):
+        try:
+            if isinstance(slot, ft.Container):
+                slot.border = ft.border.all(
+                    1,
+                    ft.Colors.PRIMARY if active else ft.Colors.with_opacity(0.6, CLR_OUTLINE),
+                )
+                slot.border_radius = 6
+            self.app.page.update()
+        finally:
+            return True
 
     # ===== Планирование и быстрый блок =====
     def _schedule_task(self, task_id: int, day: date, hour: int):
