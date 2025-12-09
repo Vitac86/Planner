@@ -130,10 +130,11 @@ class HistoryPage:
             padding=20,
         )
 
-        self.run_search()
-
     def activate_from_menu(self):
         # Пересчитать результаты при возвращении на вкладку.
+        self.mount()
+
+    def mount(self):
         self.run_search()
 
     # ---------- Filters ----------

@@ -43,7 +43,7 @@ class GoogleTasks:
         if not creds:
             return
 
-        self.service = build("tasks", "v1", credentials=creds)
+        self.service = build("tasks", "v1", credentials=creds, cache_discovery=False)
 
     def ensure_tasklist(self) -> str:
         self._ensure_service(strict=True)

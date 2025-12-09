@@ -1,24 +1,36 @@
 # planner/ui/daily_tasks.py
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta
+import locale
 from typing import List
 
 import flet as ft
 
 from core.settings import UI
+from ui import compat
+from ui.dialogs import close_alert_dialog, open_alert_dialog
 from services.daily_tasks import DailyTaskService
 from models.daily_task import DailyTask
 
 
 WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+try:
+    locale.setlocale(locale.LC_COLLATE, "ru_RU.UTF-8")
+except locale.Error:
+    # если локаль недоступна в окружении — используем системную по умолчанию
+    pass
+
 
 class DailyTasksPanel:
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, app_shell):
+        self.app = app_shell
         self.svc = DailyTaskService()
         self._tasks: list[DailyTask] = []
         self._dialog: ft.AlertDialog | None = None
+        self._rollover_task: asyncio.Task | None = None
 
         self._list_holder = ft.ResponsiveRow(run_spacing=10, spacing=14)
 
@@ -40,6 +52,7 @@ class DailyTasksPanel:
         self.svc.rollover_if_needed()
         self._tasks = self.svc.list_all()
         self._render_list()
+        self._ensure_rollover_timer()
 
     # ---------- Rendering ----------
     def _render_list(self):
@@ -51,20 +64,9 @@ class DailyTasksPanel:
         else:
             controls.append(add_button)
 
-        left_column: list[ft.Control] = []
-        right_column: list[ft.Control] = []
-        for idx, ctrl in enumerate(controls):
-            (left_column if idx % 2 == 0 else right_column).append(ctrl)
-
         self._list_holder.controls = [
-            ft.Container(
-                content=ft.Column(left_column, spacing=8, tight=True),
-                col={"xs": 12, "md": 12, "lg": 6},
-            ),
-            ft.Container(
-                content=ft.Column(right_column, spacing=8, tight=True),
-                col={"xs": 12, "md": 12, "lg": 6},
-            ),
+            ft.Container(ctrl, col={"xs": 12, "md": 12, "lg": 6, "xl": 6})
+            for ctrl in controls
         ]
         self.app.page.update()
 
@@ -73,7 +75,7 @@ class DailyTasksPanel:
             return {"active": 0, "done_today": 1, "inactive": 2}.get(task.status_today, 3)
 
         def title_key(task: DailyTask) -> str:
-            return task.title.casefold()
+            return locale.strxfrm(task.title.casefold())
 
         return sorted(self._tasks, key=lambda t: (group_key(t), title_key(t)))
 
@@ -93,21 +95,18 @@ class DailyTasksPanel:
             on_change=lambda e, tid=task.id: self._on_toggle(tid, e.control.value),
             tooltip="Отметить как выполнено",
             disabled=is_inactive,
+            semantics_label=f"Отметить ежедневную задачу {task.title}",
         )
 
         title_color = UI.theme.text_subtle if checked else None
         title_opacity = 0.7 if checked else 1.0
 
-        title = ft.Text(
-            task.title,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-            size=14,
-            weight=ft.FontWeight.W_600,
-            color=ft.Colors.with_opacity(title_opacity, title_color or ft.Colors.ON_SURFACE),
-            decoration=ft.TextDecoration.LINE_THROUGH if checked else None,
-            tooltip=task.title,
-        )
+        title = compat.strike_text(task.title, tooltip=task.title, strike=getattr(task, "done", False))
+        title.max_lines = 1
+        title.overflow = ft.TextOverflow.ELLIPSIS
+        title.size = 14
+        title.weight = ft.FontWeight.W_600
+        title.color = ft.Colors.with_opacity(title_opacity, title_color or ft.Colors.ON_SURFACE)
 
         subtitle = ft.Text(
             self._weekday_flags(task),
@@ -120,14 +119,12 @@ class DailyTasksPanel:
             tooltip="Редактировать",
             on_click=lambda e, tid=task.id: self._open_dialog(task_id=tid),
             style=ft.ButtonStyle(padding=ft.padding.all(6)),
-            semantics_label="Редактировать",
         )
         delete_btn = ft.IconButton(
             icon=ft.Icons.DELETE_OUTLINE,
             tooltip="Удалить",
             on_click=lambda e, tid=task.id: self._confirm_delete(tid),
             style=ft.ButtonStyle(padding=ft.padding.all(6)),
-            semantics_label="Удалить",
         )
 
         actions = ft.Row([edit_btn, delete_btn], spacing=4, alignment=ft.MainAxisAlignment.END)
@@ -146,6 +143,7 @@ class DailyTasksPanel:
             bgcolor=ft.Colors.SURFACE,
             border_radius=10,
             border=ft.border.all(1, ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE)),
+            animate_opacity=150,
         )
 
         if is_inactive:
@@ -218,46 +216,36 @@ class DailyTasksPanel:
                     mask |= 1 << i
             return mask
 
-        def close_dialog():
-            if self._dialog:
-                self._dialog.open = False
-                self.app.page.update()
-                try:
-                    self.app.page.overlay.remove(self._dialog)
-                except Exception:
-                    pass
-                self._dialog = None
+        save_btn: ft.TextButton | None = None
 
         def on_save(_):
-            title = (title_tf.value or "").strip()
-            if not title:
-                return self._toast("Введите название задачи")
-
-            mask = collect_weekdays()
-            if mask == 0:
-                return self._toast("Выберите хотя бы один день недели")
-
+            nonlocal save_btn
             try:
+                if save_btn:
+                    save_btn.disabled = True
+                title = (title_tf.value or "").strip()
+                if not title:
+                    self.app.toast("Укажите название", ok=False)
+                    return
+
+                mask = collect_weekdays()
+                if mask == 0:
+                    self.app.toast("Выберите хотя бы один день недели", ok=False)
+                    return
+
                 if task:
                     self.svc.update(task.id, title=title, weekdays=mask)
                 else:
                     self.svc.create(title=title, weekdays=mask)
-            except ValueError as e:
-                return self._toast(str(e))
 
-            close_dialog()
-            self.refresh()
-
-        def on_cancel(_=None):
-            close_dialog()
-
-        actions = ft.Row(
-            [
-                ft.TextButton("Отмена", on_click=on_cancel),
-                ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save),
-            ],
-            alignment=ft.MainAxisAlignment.END,
-        )
+                self.refresh()
+                self.app.toast("Сохранено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", ok=False)
+            finally:
+                if save_btn:
+                    save_btn.disabled = False
+                close_alert_dialog(self.app.page)
 
         dialog_content = ft.Container(
             width=420,
@@ -265,57 +253,82 @@ class DailyTasksPanel:
                 [
                     title_tf,
                     ft.Text("Дни недели", weight=ft.FontWeight.W_600),
-                    ft.Wrap(weekday_checkboxes, spacing=12, run_spacing=8),
-                    actions,
+                    ft.Row(
+                        controls=weekday_checkboxes,
+                        wrap=True,
+                        spacing=12,
+                        run_spacing=8,
+                    ),
                 ],
                 spacing=12,
                 tight=True,
             ),
         )
 
-        self._dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Редактировать задачу" if task else "Новая ежедневная задача"),
+        save_btn = ft.FilledButton("Сохранить", icon=ft.Icons.SAVE, on_click=on_save)
+        actions = [
+            ft.TextButton("Отмена", on_click=lambda e: close_alert_dialog(self.app.page)),
+            save_btn,
+        ]
+
+        self.app.page.snack_bar.open = False
+        open_alert_dialog(
+            self.app.page,
+            title="Редактировать задачу" if task else "Новая ежедневная задача",
             content=dialog_content,
-            on_dismiss=on_cancel,
+            actions=actions,
         )
 
-        if self._dialog not in self.app.page.overlay:
-            self.app.page.overlay.append(self._dialog)
-        self._dialog.open = True
-        self.app.page.update()
-
     def _confirm_delete(self, task_id: str):
-        dlg = ft.AlertDialog(modal=True)
-
-        def close(_=None):
-            dlg.open = False
-            self.app.page.update()
-            try:
-                self.app.page.overlay.remove(dlg)
-            except Exception:
-                pass
-
         def on_delete(_):
-            self.svc.delete(task_id)
-            close()
-            self.refresh()
+            try:
+                self.svc.delete(task_id)
+                self.refresh()
+                self.app.toast("Удалено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", ok=False)
+            finally:
+                close_alert_dialog(self.app.page)
 
-        dlg.title = ft.Text("Удалить задачу?")
-        dlg.content = ft.Text("Действие нельзя отменить")
-        dlg.actions = [
-            ft.TextButton("Отмена", on_click=close),
+        actions = [
+            ft.TextButton("Отмена", on_click=lambda e: close_alert_dialog(self.app.page)),
             ft.FilledButton("Удалить", icon=ft.Icons.DELETE_OUTLINE, on_click=on_delete),
         ]
-        dlg.actions_alignment = ft.MainAxisAlignment.END
 
-        if dlg not in self.app.page.overlay:
-            self.app.page.overlay.append(dlg)
-        dlg.open = True
-        self.app.page.update()
+        self.app.page.snack_bar.open = False
+        open_alert_dialog(
+            self.app.page,
+            title="Удалить задачу?",
+            content=ft.Text("Действие нельзя отменить"),
+            actions=actions,
+        )
 
     # ---------- Helpers ----------
     def _toast(self, text: str):
-        self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
-        self.app.page.snack_bar.open = True
-        self.app.page.update()
+        self.app.toast(text)
+
+    # ---------- Rollover scheduling ----------
+    def _seconds_until_midnight(self) -> float:
+        now = datetime.now().astimezone()
+        tomorrow = now.date() + timedelta(days=1)
+        midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=now.tzinfo)
+        return max((midnight - now).total_seconds(), 1.0)
+
+    async def _rollover_loop(self):
+        while True:
+            await asyncio.sleep(self._seconds_until_midnight())
+            try:
+                self.svc.rollover_if_needed()
+                self._tasks = self.svc.list_all()
+                self._render_list()
+            except Exception:
+                # Фолбэк на случай ошибок планировщика, чтобы не падало приложение
+                pass
+
+    def _ensure_rollover_timer(self):
+        if self._rollover_task and not self._rollover_task.done():
+            return
+        try:
+            self._rollover_task = self.app.page.run_task(self._rollover_loop)
+        except Exception:
+            self._rollover_task = asyncio.create_task(self._rollover_loop())

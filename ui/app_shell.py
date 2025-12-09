@@ -26,6 +26,15 @@ class AppShell:
     def __init__(self, page: ft.Page):
         self.page = page
 
+        # единый snackbar для всего приложения
+        self.page.snack_bar = ft.SnackBar(ft.Text(""), open=False)
+
+        # включаем вертикальный скролл для страницы
+        self.page.scroll = "auto"
+
+        # обработка Esc для закрытия модалок/оверлеев
+        self.page.on_keyboard_event = self._on_key
+
         # базовые настройки окна
         self.page.title = UI.app_title
         self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
@@ -138,6 +147,27 @@ class AppShell:
         if changed:
             self.page.update()
 
+    def toast(self, text: str, *, ok: bool = True):
+        sb = self.page.snack_bar
+        sb.bgcolor = ft.Colors.GREEN_600 if ok else ft.Colors.RED_600
+        sb.content = ft.Text(text)
+        sb.open = True
+        self.page.update()
+
+    def _on_key(self, e: ft.KeyboardEvent):
+        if e.key != "Escape":
+            return
+        if self.page.dialog and getattr(self.page.dialog, "open", False):
+            self.page.dialog.open = False
+            self.page.update()
+            return
+        if self.page.overlay:
+            try:
+                self.page.overlay.pop()
+            except Exception:
+                pass
+            self.page.update()
+
     # ---------- утилиты ----------
     def _has_open_overlay(self) -> bool:
         """Если открыт любой диалог/оверлей — пропускаем автообновление."""
@@ -171,11 +201,12 @@ class AppShell:
             print("Google Calendar push error:", e)
 
     def _start_auto_refresh(
-        self, view_name: str, refresh_fn, period_sec: int | None = None
+        self, view_name: str, refresh_fn, period_sec: int | None = None, run_immediately: bool = True
     ):
         """Периодически дергаем pull + refresh_fn, пока активен указанный view."""
         if not GOOGLE_SYNC.enabled or not UI.auto_refresh.enabled:
-            refresh_fn()
+            if run_immediately:
+                refresh_fn()
             return
         self._stop_auto_refresh()
         self._active_view = view_name
@@ -184,12 +215,13 @@ class AppShell:
 
         async def _loop():
             # первый прогон — сразу: подтянуть изменения и перерисовать
-            try:
-                self._pull_from_google()
-                refresh_fn()
-                self._push_to_google()
-            except Exception as e:
-                print("auto refresh (initial):", e)
+            if run_immediately:
+                try:
+                    self._pull_from_google()
+                    refresh_fn()
+                    self._push_to_google()
+                except Exception as e:
+                    print("auto refresh (initial):", e)
 
             while self._active_view == view_name:
                 await asyncio.sleep(interval)
@@ -219,48 +251,60 @@ class AppShell:
     def mount(self):
         self.page.controls.clear()
         self.page.add(self.root)
+        self.show_today()
 
-        # стартуем со «Сегодня»
+    def show_today(self):
+        self.nav.selected_index = 0
         self.content.content = self._today.view
         self.page.update()
 
-        # 1) Подтянуть последние изменения из Google,
-        # 2) отрисовать страницу,
-        # 3) запустить автообновление.
+        self._today.mount()
+
         self._pull_from_google()
         self._today.activate_from_menu()
-        self._start_auto_refresh("today", self._today.load)
+        self._start_auto_refresh("today", self._today.load, run_immediately=False)
+
+    def show_calendar(self):
+        self.nav.selected_index = 1
+        self.content.content = self._calendar.view
+        self.page.update()
+
+        self._pull_from_google()
+        self._calendar.activate_from_menu()
+        try:
+            self._calendar.scroll_to_now()  # к текущему часу
+        except Exception:
+            pass
+        self._start_auto_refresh("calendar", self._calendar.load, run_immediately=False)
+
+    def show_history(self):
+        self.nav.selected_index = 2
+        self.content.content = self._history.view
+        self._stop_auto_refresh()
+        self.page.update()
+        self._history.activate_from_menu()
+
+    def show_settings(self):
+        self.nav.selected_index = 3
+        self.content.content = self._settings.view
+        self._stop_auto_refresh()
+        self.page.update()
 
     # ---------- переключение вкладок ----------
     def on_nav_change(self, e: ft.ControlEvent):
         idx = int(e.control.selected_index)
 
         if idx == 0:  # Сегодня
-            self.content.content = self._today.view
-            self._pull_from_google()
-            self._today.activate_from_menu()
-            self._start_auto_refresh("today", self._today.load)
+            self.show_today()
 
         elif idx == 1:  # Календарь
-            self.content.content = self._calendar.view
-            self._pull_from_google()
-            self._calendar.activate_from_menu()
-            try:
-                self._calendar.scroll_to_now()  # к текущему часу
-            except Exception:
-                pass
-            self._start_auto_refresh("calendar", self._calendar.load)
+            self.show_calendar()
 
         elif idx == 2:  # История
-            self.content.content = self._history.view
-            self._stop_auto_refresh()
-            self._history.activate_from_menu()
+            self.show_history()
 
         else:  # Настройки (используем полноценную страницу настроек)
-            self.content.content = self._settings.view
-            self._stop_auto_refresh()
-
-        self.page.update()
+            self.show_settings()
 
     # ---------- ручной вызов синка (если где-то используете) ----------
     def current_page_auto_sync(self):

@@ -16,6 +16,7 @@ from core.priorities import (
     normalize_priority,
 )
 from core.settings import UI
+from ui.dialogs import close_alert_dialog, open_alert_dialog
 
 # ===== настройки =====
 CAL_UI = UI.calendar
@@ -95,8 +96,7 @@ class CalendarPage:
         # защита от петель при синхронизации скролла
         self._syncing_hscroll = False
 
-        # текущая подложка (чтобы клик-вне закрывал окно и не оставался «призрак»)
-        self._backdrop: Optional[ft.Control] = None
+        # менеджер оверлеев берет на себя фон/ESC
 
         # ---------- Шапка экрана ----------
         self.title_text = ft.Text("", size=24, weight=ft.FontWeight.BOLD)
@@ -135,82 +135,28 @@ class CalendarPage:
             expand=True, padding=20,
         )
 
-        self.load()
-
     # ===== публичное: вызывать из бокового меню =====
     def activate_from_menu(self):
         self._close_any_dialog()
         self.week_start = self._monday_of(date.today())
         self._need_scroll_now = True
+
+        self.mount()
+
+    def mount(self):
         self.load()
 
-    # ===== Диалоги через overlay (как у тебя раньше) =====
-    def _cleanup_backdrop(self):
-        try:
-            if self._backdrop and self._backdrop in self.app.page.overlay:
-                self.app.page.overlay.remove(self._backdrop)
-        except Exception:
-            pass
-        self._backdrop = None
-
-    def _open_dialog(self, dlg: ft.AlertDialog):
-        self._cleanup_backdrop()
-        self._backdrop = ft.Container(
-            expand=True,
-            bgcolor=ft.Colors.with_opacity(0.001, CLR_BACKDROP),
-            on_click=lambda e, d=dlg: self._close_dialog(d),
-            data="backdrop",   # <<< метка, чтобы потом удалить
-        )
-        self.app.page.overlay.append(self._backdrop)
-
-        dlg.modal = False
-        dlg.on_dismiss = lambda e, d=dlg: self._close_dialog(d)
-        if dlg not in self.app.page.overlay:
-            self.app.page.overlay.append(dlg)
+    # ===== Диалоги через OverlayManager =====
+    def _open_dialog(self, dlg: ft.AlertDialog, on_close=None):
+        if on_close:
+            dlg.on_dismiss = lambda e: on_close()
+        self.app.page.snack_bar.open = False
+        self.app.page.dialog = dlg
         dlg.open = True
         self.app.page.update()
-        self._sweep_overlay()  # <<< сразу подчистить
-
-    def _close_dialog(self, dlg: ft.AlertDialog | None):
-        if not dlg:
-            return
-        cleanup_meta = getattr(dlg, "data", None)
-        if isinstance(cleanup_meta, dict):
-            fn = cleanup_meta.get("on_close")
-            if callable(fn):
-                try:
-                    fn()
-                finally:
-                    cleanup_meta["on_close"] = None
-        try:
-            dlg.open = False
-        except Exception:
-            pass
-        try:
-            if dlg in self.app.page.overlay:
-                self.app.page.overlay.remove(dlg)
-        except Exception:
-            pass
-        self._cleanup_backdrop()
-        self._sweep_overlay()
-        self.app.page.update()
-        self.app.cleanup_overlays()
 
     def _close_any_dialog(self):
-        # на всякий случай закрыть всё
-        try:
-            overlays = list(self.app.page.overlay)
-        except Exception:
-            overlays = []
-
-        for ctrl in overlays:
-            if isinstance(ctrl, ft.AlertDialog):
-                self._close_dialog(ctrl)
-
-        self._cleanup_backdrop()
-        self._sweep_overlay()
-        self.app.page.update()
-        self.app.cleanup_overlays()
+        close_alert_dialog(self.app.page)
     def _delete_task(self, task_id: int):
         t = self.svc.get(task_id)
         if not t:
@@ -240,27 +186,6 @@ class CalendarPage:
         self._need_scroll_now = True
         self.load()
     
-    def _sweep_overlay(self):
-        # убираем закрытые диалоги и осиротевшие подложки
-        ov = self.app.page.overlay or []
-        changed = False
-        for c in list(ov):
-            if isinstance(c, ft.AlertDialog) and not getattr(c, "open", False):
-                try:
-                    ov.remove(c); changed = True
-                except Exception:
-                    pass
-            elif isinstance(c, ft.Container) and getattr(c, "data", None) == "backdrop":
-                # оставляем подложку только если есть открытый AlertDialog
-                if not any(getattr(d, "open", False) for d in ov if isinstance(d, ft.AlertDialog)):
-                    try:
-                        ov.remove(c); changed = True
-                    except Exception:
-                        pass
-        if changed:
-            self.app.page.update()
-            self.app.cleanup_overlays()
-
     # ===== Загрузка =====
     def load(self):
         ws = self.week_start
@@ -397,8 +322,13 @@ class CalendarPage:
                 tasks = self.idx.get((di, h), [])
                 is_now = is_today_col and (h == now.hour)
                 slot = self._slot_body(tasks, is_now, d, h)
-                drop = ft.DragTarget(group="task", content=slot,
-                                     on_accept=lambda e, _d=d, _h=h: self._on_drop_accept(_d, _h, e))
+                drop = ft.DragTarget(
+                    group="task",
+                    content=slot,
+                    on_accept=lambda e, _d=d, _h=h: self._on_drop_accept(_d, _h, e),
+                    on_will_accept=lambda e, _slot=slot: self._on_drop_hover(_slot, True),
+                    on_leave=lambda e, _slot=slot: self._on_drop_hover(_slot, False),
+                )
                 cell = ft.Container(
                     content=drop, width=DAY_COL_W, height=self.row_h[h],
                     bgcolor=CLR_TODAY_BG if is_today_col else None,
@@ -534,11 +464,8 @@ class CalendarPage:
 
     # ===== Контекстное меню чипа =====
     def _open_chip_menu(self, task_id: int, title: str, duration: int, day: date, hour: int):
-        dlg = None
-
         def close(_=None):
-            self._close_dialog(dlg)
-            self._sweep_overlay()  
+            close_alert_dialog(self.app.page)
 
         def act_edit(_):
             close(); self._open_edit_dialog(task_id, title, duration)
@@ -571,7 +498,7 @@ class CalendarPage:
             ],
             tight=True, spacing=4, width=240,
         )
-        dlg = ft.AlertDialog(modal=False, title=ft.Text(title), content=content)
+        dlg = ft.AlertDialog(modal=True, title=ft.Text(title), content=content)
         self._open_dialog(dlg)
 
     # ===== DnD =====
@@ -593,6 +520,18 @@ class CalendarPage:
             return self._toast("Не удалось определить задачу")
         self._schedule_task(task_id, day, hour)
 
+    def _on_drop_hover(self, slot: ft.Control, active: bool):
+        try:
+            if isinstance(slot, ft.Container):
+                slot.border = ft.border.all(
+                    1,
+                    ft.Colors.PRIMARY if active else ft.Colors.with_opacity(0.6, CLR_OUTLINE),
+                )
+                slot.border_radius = 6
+            self.app.page.update()
+        finally:
+            return True
+
     # ===== Планирование и быстрый блок =====
     def _schedule_task(self, task_id: int, day: date, hour: int):
         start_dt = datetime(day.year, day.month, day.day, hour, 0, 0)
@@ -607,35 +546,41 @@ class CalendarPage:
             value=str(getattr(task, "priority", 0)),
             options=self._priority_options,
         )
-        dlg = None
+        save_btn: ft.Control | None = None
 
         def on_save(_):
+            nonlocal save_btn
             try:
+                if save_btn:
+                    save_btn.disabled = True
                 duration = int(dur_tf.value)
                 if duration <= 0:
-                    raise ValueError
-            except Exception:
-                return self._toast("Длительность должна быть > 0")
+                    self.app.toast("Длительность должна быть > 0", ok=False)
+                    return
 
-            priority = normalize_priority(priority_dd.value)
+                priority = normalize_priority(priority_dd.value)
 
-            self.svc.update(
-                task_id,
-                start=start_dt,
-                duration_minutes=duration,
-                priority=priority,
-            )
+                self.svc.update(
+                    task_id,
+                    start=start_dt,
+                    duration_minutes=duration,
+                    priority=priority,
+                )
 
-            self._close_dialog(dlg)
-            self._sweep_overlay()
-            self.load()
+                self.load()
+                self.app.toast("Сохранено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", ok=False)
+            finally:
+                if save_btn:
+                    save_btn.disabled = False
+                close_alert_dialog(self.app.page)
 
         def on_cancel(_):
-            self._close_dialog(dlg)
-            self._sweep_overlay()
+            close_alert_dialog(self.app.page)
 
         dlg = ft.AlertDialog(
-            modal=False,
+            modal=True,
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Запланировать — {start_dt.strftime('%a, %d.%m %H:00')}"),
@@ -650,6 +595,8 @@ class CalendarPage:
             actions_alignment=ft.MainAxisAlignment.END,
         )
 
+        save_btn = dlg.actions[1]
+
         self._open_dialog(dlg)
 
     def open_quick_add(self, day: date, hour: int):
@@ -662,33 +609,41 @@ class CalendarPage:
             value=str(0),
             options=self._priority_options,
         )
-        dlg = None
+        save_btn: ft.Control | None = None
 
         def on_save(_):
-            title = (title_tf.value or "").strip()
-            if not title:
-                return self._toast("Введите название")
+            nonlocal save_btn
             try:
-                duration = int(dur_tf.value)
-                if duration <= 0:
-                    raise ValueError
-            except Exception:
-                return self._toast("Длительность должна быть > 0")
-            priority = normalize_priority(priority_dd.value)
+                if save_btn:
+                    save_btn.disabled = True
+                title = (title_tf.value or "").strip()
+                if not title:
+                    self.app.toast("Введите название", ok=False)
+                    return
+                try:
+                    duration = int(dur_tf.value)
+                    if duration <= 0:
+                        raise ValueError
+                except Exception:
+                    self.app.toast("Длительность должна быть > 0", ok=False)
+                    return
+                priority = normalize_priority(priority_dd.value)
 
-            self.svc.add(title=title, start=start_dt, duration_minutes=duration, priority=priority)
-            self._toast("Создано")
-
-            self._close_dialog(dlg)
-            self._sweep_overlay()
-            self.load()
+                self.svc.add(title=title, start=start_dt, duration_minutes=duration, priority=priority)
+                self.app.toast("Создано")
+                self.load()
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", ok=False)
+            finally:
+                if save_btn:
+                    save_btn.disabled = False
+                close_alert_dialog(self.app.page)
 
         def on_cancel(_):
-            self._close_dialog(dlg)
-            self._sweep_overlay()
+            close_alert_dialog(self.app.page)
 
         dlg = ft.AlertDialog(
-            modal=False,
+            modal=True,
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text(f"Быстрый блок — {start_dt.strftime('%a, %d.%m %H:00')}"),
@@ -702,6 +657,7 @@ class CalendarPage:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
+        save_btn = dlg.actions[1]
         self._open_dialog(dlg)
 
     # ===== Редактирование / Snooze / Удаление =====
@@ -786,8 +742,6 @@ class CalendarPage:
         )
 
         # --- сохранение / отмена ---
-        dlg = None
-
         def _remove_pickers():
             for ctrl in (dp, tp):
                 try:
@@ -800,41 +754,52 @@ class CalendarPage:
                 except Exception:
                     pass
 
+        save_btn: ft.Control | None = None
+
         def on_save(_):
-            new_title = (title_tf.value or "").strip()
-            if not new_title:
-                return self._toast("Введите название")
-
-            if date_tf.value and self._parse_date_tf(date_tf.value) is None:
-                return self._toast("Неверный формат даты. Пример: 10.10.2025")
-            if time_tf.value and self._parse_time_tf(time_tf.value) is None:
-                return self._toast("Неверный формат времени. Пример: 09:30")
-
-            new_start = self._combine_dt(date_tf.value, time_tf.value)
+            nonlocal save_btn
             try:
-                new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
-            except ValueError:
-                return self._toast("Длительность должна быть числом (мин)")
+                if save_btn:
+                    save_btn.disabled = True
+                new_title = (title_tf.value or "").strip()
+                if not new_title:
+                    self.app.toast("Введите название", ok=False)
+                    return
 
-            updated = self.svc.update(
-                task_id,
-                title=new_title,
-                notes=notes_tf.value,
-                start=new_start,
-                duration_minutes=new_dur,
-                priority=normalize_priority(priority_dd.value),
-            )
+                if date_tf.value and self._parse_date_tf(date_tf.value) is None:
+                    self.app.toast("Неверный формат даты. Пример: 10.10.2025", ok=False)
+                    return
+                if time_tf.value and self._parse_time_tf(time_tf.value) is None:
+                    self.app.toast("Неверный формат времени. Пример: 09:30", ok=False)
+                    return
 
-            _remove_pickers()
-            self._close_dialog(dlg)
-            self._sweep_overlay()
-            self.load()
-            self._toast("Сохранено")
+                new_start = self._combine_dt(date_tf.value, time_tf.value)
+                try:
+                    new_dur = int(dur_tf.value) if dur_tf.value.strip() else None
+                except ValueError:
+                    self.app.toast("Длительность должна быть числом (мин)", ok=False)
+                    return
+
+                self.svc.update(
+                    task_id,
+                    title=new_title,
+                    notes=notes_tf.value,
+                    start=new_start,
+                    duration_minutes=new_dur,
+                    priority=normalize_priority(priority_dd.value),
+                )
+
+                self.load()
+                self.app.toast("Сохранено")
+            except Exception as ex:
+                self.app.toast(f"Ошибка: {ex}", ok=False)
+            finally:
+                if save_btn:
+                    save_btn.disabled = False
+                close_alert_dialog(self.app.page)
 
         def on_cancel(_=None):
-            _remove_pickers()
-            self._close_dialog(dlg)
-            self._sweep_overlay()
+            close_alert_dialog(self.app.page)
 
         # --- компактная вёрстка (без Wrap) ---
         utils_row = ft.Row(
@@ -849,7 +814,7 @@ class CalendarPage:
         )
 
         dlg = ft.AlertDialog(
-            modal=False,
+            modal=True,
             inset_padding=ft.padding.all(16),
             content_padding=ft.padding.all(12),
             title=ft.Text("Редактировать задачу"),
@@ -864,8 +829,8 @@ class CalendarPage:
             ),
         )
 
-        dlg.data = {"on_close": _remove_pickers}
-        self._open_dialog(dlg)
+        save_btn = buttons_row.controls[1]
+        self._open_dialog(dlg, on_close=_remove_pickers)
 
 
 
@@ -1071,7 +1036,5 @@ class CalendarPage:
         )
 
     def _toast(self, text: str):
-        self.app.page.snack_bar = ft.SnackBar(ft.Text(text))
-        self.app.page.snack_bar.open = True
-        self.app.page.update()
+        self.app.toast(text)
     

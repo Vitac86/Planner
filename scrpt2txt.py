@@ -19,7 +19,7 @@ import datetime as _dt
 
 HERE = Path(__file__).resolve().parent
 
-# Автовыбор корня как в твоём примере (при желании поправь под себя)
+# Автовыбор корня 
 if (HERE / "crm" / "scripts").is_dir():
     DEFAULT_ROOT = HERE / "crm" / "scripts"
 else:
