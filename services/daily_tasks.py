@@ -21,6 +21,33 @@ class _LocalContext:
 
 class DailyTaskService:
     MAX_TASKS = 200
+    _listeners = {
+        "after_create": set(),
+        "after_update": set(),
+        "after_delete": set(),
+    }
+
+    # ---------- events ----------
+    @classmethod
+    def subscribe(cls, event: str, callback):
+        if event not in cls._listeners:
+            raise ValueError(f"Unsupported event: {event}")
+        cls._listeners[event].add(callback)
+
+    @classmethod
+    def unsubscribe(cls, event: str, callback):
+        if event not in cls._listeners:
+            return
+        cls._listeners[event].discard(callback)
+
+    @classmethod
+    def _emit(cls, event: str, task_id: str):
+        listeners = list(cls._listeners.get(event, []))
+        for listener in listeners:
+            try:
+                listener(task_id)
+            except Exception:
+                pass
 
     def _current_context(self) -> _LocalContext:
         now = datetime.now().astimezone()
@@ -51,6 +78,17 @@ class DailyTaskService:
             stmt = select(DailyTask)
             return list(s.exec(stmt))
 
+    def get(self, task_id: str) -> Optional[DailyTask]:
+        with get_session() as s:
+            return s.get(DailyTask, task_id)
+
+    def get_by_gtasks_id(self, gtasks_id: str | None) -> Optional[DailyTask]:
+        if not gtasks_id:
+            return None
+        with get_session() as s:
+            stmt = select(DailyTask).where(DailyTask.gtasks_id == gtasks_id)
+            return s.exec(stmt).first()
+
     def create(self, *, title: str, weekdays: int) -> DailyTask:
         cleaned_title = (title or "").strip()
         if not cleaned_title:
@@ -75,6 +113,10 @@ class DailyTaskService:
             s.add(task)
             s.commit()
             s.refresh(task)
+            try:
+                self._emit("after_create", task.id)
+            except Exception:
+                pass
             return task
 
     def update(
@@ -83,6 +125,7 @@ class DailyTaskService:
         *,
         title: Optional[str] = None,
         weekdays: Optional[int] = None,
+        emit: bool = True,
     ) -> Optional[DailyTask]:
         ctx = self._current_context()
         with get_session() as s:
@@ -114,12 +157,21 @@ class DailyTaskService:
             s.add(task)
             s.commit()
             s.refresh(task)
+            if emit:
+                try:
+                    self._emit("after_update", task.id)
+                except Exception:
+                    pass
             return task
 
     def delete(self, task_id: str) -> None:
         with get_session() as s:
             task = s.get(DailyTask, task_id)
             if task:
+                try:
+                    self._emit("after_delete", task_id)
+                except Exception:
+                    pass
                 s.delete(task)
                 s.commit()
 
@@ -148,6 +200,69 @@ class DailyTaskService:
             s.commit()
             s.refresh(task)
             return task
+
+    # ---------- sync helpers ----------
+    def create_from_sync(
+        self,
+        *,
+        id: Optional[str],
+        title: str,
+        weekdays: int,
+        gtasks_id: Optional[str],
+        gtasks_updated: Optional[datetime],
+    ) -> DailyTask:
+        ctx = self._current_context()
+        with get_session() as s:
+            task = DailyTask(
+                id=id or None,
+                title=title.strip() or "Daily task",
+                weekdays=weekdays,
+                timezone=ctx.tz_name,
+                gtasks_id=gtasks_id,
+                gtasks_updated=gtasks_updated.isoformat() if gtasks_updated else None,
+            )
+            self._recalculate_for_task(task, ctx)
+            s.add(task)
+            s.commit()
+            s.refresh(task)
+            return task
+
+    def update_from_sync(
+        self,
+        task_id: str,
+        *,
+        title: Optional[str] = None,
+        weekdays: Optional[int] = None,
+        gtasks_id: Optional[str] = None,
+        gtasks_updated: Optional[datetime] = None,
+    ) -> Optional[DailyTask]:
+        ctx = self._current_context()
+        with get_session() as s:
+            task = s.get(DailyTask, task_id)
+            if not task:
+                return None
+            if title is not None:
+                task.title = title.strip() or "Daily task"
+            if weekdays is not None:
+                task.weekdays = weekdays
+            if gtasks_id is not None:
+                task.gtasks_id = gtasks_id
+            if gtasks_updated is not None:
+                task.gtasks_updated = gtasks_updated.isoformat()
+
+            self._recalculate_for_task(task, ctx)
+
+            s.add(task)
+            s.commit()
+            s.refresh(task)
+            return task
+
+    def delete_from_sync(self, task_id: str) -> None:
+        with get_session() as s:
+            task = s.get(DailyTask, task_id)
+            if task:
+                s.delete(task)
+                s.commit()
 
     # ---------- Ролловер ----------
     def rollover_if_needed(self) -> bool:
