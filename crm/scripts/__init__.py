@@ -1,2 +1,0 @@
-"""CRM helper scripts package."""
-
