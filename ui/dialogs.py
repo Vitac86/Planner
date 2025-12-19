@@ -22,8 +22,12 @@ def close_alert_dialog(page: ft.Page):
 
 
 def open_overlay(page: ft.Page, content: ft.Control):
-    backdrop = ft.Container(expand=True, bgcolor=ft.colors.with_opacity(0.40, ft.colors.BLACK))
-    layer = ft.Stack([backdrop, content])
+    backdrop = ft.Container(
+        expand=True,
+        bgcolor=ft.colors.with_opacity(0.40, ft.colors.BLACK),
+        data="planner_backdrop",
+    )
+    layer = ft.Stack([backdrop, content], data="planner_layer")
     page.overlay.append(layer)
     page.update()
     return layer
