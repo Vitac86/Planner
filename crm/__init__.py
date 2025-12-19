@@ -1,2 +1,0 @@
-"""CRM namespace package."""
-
