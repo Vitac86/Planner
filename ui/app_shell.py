@@ -72,9 +72,8 @@ class AppShell:
         # левое меню
         self.nav = ft.NavigationRail(
             selected_index=0,
-            expand=True,
             label_type=ft.NavigationRailLabelType.ALL,
-            min_width=90,
+            min_width=88,
             min_extended_width=200,
             group_alignment=-0.9,
             on_change=self.on_nav_change,
@@ -103,9 +102,14 @@ class AppShell:
         )
 
         # корневой лэйаут
+        nav_column = ft.Column([self.nav], expand=True)
         self.root = ft.Row(
             controls=[
-                ft.Container(self.nav, width=88, bgcolor=UI.theme.safe_surface_bg, expand=True),
+                ft.Container(
+                    nav_column,
+                    width=88,
+                    bgcolor=UI.theme.safe_surface_bg,
+                ),
                 ft.VerticalDivider(width=1),
                 self.content,
             ],
@@ -118,52 +122,24 @@ class AppShell:
         self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
 
     def cleanup_overlays(self):
-        """Remove closed overlays (dialogs, pickers, backdrops) to avoid "ghost" windows."""
-        overlays = getattr(self.page, "overlay", None) or []
+        """Remove closed app overlays marked with planner-specific data tags."""
+        overlays = getattr(self.page, "overlay", None)
+        if overlays is None:
+            return
+
+        allowed_tags = {"planner_layer", "planner_backdrop"}
         changed = False
 
-        def _looks_fullscreen(ctrl) -> bool:
-            if isinstance(ctrl, ft.Stack):
-                return True
-            if isinstance(ctrl, ft.Container):
-                if getattr(ctrl, "expand", False):
-                    return True
-                if getattr(ctrl, "width", None) is None and getattr(ctrl, "height", None) is None:
-                    return True
-            return False
-
-        def _close_and_remove(ctrl):
-            nonlocal changed
-            try:
-                if hasattr(ctrl, "open"):
-                    ctrl.open = False
-            except Exception:
-                pass
+        for ctrl in list(overlays):
+            if getattr(ctrl, "data", None) not in allowed_tags:
+                continue
+            if hasattr(ctrl, "open") and getattr(ctrl, "open", False):
+                continue
             try:
                 overlays.remove(ctrl)
                 changed = True
-            except Exception:
+            except ValueError:
                 pass
-
-        for ctrl in list(overlays):
-            if hasattr(ctrl, "open"):
-                if not getattr(ctrl, "open", False):
-                    _close_and_remove(ctrl)
-
-        has_dialog = any(
-            getattr(ctrl, "open", False) for ctrl in overlays if isinstance(ctrl, ft.AlertDialog)
-        )
-
-        if not has_dialog:
-            for ctrl in list(overlays):
-                if getattr(ctrl, "data", None) == "backdrop":
-                    _close_and_remove(ctrl)
-
-        for ctrl in list(overlays):
-            if hasattr(ctrl, "open"):
-                continue
-            if _looks_fullscreen(ctrl):
-                _close_and_remove(ctrl)
 
         if changed:
             self.page.update()
