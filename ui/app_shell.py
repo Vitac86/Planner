@@ -20,6 +20,8 @@ from services.sync_service import SyncService, SYNC_LOG_PATH
 from services.pending_ops_queue import PendingOpsQueue
 from services.sync_token_storage import SyncTokenStorage
 from services.tasks import TaskService
+from services.daily_tasks import DailyTaskService
+from services.daily_tasks_sync import DailyTasksSync
 
 
 class AppShell:
@@ -28,9 +30,6 @@ class AppShell:
 
         # единый snackbar для всего приложения
         self.page.snack_bar = ft.SnackBar(ft.Text(""), open=False)
-
-        # включаем вертикальный скролл для страницы
-        self.page.scroll = "auto"
 
         # обработка Esc для закрытия модалок/оверлеев
         self.page.on_keyboard_event = self._on_key
@@ -45,6 +44,7 @@ class AppShell:
         self.auth = GoogleAuth()
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
         self.gtasks = GoogleTasks(self.auth)
+        self.gtasks_dailies = GoogleTasks(self.auth, GOOGLE_SYNC.dailies_tasklist_name)
         self.sync_service = SyncService(
             self.gcal,
             self.gtasks,
@@ -52,9 +52,13 @@ class AppShell:
             SyncTokenStorage(),
             PendingOpsQueue(),
         )
+        self.daily_tasks_sync = DailyTasksSync(self.gtasks_dailies, DailyTaskService())
         TaskService.subscribe("after_create", self.sync_service.on_task_created)
         TaskService.subscribe("after_update", self.sync_service.on_task_updated)
         TaskService.subscribe("after_delete", self.sync_service.on_task_deleted)
+        DailyTaskService.subscribe("after_create", self.daily_tasks_sync.on_task_created)
+        DailyTaskService.subscribe("after_update", self.daily_tasks_sync.on_task_updated)
+        DailyTaskService.subscribe("after_delete", self.daily_tasks_sync.on_task_deleted)
 
         # --- страницы ---
         self._today = TodayPage(self)
@@ -68,6 +72,7 @@ class AppShell:
         # левое меню
         self.nav = ft.NavigationRail(
             selected_index=0,
+            expand=True,
             label_type=ft.NavigationRailLabelType.ALL,
             min_width=90,
             min_extended_width=200,
@@ -100,7 +105,7 @@ class AppShell:
         # корневой лэйаут
         self.root = ft.Row(
             controls=[
-                ft.Container(self.nav, width=88, bgcolor=UI.theme.safe_surface_bg),
+                ft.Container(self.nav, width=88, bgcolor=UI.theme.safe_surface_bg, expand=True),
                 ft.VerticalDivider(width=1),
                 self.content,
             ],
@@ -117,6 +122,16 @@ class AppShell:
         overlays = getattr(self.page, "overlay", None) or []
         changed = False
 
+        def _looks_fullscreen(ctrl) -> bool:
+            if isinstance(ctrl, ft.Stack):
+                return True
+            if isinstance(ctrl, ft.Container):
+                if getattr(ctrl, "expand", False):
+                    return True
+                if getattr(ctrl, "width", None) is None and getattr(ctrl, "height", None) is None:
+                    return True
+            return False
+
         def _close_and_remove(ctrl):
             nonlocal changed
             try:
@@ -131,7 +146,7 @@ class AppShell:
                 pass
 
         for ctrl in list(overlays):
-            if isinstance(ctrl, (ft.AlertDialog, ft.DatePicker, ft.TimePicker)):
+            if hasattr(ctrl, "open"):
                 if not getattr(ctrl, "open", False):
                     _close_and_remove(ctrl)
 
@@ -143,6 +158,12 @@ class AppShell:
             for ctrl in list(overlays):
                 if getattr(ctrl, "data", None) == "backdrop":
                     _close_and_remove(ctrl)
+
+        for ctrl in list(overlays):
+            if hasattr(ctrl, "open"):
+                continue
+            if _looks_fullscreen(ctrl):
+                _close_and_remove(ctrl)
 
         if changed:
             self.page.update()
@@ -167,6 +188,7 @@ class AppShell:
             except Exception:
                 pass
             self.page.update()
+        self.cleanup_overlays()
 
     # ---------- утилиты ----------
     def _has_open_overlay(self) -> bool:
@@ -186,11 +208,19 @@ class AppShell:
         Подтягиваем изменения из Google -> локально.
         Возвращает True, если локальная база изменилась (для логов/отладки).
         """
+        changed = False
         try:
-            return self.sync_service.pull_all()
+            changed |= self.sync_service.pull_all()
         except Exception as e:
             print("Google sync error:", e)
-            return False
+        try:
+            if self.daily_tasks_sync.pull():
+                changed = True
+                if self._today:
+                    self._today.refresh_daily_tasks()
+        except Exception as e:
+            print("Daily tasks sync error:", e)
+        return changed
 
     def _push_to_google(self):
         if not GOOGLE_SYNC.enabled:
@@ -251,9 +281,11 @@ class AppShell:
     def mount(self):
         self.page.controls.clear()
         self.page.add(self.root)
+        self.cleanup_overlays()
         self.show_today()
 
     def show_today(self):
+        self.cleanup_overlays()
         self.nav.selected_index = 0
         self.content.content = self._today.view
         self.page.update()
@@ -265,6 +297,7 @@ class AppShell:
         self._start_auto_refresh("today", self._today.load, run_immediately=False)
 
     def show_calendar(self):
+        self.cleanup_overlays()
         self.nav.selected_index = 1
         self.content.content = self._calendar.view
         self.page.update()
@@ -278,6 +311,7 @@ class AppShell:
         self._start_auto_refresh("calendar", self._calendar.load, run_immediately=False)
 
     def show_history(self):
+        self.cleanup_overlays()
         self.nav.selected_index = 2
         self.content.content = self._history.view
         self._stop_auto_refresh()
@@ -285,6 +319,7 @@ class AppShell:
         self._history.activate_from_menu()
 
     def show_settings(self):
+        self.cleanup_overlays()
         self.nav.selected_index = 3
         self.content.content = self._settings.view
         self._stop_auto_refresh()
@@ -293,6 +328,7 @@ class AppShell:
     # ---------- переключение вкладок ----------
     def on_nav_change(self, e: ft.ControlEvent):
         idx = int(e.control.selected_index)
+        self.cleanup_overlays()
 
         if idx == 0:  # Сегодня
             self.show_today()
@@ -327,6 +363,7 @@ class AppShell:
             self.auth.ensure_credentials()
             self.gcal.connect()
             self.gtasks.connect()
+            self.gtasks_dailies.connect()
             return True
         except Exception as exc:
             print("Google connect error:", exc)

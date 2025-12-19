@@ -124,6 +124,7 @@ class GoogleSyncSettings:
     sync_token_path: Path = SYNC_TOKEN_PATH
     delete_on_google_cancel: bool = False
     tasks_tasklist_name: str = "Planner Inbox"
+    dailies_tasklist_name: str = "Planner Dailies"
     tasks_pull_interval_sec: int = 90
     tasks_push_interval_sec: int = 90
     tasks_meta_filename: str = "planner-meta.json"
@@ -157,4 +158,3 @@ __all__ = [
     "BACKUP",
     "get_default_data_dir",
 ]
-
