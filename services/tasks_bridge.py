@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
@@ -15,6 +16,8 @@ try:  # pragma: no cover - optional dependency when running tests without Google
     from google.oauth2.credentials import Credentials
 except Exception:  # pragma: no cover
     Credentials = None
+
+logger = logging.getLogger("planner.sync.undated.bridge")
 
 DEFAULT_SCOPES = list(GOOGLE_SYNC.scopes)
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -108,19 +111,6 @@ def _split_notes(raw_notes: Optional[str]) -> Tuple[Dict[str, Any], str, bool]:
     return {}, original.strip(), False
 
 
-def _parse_timestamp(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        text = str(value).replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(text)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
-    except Exception:
-        return None
-
-
 def _status_payload(local_task: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     status = str(local_task.get("status") or "").lower()
     if status == "done":
@@ -165,6 +155,15 @@ class GoogleTasksBridge:
         return created.get("id")
 
     def fetch_all(self, tasklist_id: str) -> list[Dict[str, Any]]:
+        """Return every task in the list, including deleted and hidden ones.
+
+        Planner metadata embedded in ``notes`` (legacy format) is parsed and
+        exposed consistently under both ``metadata`` and ``detected_meta``.
+        Remotely deleted tasks are returned with ``deleted=True`` instead of
+        being silently dropped, so the sync engine can propagate deletions;
+        hidden (completed) tasks are included so their absence is never
+        mistaken for a deletion.
+        """
         self._maybe_build_service(strict=True)
         page_token = None
         results: list[Dict[str, Any]] = []
@@ -174,16 +173,15 @@ class GoogleTasksBridge:
                 tasklist=tasklist_id,
                 maxResults=100,
                 showCompleted=True,
-                showDeleted=False,
+                showDeleted=True,
+                showHidden=True,
                 pageToken=page_token,
             )
             for item in response.get("items", []):
-                if item.get("deleted"):
-                    continue
+                deleted = bool(item.get("deleted"))
                 raw_notes = item.get("notes") or ""
                 meta_from_notes, body, had_meta = _split_notes(raw_notes)
-                timestamp = _parse_timestamp(item.get("updated"))
-                if had_meta and raw_notes.strip() != body:
+                if had_meta and not deleted and raw_notes.strip() != body:
                     try:
                         self._call_with_backoff(
                             self.service.tasks().patch,
@@ -191,16 +189,21 @@ class GoogleTasksBridge:
                             task=item.get("id"),
                             body={"notes": body},
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "failed to strip legacy metadata from task %s: %s",
+                            item.get("id"),
+                            exc,
+                        )
                 info = {
                     "id": item.get("id"),
                     "title": item.get("title") or "",
                     "notes": body,
-                    "metadata": {},
-                    "detected_meta": meta_from_notes,
+                    "metadata": dict(meta_from_notes),
+                    "detected_meta": dict(meta_from_notes),
                     "updated": item.get("updated"),
                     "status": item.get("status"),
+                    "deleted": deleted,
                     "raw": item,
                 }
                 results.append(info)
@@ -209,21 +212,43 @@ class GoogleTasksBridge:
                 break
         return results
 
-    def find_task_by_local_id(self, tasklist_id: str, local_task_id: str) -> Optional[Dict[str, Any]]:
+    def find_task_by_uid(self, tasklist_id: str, task_uid: str) -> Optional[Dict[str, Any]]:
+        """Find a live remote task whose planner metadata carries ``task_uid``."""
+        if not task_uid:
+            return None
         for item in self.fetch_all(tasklist_id):
+            if item.get("deleted"):
+                continue
+            metadata = item.get("metadata") or {}
+            candidate = metadata.get("uid") or metadata.get("task_uid")
+            if candidate and str(candidate) == str(task_uid):
+                return item
+        return None
+
+    def find_task_by_local_id(self, tasklist_id: str, local_task_id: str) -> Optional[Dict[str, Any]]:
+        """Legacy lookup by device-local task id.
+
+        Local autoincrement ids are not stable across devices, so this must
+        not be used for sync identity — use :meth:`find_task_by_uid`. Kept
+        only for the description-migration utility.
+        """
+        for item in self.fetch_all(tasklist_id):
+            if item.get("deleted"):
+                continue
             metadata = item.get("metadata") or {}
             if str(metadata.get("task_id")) == str(local_task_id):
                 return item
         return None
 
     def upsert_task(self, tasklist_id: str, local_task: Dict[str, Any]) -> str:
-        if not local_task.get("task_id"):
-            raise ValueError("local_task must contain task_id")
+        task_uid = local_task.get("uid") or local_task.get("task_uid")
+        if not task_uid:
+            raise ValueError("local_task must contain uid")
         self._maybe_build_service(strict=True)
 
         gtask_id = local_task.get("gtask_id")
         if not gtask_id:
-            existing = self.find_task_by_local_id(tasklist_id, str(local_task["task_id"]))
+            existing = self.find_task_by_uid(tasklist_id, str(task_uid))
             if existing:
                 gtask_id = existing.get("id")
 

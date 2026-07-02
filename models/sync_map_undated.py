@@ -11,6 +11,11 @@ class SyncMapUndated(SQLModel, table=True):
     """Keep mapping between local tasks and Google Tasks entities."""
 
     task_id: str = Field(primary_key=True, description="Local task identifier")
+    task_uid: Optional[str] = Field(
+        default=None,
+        index=True,
+        description="Stable cross-device task identifier (Task.uid)",
+    )
     gtask_id: Optional[str] = Field(
         default=None,
         index=True,
