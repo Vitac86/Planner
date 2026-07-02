@@ -96,7 +96,7 @@ class CalendarPage:
         # защита от петель при синхронизации скролла
         self._syncing_hscroll = False
 
-        # менеджер оверлеев берет на себя фон/ESC
+        # Esc/фон модалок обрабатывает AppShell (см. _on_key и cleanup_overlays)
 
         # ---------- Шапка экрана ----------
         self.title_text = ft.Text("", size=24, weight=ft.FontWeight.BOLD)
@@ -146,7 +146,7 @@ class CalendarPage:
     def mount(self):
         self.load()
 
-    # ===== Диалоги через OverlayManager =====
+    # ===== Диалоги =====
     def _open_dialog(self, dlg: ft.AlertDialog, on_close=None):
         if on_close:
             dlg.on_dismiss = lambda e: on_close()
@@ -265,7 +265,7 @@ class CalendarPage:
         self.app.cleanup_overlays()
     def _sync_from_google(self, ws: date, we: date):
         try:
-            self.app.sync_service.pull()
+            self.app.sync_service.pull_all()
         except Exception as ex:
             self._toast(f"Google sync: {ex}")
 
@@ -298,8 +298,9 @@ class CalendarPage:
             self.unscheduled_list.controls.append(drag)
 
     def _remember_drag(self, task_id: int):
+        # только запоминаем id; page.update() в момент старта перетаскивания
+        # перерисовывает сетку и срывает drag
         self.current_drag_task_id = task_id
-        self.app.page.update()
 
     # ===== Сетка =====
     def _build_week_grid(self) -> ft.Control:
@@ -336,7 +337,10 @@ class CalendarPage:
                     width=HOURS_COL_W, height=self.row_h[h],
                     alignment=ft.alignment.center_right,
                     padding=ft.padding.only(right=8),
-                    border=ft.border.only(bottom=ft.BorderSide(0.6, CLR_OUTLINE)),
+                    border=ft.border.only(
+                        right=ft.BorderSide(0.5, CLR_OUTLINE),
+                        bottom=ft.BorderSide(0.6, CLR_OUTLINE),
+                    ),
                 )
             )
         hours_col = ft.Column(controls=hours_controls, spacing=0, width=HOURS_COL_W)
@@ -345,27 +349,10 @@ class CalendarPage:
         day_cols: List[ft.Control] = []
         for di, d in enumerate(days):
             is_today_col = (d == today)
-            col_rows: List[ft.Control] = []
-            for h in range(DAY_START, DAY_END + 1):
-                tasks = self.idx.get((di, h), [])
-                is_now = is_today_col and (h == now.hour)
-                slot = self._slot_body(tasks, is_now, d, h)
-                drop = ft.DragTarget(
-                    group="task",
-                    content=slot,
-                    on_accept=lambda e, _d=d, _h=h: self._on_drop_accept(_d, _h, e),
-                    on_will_accept=lambda e, _slot=slot: self._on_drop_hover(_slot, True),
-                    on_leave=lambda e, _slot=slot: self._on_drop_hover(_slot, False),
-                )
-                cell = ft.Container(
-                    content=drop, width=DAY_COL_W, height=self.row_h[h],
-                    bgcolor=CLR_TODAY_BG if is_today_col else None,
-                    border=ft.border.only(
-                        right=ft.BorderSide(0.5, CLR_OUTLINE) if di < 6 else None,
-                        bottom=ft.BorderSide(0.6, CLR_OUTLINE),
-                    ),
-                )
-                col_rows.append(cell)
+            col_rows: List[ft.Control] = [
+                self._build_cell(di, d, h, is_today_col, now)
+                for h in range(DAY_START, DAY_END + 1)
+            ]
             day_cols.append(ft.Container(content=ft.Column(col_rows, spacing=0), width=DAY_COL_W))
 
         hrow_body = ft.Row(controls=day_cols, spacing=0, ref=self._hrow_body_ref, scroll=ft.ScrollMode.ALWAYS)
@@ -421,31 +408,52 @@ class CalendarPage:
         finally:
             self._syncing_hscroll = False
 
+    def _build_cell(self, di: int, d: date, hour: int, is_today_col: bool, now: datetime) -> ft.Control:
+        """Ячейка час×день: DragTarget обёрнут вокруг всей видимой ячейки."""
+        tasks = self.idx.get((di, hour), [])
+        is_now = is_today_col and (hour == now.hour)
+        slot = self._slot_body(tasks, is_now, d, hour)
+        cell = ft.Container(
+            content=slot,
+            width=DAY_COL_W,
+            height=self.row_h[hour],
+            bgcolor=CLR_TODAY_BG if is_today_col else None,
+            border=ft.border.only(
+                right=ft.BorderSide(0.5, CLR_OUTLINE) if di < 6 else None,
+                bottom=ft.BorderSide(0.6, CLR_OUTLINE),
+            ),
+        )
+        return ft.DragTarget(
+            group="task",
+            content=cell,
+            on_accept=lambda e, _d=d, _h=hour, _s=slot: self._on_drop_accept(_d, _h, e, _s),
+            on_will_accept=lambda e, _s=slot: self._set_drop_hover(_s, True),
+            on_leave=lambda e, _s=slot: self._set_drop_hover(_s, False),
+        )
+
     def _slot_body(self, tasks: List[dict], is_now_hour: bool, day: date, hour: int) -> ft.Control:
         chips: List[ft.Control] = []
         if is_now_hour:
             chips.append(ft.Container(key=NOW_ANCHOR_KEY, height=1, width=1))
             chips.append(ft.Container(height=2, bgcolor=CLR_NOW_LINE))
 
-        if tasks:
-            for t in tasks:
-                chips.append(self._build_chip(t, day, hour))
-        else:
-            # кликабельная площадь заполняет весь слот по высоте
-            chips.append(
-                ft.Container(
-                    on_click=lambda e, d=day, h=hour: self.open_quick_add(d, h),
-                    width=DAY_COL_W,
-                    height=max(8, self.row_h.get(hour, ROW_MIN_H) - 8),
-                )
-            )
+        for t in tasks:
+            chips.append(self._build_chip(t, day, hour))
 
-        return ft.Container(
+        base_bg = CLR_SURFVAR if tasks else None
+        body = ft.Container(
             content=ft.Column(chips, spacing=CHIPS_SPACING),
             padding=ft.padding.only(left=6, right=6, top=4, bottom=4),
-            width=DAY_COL_W, expand=True,
-            bgcolor=CLR_SURFVAR if tasks else None,
+            expand=True,
+            bgcolor=base_bg,
         )
+        # запоминаем базовый фон, чтобы hover-подсветка при DnD корректно сбрасывалась
+        body._planner_base_bg = base_bg
+        if not tasks:
+            # пустой слот: клик по всей площади ячейки открывает быстрый блок
+            body.on_click = lambda e, d=day, h=hour: self.open_quick_add(d, h)
+            body.ink = True
+        return body
 
     def _build_chip(self, t: dict, day: date, hour: int) -> ft.Control:
         title = t.get("title", "")
@@ -530,35 +538,55 @@ class CalendarPage:
         self._open_dialog(dlg)
 
     # ===== DnD =====
-    def _on_drop_accept(self, day: date, hour: int, e):
-        task_id = self.current_drag_task_id
-        if task_id is None:
-            s = str(e.data or "").strip()
-            if s.isdigit():
-                task_id = int(s)
-            else:
-                try:
-                    payload = json.loads(s)
-                    if isinstance(payload, dict) and "task_id" in payload:
-                        task_id = int(payload["task_id"])
-                except Exception:
-                    task_id = None
+    def _resolve_drag_task_id(self, e) -> Optional[int]:
+        """Определяет id задачи из drop-события: сначала id, запомненный в
+        on_drag_start, затем data Draggable-источника (по src_id события)."""
+        if self.current_drag_task_id is not None:
+            return self.current_drag_task_id
+
+        src_id = getattr(e, "src_id", None)
+        if src_id is None:
+            try:
+                payload = json.loads(str(getattr(e, "data", "") or ""))
+                if isinstance(payload, dict):
+                    src_id = payload.get("src_id")
+            except Exception:
+                src_id = None
+        if src_id is not None:
+            try:
+                src = self.app.page.get_control(src_id)
+            except Exception:
+                src = None
+            raw = str(getattr(src, "data", "") or "").strip()
+            if raw.isdigit():
+                return int(raw)
+
+        s = str(getattr(e, "data", "") or "").strip()
+        if s.isdigit():
+            return int(s)
+        return None
+
+    def _on_drop_accept(self, day: date, hour: int, e, slot: ft.Control | None = None):
+        if slot is not None:
+            self._set_drop_hover(slot, False)
+        task_id = self._resolve_drag_task_id(e)
         self.current_drag_task_id = None
         if task_id is None:
             return self._toast("Не удалось определить задачу")
         self._schedule_task(task_id, day, hour)
 
-    def _on_drop_hover(self, slot: ft.Control, active: bool):
+    def _set_drop_hover(self, slot: ft.Control, active: bool):
+        """Подсветка ячейки при наведении DnD; фон меняется без сдвига layout."""
+        if not isinstance(slot, ft.Container):
+            return
+        if active:
+            slot.bgcolor = ft.Colors.with_opacity(0.15, ft.Colors.PRIMARY)
+        else:
+            slot.bgcolor = getattr(slot, "_planner_base_bg", None)
         try:
-            if isinstance(slot, ft.Container):
-                slot.border = ft.border.all(
-                    1,
-                    ft.Colors.PRIMARY if active else ft.Colors.with_opacity(0.6, CLR_OUTLINE),
-                )
-                slot.border_radius = 6
+            slot.update()
+        except Exception:
             self.app.page.update()
-        finally:
-            return True
 
     # ===== Планирование и быстрый блок =====
     def _schedule_task(self, task_id: int, day: date, hour: int):
