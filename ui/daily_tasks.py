@@ -85,7 +85,12 @@ class DailyTasksPanel:
             if task.weekdays & (1 << i):
                 parts.append(label)
         return ", ".join(parts)
+    def _on_edit_click(self, e: ft.ControlEvent):
+        self._open_dialog(task_id=str(e.control.data))
 
+    def _on_delete_click(self, e: ft.ControlEvent):
+        self._confirm_delete(str(e.control.data))
+        
     def _build_item(self, task: DailyTask) -> ft.Control:
         checked = task.status_today == "done_today"
         is_inactive = task.status_today == "inactive"
@@ -117,14 +122,20 @@ class DailyTasksPanel:
         edit_btn = ft.IconButton(
             icon=ft.Icons.EDIT_OUTLINED,
             tooltip="Редактировать",
-            on_click=lambda e, tid=task.id: self._open_dialog(task_id=tid),
-            style=ft.ButtonStyle(padding=ft.padding.all(6)),
+            data=task.id,
+            on_click=self._on_edit_click,
+            icon_size=18,
+            width=34,
+            height=34,
         )
         delete_btn = ft.IconButton(
             icon=ft.Icons.DELETE_OUTLINE,
             tooltip="Удалить",
-            on_click=lambda e, tid=task.id: self._confirm_delete(tid),
-            style=ft.ButtonStyle(padding=ft.padding.all(6)),
+            data=task.id,
+            on_click=self._on_delete_click,
+            icon_size=18,
+            width=34,
+            height=34,
         )
 
         actions = ft.Row([edit_btn, delete_btn], spacing=4, alignment=ft.MainAxisAlignment.END)
@@ -159,7 +170,7 @@ class DailyTasksPanel:
 
     def _add_button(self) -> ft.Control:
         return ft.TextButton(
-            text="+Добавить",
+            text="Добавить",
             icon=ft.Icons.ADD,
             style=ft.ButtonStyle(
                 bgcolor=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE),

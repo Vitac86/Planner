@@ -398,6 +398,9 @@ class TodayPage:
     def on_edit_click(self, e: ft.ControlEvent):
         self.open_edit_dialog(int(e.control.data))
 
+    def on_delete_click(self, e: ft.ControlEvent):
+        self.on_delete(int(e.control.data))
+
     def on_edit(self, task_id: int):
         self.open_edit_dialog(task_id)
 
@@ -494,14 +497,19 @@ class TodayPage:
                     icon=ft.Icons.EDIT_OUTLINED,
                     tooltip="Редактировать",
                     data=t.id,
-                    on_click=lambda e, tid=t.id: self.on_edit(tid),
-                    style=ft.ButtonStyle(padding=ft.padding.all(8)),
+                    on_click=self.on_edit_click,
+                    icon_size=18,
+                    width=36,
+                    height=36,
                 ),
                 ft.IconButton(
                     icon=ft.Icons.DELETE_OUTLINE,
                     tooltip="Удалить",
-                    on_click=lambda e, tid=t.id: self.on_delete(tid),
-                    style=ft.ButtonStyle(padding=ft.padding.all(8)),
+                    data=t.id,
+                    on_click=self.on_delete_click,
+                    icon_size=18,
+                    width=36,
+                    height=36,
                 ),
             ],
             spacing=4,

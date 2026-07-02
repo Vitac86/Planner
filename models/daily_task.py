@@ -21,6 +21,8 @@ class DailyTask(SQLModel, table=True):
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
     timezone: str = Field(default="UTC")
+    gtasks_id: str | None = None
+    gtasks_updated: str | None = None
 
 
 __all__ = ["DailyTask"]

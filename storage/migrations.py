@@ -5,6 +5,12 @@ from __future__ import annotations
 from sqlalchemy import text
 
 
+def _ensure_columns(conn, table: str, columns: dict[str, str]) -> None:
+    for name, ddl_type in columns.items():
+        if not _column_exists(conn, table, name):
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}"))
+
+
 def _column_exists(conn, table: str, column: str) -> bool:
     result = conn.execute(text(f"PRAGMA table_info('{table}')"))
     return any(row[1] == column for row in result)
@@ -18,9 +24,7 @@ def ensure_task_columns(conn) -> None:
         "gtasks_id": "TEXT",
         "gtasks_updated": "TEXT",
     }
-    for name, ddl_type in columns.items():
-        if not _column_exists(conn, "task", name):
-            conn.execute(text(f"ALTER TABLE task ADD COLUMN {name} {ddl_type}"))
+    _ensure_columns(conn, "task", columns)
 
     if _column_exists(conn, "task", "gcal_updated_utc"):
         conn.execute(
@@ -105,10 +109,19 @@ def ensure_tag_tables(conn) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_task_tags_tag ON task_tags(tag_id)"))
 
 
+def ensure_daily_task_columns(conn) -> None:
+    columns = {
+        "gtasks_id": "TEXT",
+        "gtasks_updated": "TEXT",
+    }
+    _ensure_columns(conn, "dailytask", columns)
+
+
 def run_all(engine) -> None:
     with engine.begin() as conn:
         ensure_task_columns(conn)
         ensure_task_uid(conn)
+        ensure_daily_task_columns(conn)
         ensure_tag_tables(conn)
         # SQLModel creates the pendingop table, but ensure indexes exist in legacy DBs
         ensure_pending_ops_table(conn)

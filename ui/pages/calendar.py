@@ -150,10 +150,38 @@ class CalendarPage:
     def _open_dialog(self, dlg: ft.AlertDialog, on_close=None):
         if on_close:
             dlg.on_dismiss = lambda e: on_close()
-        self.app.page.snack_bar.open = False
-        self.app.page.dialog = dlg
-        dlg.open = True
-        self.app.page.update()
+
+        # аккуратно прячем snackbar, если он есть
+        try:
+            sb = getattr(self.app.page, "snack_bar", None)
+            if sb:
+                sb.open = False
+        except Exception:
+            pass
+
+        page = self.app.page
+
+        # чтобы close_alert_dialog() и Esc всегда знали, что закрывать
+        try:
+            setattr(page, "_planner_active_dialog", dlg)
+        except Exception:
+            pass
+        try:
+            page.dialog = dlg
+        except Exception:
+            pass
+
+        # для совместимости со старым поведением (и для Esc-проверки .open)
+        try:
+            dlg.open = True
+        except Exception:
+            pass
+
+        # новый способ показа диалогов (если доступен)
+        if callable(getattr(page, "open", None)):
+            page.open(dlg)
+        else:
+            page.update()
 
     def _close_any_dialog(self):
         close_alert_dialog(self.app.page)
