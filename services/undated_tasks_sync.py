@@ -31,6 +31,18 @@ Deletions are represented as tombstones in the shared index entry:
 All deletion handling is idempotent: replaying a pull or push after
 convergence changes nothing.
 
+Activation gate and ownership tripwire
+--------------------------------------
+The engine is inert unless ``GOOGLE_SYNC.undated_engine == "undated"``
+(set via the ``PLANNER_UNDATED_ENGINE`` environment variable; the default is
+``"legacy"``): every public entry point no-ops and ``sync``/``pull``/
+``push_dirty`` record a deterministic skip reason. When active, the engine
+additionally asserts single-writer ownership of the "Planner Inbox" list via
+the ``engine`` marker in the shared ``planner_config.json`` (appDataFolder):
+a vacant marker is claimed with ``"undated"``, a foreign marker makes every
+write path raise :class:`EngineOwnershipError` instead of running two
+writers against the same list.
+
 Transition hooks (not wired into AppShell yet)
 ----------------------------------------------
 :meth:`on_task_unscheduled` (ownership arrives at this engine) and
@@ -49,7 +61,7 @@ from typing import Dict, Iterable, List, Optional
 from sqlmodel import select
 
 from core.priorities import DEFAULT_PRIORITY, normalize_priority
-from core.settings import GOOGLE_SYNC
+from core.settings import GOOGLE_SYNC, UNDATED_ENGINE_UNDATED
 from models import SyncMapUndated, Task
 from services.appdata import AppDataClient
 from services.tasks_bridge import GoogleTasksBridge
@@ -60,6 +72,22 @@ logger = logging.getLogger("planner.sync.undated")
 
 TOMBSTONE_REASON_DELETED = "deleted"
 TOMBSTONE_REASON_SCHEDULED = "scheduled"
+
+ENGINE_NAME = UNDATED_ENGINE_UNDATED
+
+SKIP_REASON_ENGINE_NOT_SELECTED = (
+    "undated engine is not selected (GOOGLE_SYNC.undated_engine != 'undated')"
+)
+
+
+class EngineOwnershipError(RuntimeError):
+    """The "Planner Inbox" list is owned by another engine.
+
+    Raised instead of writing when the ``engine`` marker in the shared
+    ``planner_config.json`` names an engine other than ``"undated"``. Two
+    writers on the same Google Tasks list corrupt each other; the caller
+    must resolve ownership explicitly (see docs/SYNC_ENGINE_DECISION.md §5).
+    """
 
 
 def _utcnow() -> datetime:
@@ -187,6 +215,8 @@ class UndatedTasksSync:
     def status_text(self) -> str:
         if not GOOGLE_SYNC.enabled:
             return "Tasks: синхронизация отключена"
+        if not self._engine_selected():
+            return "Tasks: движок undated не активирован (undated_engine=legacy)"
         if not self.bridge:
             return "Tasks: недоступны"
         tasklist_id = self._tasklist_id or self._load_config().get("tasklist_id")
@@ -253,8 +283,9 @@ class UndatedTasksSync:
 
     # ----- high level operations -----
     def mark_dirty(self, task_id: int) -> None:
-        if not GOOGLE_SYNC.enabled:
+        if not GOOGLE_SYNC.enabled or not self._engine_selected():
             return
+        self._ensure_engine_ownership()
 
         gtask_id = None
         task_snapshot: Optional[Task] = None
@@ -296,6 +327,10 @@ class UndatedTasksSync:
         delete_remote: bool = False,
         tombstone_reason: Optional[str] = None,
     ) -> None:
+        if not self._engine_selected():
+            return
+        self._ensure_engine_ownership()
+
         gtask_id = None
         task_uid = None
         tasklist_id = None
@@ -331,6 +366,9 @@ class UndatedTasksSync:
 
     # ----- pull -----
     def _run_pull(self, report: SyncReport) -> bool:
+        if not self._engine_selected():
+            report.skip("pull", SKIP_REASON_ENGINE_NOT_SELECTED)
+            return False
         if not self._can_sync():
             return False
 
@@ -338,6 +376,7 @@ class UndatedTasksSync:
         if not tasklist_id:
             report.skip("pull", "tasklist is unavailable")
             return False
+        self._ensure_engine_ownership()
 
         try:
             remote_tasks = self.bridge.fetch_all(tasklist_id)
@@ -553,6 +592,9 @@ class UndatedTasksSync:
 
     # ----- push -----
     def _run_push(self, report: SyncReport) -> bool:
+        if not self._engine_selected():
+            report.skip("push", SKIP_REASON_ENGINE_NOT_SELECTED)
+            return False
         if not self._can_sync():
             return False
 
@@ -560,6 +602,7 @@ class UndatedTasksSync:
         if not tasklist_id:
             report.skip("push", "tasklist is unavailable")
             return False
+        self._ensure_engine_ownership()
 
         index = self._get_index()
         changed = False
@@ -671,6 +714,46 @@ class UndatedTasksSync:
     # ----- internal helpers -----
     def _can_sync(self) -> bool:
         return GOOGLE_SYNC.enabled and self.bridge is not None
+
+    def _engine_selected(self) -> bool:
+        return getattr(GOOGLE_SYNC, "undated_engine", "legacy") == ENGINE_NAME
+
+    def _ensure_engine_ownership(self) -> None:
+        """Assert single-writer ownership of the "Planner Inbox" lane.
+
+        The shared ``planner_config.json`` carries an ``engine`` marker. A
+        vacant marker is claimed with ``"undated"``; a marker naming another
+        engine raises :class:`EngineOwnershipError` before anything is
+        written. The claim itself goes through the etag-guarded
+        ``write_config`` path, so a concurrent claim by another device is
+        re-checked on conflict rather than overwritten.
+        """
+        config = self._load_config()
+        owner = config.get("engine")
+        if owner == ENGINE_NAME:
+            return
+        if owner:
+            raise EngineOwnershipError(
+                "planner_config.json says engine "
+                f"{owner!r} owns the {self.tasklist_title!r} list; "
+                "refusing to run a second writer"
+            )
+
+        def mutator(payload: Dict[str, object]) -> Dict[str, object]:
+            payload = self._normalise_config(payload)
+            current = payload.get("engine")
+            if current and current != ENGINE_NAME:
+                raise EngineOwnershipError(
+                    "planner_config.json was claimed concurrently by engine "
+                    f"{current!r}; refusing to run a second writer"
+                )
+            payload["engine"] = ENGINE_NAME
+            return payload
+
+        self._update_config(mutator)
+        logger.info(
+            "undated sync claimed ownership of the %r list", self.tasklist_title
+        )
 
     def _ensure_tasklist_id(self) -> Optional[str]:
         if self._tasklist_id:
@@ -828,6 +911,7 @@ class UndatedTasksSync:
         data.setdefault("version", 1)
         data.setdefault("tasklist_id", None)
         data.setdefault("last_full_sync", None)
+        data.setdefault("engine", None)
         return data
 
     def _normalise_index(self, payload) -> Dict[str, object]:

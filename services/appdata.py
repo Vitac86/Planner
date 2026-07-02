@@ -284,7 +284,9 @@ class AppDataClient:
 
     @staticmethod
     def _default_config() -> Dict[str, Any]:
-        return {"version": 1, "tasklist_id": None, "last_full_sync": None}
+        # "engine" is the single-writer ownership marker for the
+        # "Planner Inbox" lane; None means unclaimed.
+        return {"version": 1, "tasklist_id": None, "last_full_sync": None, "engine": None}
 
     @staticmethod
     def _default_index() -> Dict[str, Any]:

@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Tuple
 
@@ -6,6 +7,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from core.priorities import DEFAULT_PRIORITY
+from core.settings import UNDATED_ENGINE_UNDATED
 from models import SyncMapUndated, Task
 from services.appdata import AppDataClient
 from services.tasks_bridge import _split_notes, _status_payload
@@ -13,6 +15,18 @@ from services.undated_tasks_sync import (
     TOMBSTONE_REASON_DELETED,
     UndatedTasksSync,
 )
+
+
+@pytest.fixture(autouse=True)
+def _select_undated_engine(monkeypatch):
+    """The engine is inert unless explicitly selected; these tests opt in."""
+    import services.undated_tasks_sync as uts
+
+    monkeypatch.setattr(
+        uts,
+        "GOOGLE_SYNC",
+        replace(uts.GOOGLE_SYNC, undated_engine=UNDATED_ENGINE_UNDATED),
+    )
 
 
 class FakeAppData(AppDataClient):  # type: ignore[misc]

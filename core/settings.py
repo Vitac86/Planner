@@ -112,6 +112,26 @@ class UISettings:
 UI = UISettings()
 
 
+UNDATED_ENGINE_LEGACY = "legacy"
+UNDATED_ENGINE_UNDATED = "undated"
+_UNDATED_ENGINES = (UNDATED_ENGINE_LEGACY, UNDATED_ENGINE_UNDATED)
+
+
+def resolve_undated_engine(env: Optional[Mapping[str, str]] = None) -> str:
+    """Select the sync engine for the undated ("Planner Inbox") lane.
+
+    ``"legacy"`` (the default) keeps the live ``SyncService`` path.
+    ``"undated"`` opts into the hardened ``UndatedTasksSync`` stack and must
+    be requested explicitly via the ``PLANNER_UNDATED_ENGINE`` environment
+    variable. Unknown values fall back to ``"legacy"`` so a typo can never
+    activate the new engine.
+    """
+
+    environ = os.environ if env is None else env
+    value = str(environ.get("PLANNER_UNDATED_ENGINE") or "").strip().lower()
+    return value if value in _UNDATED_ENGINES else UNDATED_ENGINE_LEGACY
+
+
 @dataclass(frozen=True)
 class GoogleSyncSettings:
     enabled: bool = True
@@ -128,6 +148,10 @@ class GoogleSyncSettings:
     tasks_pull_interval_sec: int = 90
     tasks_push_interval_sec: int = 90
     tasks_meta_filename: str = "planner-meta.json"
+    # Which engine owns the undated ("Planner Inbox") lane. Stays "legacy"
+    # unless PLANNER_UNDATED_ENGINE=undated is set explicitly; nothing in the
+    # live AppShell reads this yet — wiring is a later migration step.
+    undated_engine: str = resolve_undated_engine()
 
 
 GOOGLE_SYNC = GoogleSyncSettings()
@@ -156,5 +180,8 @@ __all__ = [
     "UI",
     "GOOGLE_SYNC",
     "BACKUP",
+    "UNDATED_ENGINE_LEGACY",
+    "UNDATED_ENGINE_UNDATED",
+    "resolve_undated_engine",
     "get_default_data_dir",
 ]
