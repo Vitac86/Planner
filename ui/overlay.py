@@ -34,8 +34,12 @@ class OverlayManager:
         self.page.update()
 
     def push_overlay(self, ctrl: ft.Control):
-        backdrop = ft.Container(expand=True, bgcolor=ft.colors.with_opacity(0.40, ft.colors.BLACK))
-        layer = ft.Stack([backdrop, ctrl])
+        backdrop = ft.Container(
+            expand=True,
+            bgcolor=ft.colors.with_opacity(0.40, ft.colors.BLACK),
+            data="planner_backdrop",
+        )
+        layer = ft.Stack([backdrop, ctrl], data="planner_layer")
         self.page.overlay.append(layer)
 
         def _close():

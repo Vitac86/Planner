@@ -69,6 +69,7 @@ def close_alert_dialog(page: ft.Page):
 
 
 def open_overlay(page: ft.Page, content: ft.Control):
+<<<<<<< HEAD
     # Совместимость Colors/colors
     Colors = getattr(ft, "Colors", None)
     colors_mod = getattr(ft, "colors", None)
@@ -88,6 +89,14 @@ def open_overlay(page: ft.Page, content: ft.Control):
     backdrop.data = "backdrop"  # чтобы cleanup_overlays мог чистить корректно
 
     layer = ft.Stack([backdrop, content])
+=======
+    backdrop = ft.Container(
+        expand=True,
+        bgcolor=ft.colors.with_opacity(0.40, ft.colors.BLACK),
+        data="planner_backdrop",
+    )
+    layer = ft.Stack([backdrop, content], data="planner_layer")
+>>>>>>> bc0bd30ca00fa6a73bc1bdc0c3f03a6ccc4dd48b
     page.overlay.append(layer)
     page.update()
     return layer

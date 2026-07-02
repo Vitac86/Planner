@@ -74,7 +74,7 @@ class AppShell:
             selected_index=0,
             expand=True,
             label_type=ft.NavigationRailLabelType.ALL,
-            min_width=90,
+            min_width=88,
             min_extended_width=200,
             group_alignment=-0.9,
             on_change=self.on_nav_change,
@@ -103,9 +103,18 @@ class AppShell:
         )
 
         # корневой лэйаут
+        nav_column = ft.Column([self.nav], expand=True)
         self.root = ft.Row(
             controls=[
+<<<<<<< HEAD
                 ft.Container(width=88, bgcolor=UI.theme.safe_surface_bg, content=ft.Column([self.nav], expand=True)),
+=======
+                ft.Container(
+                    nav_column,
+                    width=88,
+                    bgcolor=UI.theme.safe_surface_bg,
+                ),
+>>>>>>> bc0bd30ca00fa6a73bc1bdc0c3f03a6ccc4dd48b
                 ft.VerticalDivider(width=1),
                 self.content,
             ],
@@ -118,10 +127,15 @@ class AppShell:
         self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
 
     def cleanup_overlays(self):
-        """Remove closed overlays (dialogs, pickers, backdrops) to avoid "ghost" windows."""
-        overlays = getattr(self.page, "overlay", None) or []
+        """Remove closed app overlays marked with planner-specific data tags."""
+        overlays = getattr(self.page, "overlay", None)
+        if overlays is None:
+            return
+
+        allowed_tags = {"planner_layer", "planner_backdrop"}
         changed = False
 
+<<<<<<< HEAD
         def _looks_fullscreen(ctrl) -> bool:
             if isinstance(ctrl, ft.Stack):
                 return True
@@ -139,12 +153,20 @@ class AppShell:
                     ctrl.open = False
             except Exception:
                 pass
+=======
+        for ctrl in list(overlays):
+            if getattr(ctrl, "data", None) not in allowed_tags:
+                continue
+            if hasattr(ctrl, "open") and getattr(ctrl, "open", False):
+                continue
+>>>>>>> bc0bd30ca00fa6a73bc1bdc0c3f03a6ccc4dd48b
             try:
                 overlays.remove(ctrl)
                 changed = True
-            except Exception:
+            except ValueError:
                 pass
 
+<<<<<<< HEAD
         for ctrl in list(overlays):
             if hasattr(ctrl, "open"):
                 if not getattr(ctrl, "open", False):
@@ -165,6 +187,8 @@ class AppShell:
             if _looks_fullscreen(ctrl):
                 _close_and_remove(ctrl)
 
+=======
+>>>>>>> bc0bd30ca00fa6a73bc1bdc0c3f03a6ccc4dd48b
         if changed:
             self.page.update()
 

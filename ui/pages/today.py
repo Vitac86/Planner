@@ -102,6 +102,7 @@ class TodayPage:
                             ],
                             alignment=ft.MainAxisAlignment.START,
                             vertical_alignment=ft.CrossAxisAlignment.END,
+                            wrap=True,
                         ),
                     ],
                     spacing=12,
