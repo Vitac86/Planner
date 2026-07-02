@@ -371,12 +371,13 @@ class UndatedTasksSync:
             return False
         if not self._can_sync():
             return False
+        if not self._claim_ownership_or_skip(report, "pull"):
+            return False
 
         tasklist_id = self._ensure_tasklist_id()
         if not tasklist_id:
             report.skip("pull", "tasklist is unavailable")
             return False
-        self._ensure_engine_ownership()
 
         try:
             remote_tasks = self.bridge.fetch_all(tasklist_id)
@@ -597,12 +598,13 @@ class UndatedTasksSync:
             return False
         if not self._can_sync():
             return False
+        if not self._claim_ownership_or_skip(report, "push"):
+            return False
 
         tasklist_id = self._ensure_tasklist_id()
         if not tasklist_id:
             report.skip("push", "tasklist is unavailable")
             return False
-        self._ensure_engine_ownership()
 
         index = self._get_index()
         changed = False
@@ -718,6 +720,23 @@ class UndatedTasksSync:
     def _engine_selected(self) -> bool:
         return getattr(GOOGLE_SYNC, "undated_engine", "legacy") == ENGINE_NAME
 
+    def _claim_ownership_or_skip(self, report: SyncReport, stage: str) -> bool:
+        """Run the ownership tripwire; on transient failure skip the stage.
+
+        :class:`EngineOwnershipError` always propagates. Anything else (e.g.
+        credentials unavailable while reading the config) is recorded as a
+        deterministic skip so pull/push degrade gracefully instead of
+        crashing the caller.
+        """
+        try:
+            self._ensure_engine_ownership()
+            return True
+        except EngineOwnershipError:
+            raise
+        except Exception as exc:
+            report.skip(stage, f"ownership check unavailable: {exc}")
+            return False
+
     def _ensure_engine_ownership(self) -> None:
         """Assert single-writer ownership of the "Planner Inbox" lane.
 
@@ -727,6 +746,10 @@ class UndatedTasksSync:
         written. The claim itself goes through the etag-guarded
         ``write_config`` path, so a concurrent claim by another device is
         re-checked on conflict rather than overwritten.
+
+        Ordering matters: this must run before ``_ensure_tasklist_id`` or any
+        index write, so the foreign-owner path performs no writes at all —
+        claiming a vacant marker is the engine's very first write.
         """
         config = self._load_config()
         owner = config.get("engine")

@@ -246,11 +246,67 @@ def test_foreign_ownership_marker_blocks_all_writes(monkeypatch):
     with pytest.raises(EngineOwnershipError):
         sync.on_task_deleted(task_id)
 
-    # Nothing was written anywhere: no remote tasks, no marker takeover.
+    # Nothing was written anywhere: no remote tasks, no marker takeover,
+    # no tasklist_id side effects on either shared surface.
     assert bridge.inserted == []
     assert bridge.deleted == []
+    assert bridge.ensure_calls == 0
     assert appdata.config["engine"] == "legacy"
+    assert appdata.config["tasklist_id"] is None
+    assert appdata.index["tasklist_id"] is None
     assert appdata.index["tasks"] == {}
+
+
+def test_pull_checks_ownership_before_tasklist_writes(monkeypatch):
+    """A foreign marker must abort pull() before tasklist resolution.
+
+    Regression: _ensure_tasklist_id used to run first and wrote tasklist_id
+    into planner_config.json and the index before ownership was checked.
+    """
+    _set_engine_flag(monkeypatch, UNDATED_ENGINE_UNDATED)
+    session_factory = _make_session_factory()
+    _create_task(session_factory)
+    bridge = FakeBridge()
+    appdata = FakeAppData()
+    appdata.config["engine"] = "legacy"
+    sync = _make_sync(session_factory, bridge, appdata)
+
+    with pytest.raises(EngineOwnershipError):
+        sync.pull()
+
+    assert bridge.ensure_calls == 0
+    assert bridge.fetch_calls == 0
+    assert bridge.inserted == []
+    assert bridge.deleted == []
+    # No side-effect writes: neither surface gained a tasklist_id and the
+    # foreign marker survived untouched.
+    assert appdata.config["tasklist_id"] is None
+    assert appdata.index["tasklist_id"] is None
+    assert appdata.config["engine"] == "legacy"
+    assert appdata.config_etag == "cfg-0"
+    assert appdata.index_etag == "idx-0"
+
+
+def test_push_checks_ownership_before_tasklist_writes(monkeypatch):
+    _set_engine_flag(monkeypatch, UNDATED_ENGINE_UNDATED)
+    session_factory = _make_session_factory()
+    _create_task(session_factory)
+    bridge = FakeBridge()
+    appdata = FakeAppData()
+    appdata.config["engine"] = "legacy"
+    sync = _make_sync(session_factory, bridge, appdata)
+
+    with pytest.raises(EngineOwnershipError):
+        sync.push_dirty()
+
+    assert bridge.ensure_calls == 0
+    assert bridge.inserted == []
+    assert bridge.deleted == []
+    assert appdata.config["tasklist_id"] is None
+    assert appdata.index["tasklist_id"] is None
+    assert appdata.config["engine"] == "legacy"
+    assert appdata.config_etag == "cfg-0"
+    assert appdata.index_etag == "idx-0"
 
 
 def test_vacant_ownership_marker_is_claimed(monkeypatch):
