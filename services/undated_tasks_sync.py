@@ -43,12 +43,16 @@ a vacant marker is claimed with ``"undated"``, a foreign marker makes every
 write path raise :class:`EngineOwnershipError` instead of running two
 writers against the same list.
 
-Transition hooks (not wired into AppShell yet)
-----------------------------------------------
-:meth:`on_task_unscheduled` (ownership arrives at this engine) and
-:meth:`on_task_scheduled` (ownership leaves to the Calendar lane) are the
-seams a future migration step wires into ``TaskService`` events. See
-``docs/SYNC_ENGINE_DECISION.md`` §5.
+Event wiring (Phase 2)
+----------------------
+When the engine is selected, ``AppShell`` subscribes
+:meth:`on_task_created` / :meth:`on_task_updated` / :meth:`on_task_deleted`
+to the ``TaskService`` events and adds :meth:`sync` to the auto-refresh
+cycle. The created/updated hooks route statelessly: an undated task goes to
+:meth:`on_task_unscheduled` (ownership arrives at this engine), a dated one
+to :meth:`on_task_scheduled` (ownership leaves to the Calendar lane). The
+legacy ``SyncService`` keeps the Calendar lane but refuses the Google Tasks
+lane while this engine owns it. See ``docs/SYNC_ENGINE_DECISION.md`` §5.
 """
 from __future__ import annotations
 
@@ -251,7 +255,37 @@ class UndatedTasksSync:
         report.pushed = self._run_push(report)
         return report.pushed
 
-    # ----- transition / deletion hooks (to be wired into AppShell later) -----
+    # ----- TaskService event hooks (wired by AppShell in undated mode) -----
+    def on_task_created(self, task_id: int) -> None:
+        """``after_create``: route the new task to the lane that owns it."""
+        self._route_task_change(task_id)
+
+    def on_task_updated(self, task_id: int) -> None:
+        """``after_update``: re-route on every edit, covering transitions."""
+        self._route_task_change(task_id)
+
+    def _route_task_change(self, task_id: int) -> None:
+        """Classify a changed task and dispatch to the matching hook.
+
+        The TaskService events carry only the task id, not the previous
+        state, so routing is stateless: an undated task is (re)marked dirty,
+        a dated one has its Inbox mapping released (``on_task_scheduled``
+        no-ops when the task never lived in the Inbox), and a vanished one
+        is treated as deleted.
+        """
+        if not self._engine_selected():
+            return
+        with self._session_factory() as session:
+            task = session.get(Task, task_id)
+            has_start = task is not None and task.start is not None
+        if task is None:
+            self.on_task_deleted(task_id)
+        elif has_start:
+            self.on_task_scheduled(task_id)
+        else:
+            self.on_task_unscheduled(task_id)
+
+    # ----- transition / deletion hooks -----
     def on_task_unscheduled(self, task_id: int) -> None:
         """The task lost its date: ownership arrives at this engine.
 

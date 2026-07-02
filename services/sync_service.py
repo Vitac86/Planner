@@ -7,9 +7,14 @@ from typing import Optional
 
 from googleapiclient.errors import HttpError
 
-from core.settings import GOOGLE_SYNC
+from core.settings import (
+    GOOGLE_SYNC,
+    UNDATED_ENGINE_LEGACY,
+    UNDATED_ENGINE_UNDATED,
+)
 from utils.datetime_utils import ensure_utc, parse_rfc3339, to_rfc3339_utc, utc_now
 from models.task import Task
+from services.appdata import AppDataClient
 from services.google_calendar import GoogleCalendar
 from services.google_tasks import GoogleTasks
 from services.google_sync import (
@@ -25,6 +30,8 @@ from services.tasks import TaskService
 
 RETRYABLE_STATUS = {409, 412, 429, 500, 502, 503, 504}
 SYNC_LOG_PATH = "logs/sync.log"
+# How long a read of the shared "engine" ownership marker stays valid.
+ENGINE_MARKER_TTL_SEC = 300
 
 
 def _ensure_logger() -> logging.Logger:
@@ -66,13 +73,72 @@ class SyncService:
         repo: TaskService,
         token_store: SyncTokenStorage,
         queue: Optional[PendingOpsQueue] = None,
+        appdata: Optional[AppDataClient] = None,
     ) -> None:
         self.gcal = gcal
         self.gtasks = gtasks
         self.repo = repo
         self.tokens = token_store
         self.queue = queue or PendingOpsQueue()
+        self.appdata = appdata
         self.logger = _ensure_logger()
+        self._engine_marker: Optional[str] = None
+        self._engine_marker_read_at: Optional[datetime] = None
+
+    # ------------------------------------------------------------------
+    # Google Tasks lane gate ("Planner Inbox" single-writer rule)
+    def _shared_engine_marker(self) -> Optional[str]:
+        """Read the ``engine`` ownership marker from planner_config.json.
+
+        Returns ``None`` when the marker is vacant or cannot be read (no
+        appdata client, credentials unavailable): the legacy lane then keeps
+        its current behavior. A read failure must never break sync, so the
+        marker is treated as unknown and re-checked after the TTL.
+        """
+        if self.appdata is None:
+            return None
+        now = utc_now()
+        if self._engine_marker_read_at is not None:
+            age = (now - self._engine_marker_read_at).total_seconds()
+            if age < ENGINE_MARKER_TTL_SEC:
+                return self._engine_marker
+        marker: Optional[str] = None
+        try:
+            config, _etag = self.appdata.read_config()
+            raw = config.get("engine") if isinstance(config, dict) else None
+            marker = str(raw) if raw else None
+        except Exception as exc:
+            self.logger.warning(
+                "Engine ownership marker unavailable (%s); assuming legacy ownership",
+                exc,
+            )
+        self._engine_marker = marker
+        self._engine_marker_read_at = now
+        return marker
+
+    def tasks_lane_blocked_reason(self) -> Optional[str]:
+        """Why this service must not touch the Google Tasks lane, or None.
+
+        Two independent tripwires guard against a second writer on the
+        "Planner Inbox" list:
+
+        * the local feature flag selects ``UndatedTasksSync`` as the owner
+          of the lane in this process;
+        * the shared ``planner_config.json`` marker says another engine
+          (e.g. another installation running the undated engine) owns it.
+        """
+        if GOOGLE_SYNC.undated_engine == UNDATED_ENGINE_UNDATED:
+            return (
+                "undated engine is selected (GOOGLE_SYNC.undated_engine='undated'); "
+                "UndatedTasksSync owns the Google Tasks lane"
+            )
+        marker = self._shared_engine_marker()
+        if marker and marker != UNDATED_ENGINE_LEGACY:
+            return (
+                f"shared planner_config.json engine marker is {marker!r}; "
+                "legacy SyncService refuses to write the Google Tasks lane"
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Event hooks from TaskService
@@ -114,7 +180,13 @@ class SyncService:
         if task.gcal_event_id:
             self.queue.enqueue("gcal_delete", task_id, {"eventId": task.gcal_event_id})
         if task.gtasks_id:
-            self.queue.enqueue("gtasks_delete", task_id, {"taskId": task.gtasks_id})
+            reason = self.tasks_lane_blocked_reason()
+            if reason:
+                self.logger.info(
+                    "Not enqueueing gtasks_delete for task %s: %s", task_id, reason
+                )
+            else:
+                self.queue.enqueue("gtasks_delete", task_id, {"taskId": task.gtasks_id})
 
     # ------------------------------------------------------------------
     # Public API
@@ -137,17 +209,35 @@ class SyncService:
             self.logger.error("Calendar pull error: %s", exc)
             raise
 
-        try:
-            changed |= self._pull_tasks()
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.error("Tasks pull error: %s", exc)
-            raise
+        reason = self.tasks_lane_blocked_reason()
+        if reason:
+            self.logger.info("Skipping Google Tasks pull: %s", reason)
+        else:
+            try:
+                changed |= self._pull_tasks()
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.error("Tasks pull error: %s", exc)
+                raise
 
         return changed
 
     def push_queue_worker(self) -> int:
         processed = 0
         for entry in self.queue.due():
+            if entry.op.startswith("gtasks_"):
+                reason = self.tasks_lane_blocked_reason()
+                if reason:
+                    # Never execute against the "Planner Inbox" lane; keep
+                    # the op queued (with backoff) so rollback to legacy
+                    # ownership can resume it.
+                    self.logger.warning(
+                        "Refusing pending op %s for task %s: %s",
+                        entry.op,
+                        entry.task_id,
+                        reason,
+                    )
+                    self.queue.requeue(entry.id, reason)
+                    continue
             try:
                 if self._execute_op(entry):
                     processed += 1
@@ -191,6 +281,10 @@ class SyncService:
             },
             "lastPushAt": self.tokens.get_last_push_timestamp(),
             "queueSize": self.queue.count(),
+            "undatedEngine": {
+                "selected": GOOGLE_SYNC.undated_engine,
+                "tasksLaneBlocked": self.tasks_lane_blocked_reason(),
+            },
         }
 
     # ------------------------------------------------------------------
@@ -393,6 +487,12 @@ class SyncService:
     def _queue_tasks_sync(self, task: Optional[Task]) -> None:
         if not task:
             return
+        reason = self.tasks_lane_blocked_reason()
+        if reason:
+            self.logger.info(
+                "Not enqueueing Google Tasks sync for task %s: %s", task.id, reason
+            )
+            return
         if task.gtasks_id:
             self.queue.enqueue("gtasks_update", task.id, {"taskId": task.gtasks_id})
         else:
@@ -403,8 +503,15 @@ class SyncService:
             self.queue.enqueue("gcal_delete", task.id, {"eventId": task.gcal_event_id})
 
     def _ensure_tasks_delete(self, task: Task) -> None:
-        if task.gtasks_id:
-            self.queue.enqueue("gtasks_delete", task.id, {"taskId": task.gtasks_id})
+        if not task.gtasks_id:
+            return
+        reason = self.tasks_lane_blocked_reason()
+        if reason:
+            self.logger.info(
+                "Not enqueueing gtasks_delete for task %s: %s", task.id, reason
+            )
+            return
+        self.queue.enqueue("gtasks_delete", task.id, {"taskId": task.gtasks_id})
 
     # ------------------------------------------------------------------
     def _execute_op(self, entry) -> bool:

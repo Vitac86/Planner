@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import flet as ft
 
-from core.settings import UI, GOOGLE_SYNC
+from core.settings import UI, GOOGLE_SYNC, UNDATED_ENGINE_UNDATED
 
 # страницы
 from .pages.today import TodayPage
@@ -13,6 +13,7 @@ from .pages.settings import SettingsPage
 from .pages.history import HistoryPage
 
 # Google
+from services.appdata import AppDataClient
 from services.google_auth import GoogleAuth
 from services.google_calendar import GoogleCalendar
 from services.google_tasks import GoogleTasks
@@ -22,6 +23,7 @@ from services.sync_token_storage import SyncTokenStorage
 from services.tasks import TaskService
 from services.daily_tasks import DailyTaskService
 from services.daily_tasks_sync import DailyTasksSync
+from services.undated_tasks_sync import UndatedTasksSync
 
 
 class AppShell:
@@ -45,17 +47,31 @@ class AppShell:
         self.gcal = GoogleCalendar(self.auth, calendar_id="primary")
         self.gtasks = GoogleTasks(self.auth)
         self.gtasks_dailies = GoogleTasks(self.auth, GOOGLE_SYNC.dailies_tasklist_name)
+        self.appdata = AppDataClient(self.auth)
         self.sync_service = SyncService(
             self.gcal,
             self.gtasks,
             TaskService(),
             SyncTokenStorage(),
             PendingOpsQueue(),
+            appdata=self.appdata,
         )
         self.daily_tasks_sync = DailyTasksSync(self.gtasks_dailies, DailyTaskService())
+        # Единственный писатель списка "Planner Inbox": в undated-режиме
+        # события нешедуленных задач идут в UndatedTasksSync, а лента Google
+        # Tasks внутри SyncService заблокирована флагом (см.
+        # SyncService.tasks_lane_blocked_reason). В legacy-режиме движок
+        # undated не создаётся вовсе.
+        self.undated_tasks_sync: UndatedTasksSync | None = None
+        if GOOGLE_SYNC.undated_engine == UNDATED_ENGINE_UNDATED:
+            self.undated_tasks_sync = UndatedTasksSync(self.auth, appdata=self.appdata)
         TaskService.subscribe("after_create", self.sync_service.on_task_created)
         TaskService.subscribe("after_update", self.sync_service.on_task_updated)
         TaskService.subscribe("after_delete", self.sync_service.on_task_deleted)
+        if self.undated_tasks_sync is not None:
+            TaskService.subscribe("after_create", self.undated_tasks_sync.on_task_created)
+            TaskService.subscribe("after_update", self.undated_tasks_sync.on_task_updated)
+            TaskService.subscribe("after_delete", self.undated_tasks_sync.on_task_deleted)
         DailyTaskService.subscribe("after_create", self.daily_tasks_sync.on_task_created)
         DailyTaskService.subscribe("after_update", self.daily_tasks_sync.on_task_updated)
         DailyTaskService.subscribe("after_delete", self.daily_tasks_sync.on_task_deleted)
@@ -191,6 +207,11 @@ class AppShell:
         except Exception as e:
             print("Google sync error:", e)
         try:
+            if self.undated_tasks_sync is not None and self.undated_tasks_sync.sync():
+                changed = True
+        except Exception as e:
+            print("Undated tasks sync error:", e)
+        try:
             if self.daily_tasks_sync.pull():
                 changed = True
                 if self._today:
@@ -206,6 +227,11 @@ class AppShell:
             self.sync_service.push_queue_worker()
         except Exception as e:
             print("Google Calendar push error:", e)
+        if self.undated_tasks_sync is not None:
+            try:
+                self.undated_tasks_sync.push_dirty()
+            except Exception as e:
+                print("Undated tasks push error:", e)
 
     def _start_auto_refresh(
         self, view_name: str, refresh_fn, period_sec: int | None = None, run_immediately: bool = True
