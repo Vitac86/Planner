@@ -69,34 +69,24 @@ def close_alert_dialog(page: ft.Page):
 
 
 def open_overlay(page: ft.Page, content: ft.Control):
-<<<<<<< HEAD
-    # Совместимость Colors/colors
-    Colors = getattr(ft, "Colors", None)
-    colors_mod = getattr(ft, "colors", None)
+    """Показывает кастомный оверлей поверх страницы.
 
-    def with_opacity(alpha: float, color):
-        if Colors and hasattr(Colors, "with_opacity"):
-            return Colors.with_opacity(alpha, color)
-        if colors_mod and hasattr(colors_mod, "with_opacity"):
-            return colors_mod.with_opacity(alpha, color)
-        return color
+    Слой и фон помечены тегами planner_layer/planner_backdrop, чтобы
+    AppShell.cleanup_overlays() отличал их от системных контролов Flet
+    (DatePicker, TimePicker, AlertDialog и т.п.).
+    """
+    layer = ft.Stack(data="planner_layer")
 
-    black = getattr(Colors, "BLACK", None) if Colors else None
-    if black is None and colors_mod is not None:
-        black = getattr(colors_mod, "BLACK", None)
-
-    backdrop = ft.Container(expand=True, bgcolor=with_opacity(0.40, black))
-    backdrop.data = "backdrop"  # чтобы cleanup_overlays мог чистить корректно
-
-    layer = ft.Stack([backdrop, content])
-=======
     backdrop = ft.Container(
         expand=True,
-        bgcolor=ft.colors.with_opacity(0.40, ft.colors.BLACK),
+        bgcolor=ft.Colors.with_opacity(0.40, ft.Colors.BLACK),
         data="planner_backdrop",
+        on_click=lambda e: close_overlay(page, layer),
     )
-    layer = ft.Stack([backdrop, content], data="planner_layer")
->>>>>>> bc0bd30ca00fa6a73bc1bdc0c3f03a6ccc4dd48b
+    layer.controls = [backdrop, content]
+    # python-атрибут "open": по нему cleanup_overlays и Esc-обработчик
+    # отличают активный слой от закрытого
+    layer.open = True
     page.overlay.append(layer)
     page.update()
     return layer
@@ -105,6 +95,10 @@ def open_overlay(page: ft.Page, content: ft.Control):
 def close_overlay(page: ft.Page, layer: ft.Control | None):
     if layer is None:
         return
+    try:
+        layer.open = False
+    except Exception:
+        pass
     try:
         page.overlay.remove(layer)
     except ValueError:
