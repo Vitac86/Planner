@@ -69,24 +69,12 @@ def close_alert_dialog(page: ft.Page):
 
 
 def open_overlay(page: ft.Page, content: ft.Control):
-    """Показывает кастомный оверлей поверх страницы.
-
-    Слой и фон помечены тегами planner_layer/planner_backdrop, чтобы
-    AppShell.cleanup_overlays() отличал их от системных контролов Flet
-    (DatePicker, TimePicker, AlertDialog и т.п.).
-    """
-    layer = ft.Stack(data="planner_layer")
-
     backdrop = ft.Container(
         expand=True,
         bgcolor=ft.Colors.with_opacity(0.40, ft.Colors.BLACK),
         data="planner_backdrop",
-        on_click=lambda e: close_overlay(page, layer),
     )
-    layer.controls = [backdrop, content]
-    # python-атрибут "open": по нему cleanup_overlays и Esc-обработчик
-    # отличают активный слой от закрытого
-    layer.open = True
+    layer = ft.Stack([backdrop, content], data="planner_layer")
     page.overlay.append(layer)
     page.update()
     return layer
@@ -95,10 +83,6 @@ def open_overlay(page: ft.Page, content: ft.Control):
 def close_overlay(page: ft.Page, layer: ft.Control | None):
     if layer is None:
         return
-    try:
-        layer.open = False
-    except Exception:
-        pass
     try:
         page.overlay.remove(layer)
     except ValueError:

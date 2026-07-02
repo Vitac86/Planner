@@ -6,8 +6,6 @@ import flet as ft
 
 from core.settings import UI, GOOGLE_SYNC
 
-from .dialogs import close_alert_dialog, close_overlay
-
 # страницы
 from .pages.today import TodayPage
 from .pages.calendar import CalendarPage
@@ -125,11 +123,7 @@ class AppShell:
         self._active_view: str | None = None  # "today" | "calendar" | "history" | "settings"
 
     def cleanup_overlays(self):
-        """Удаляет закрытые планнерные оверлеи (теги planner_layer/planner_backdrop).
-
-        Активные слои, а также DatePicker/TimePicker/AlertDialog и прочие
-        контролы Flet не трогает.
-        """
+        """Remove closed app overlays marked with planner-specific data tags."""
         overlays = getattr(self.page, "overlay", None)
         if overlays is None:
             return
@@ -140,7 +134,7 @@ class AppShell:
         for ctrl in list(overlays):
             if getattr(ctrl, "data", None) not in allowed_tags:
                 continue
-            if getattr(ctrl, "open", False):
+            if hasattr(ctrl, "open") and getattr(ctrl, "open", False):
                 continue
             try:
                 overlays.remove(ctrl)
@@ -155,41 +149,22 @@ class AppShell:
         sb = self.page.snack_bar
         sb.bgcolor = ft.Colors.GREEN_600 if ok else ft.Colors.RED_600
         sb.content = ft.Text(text)
-        # page.snack_bar в текущем Flet — обычный атрибут, показ только через page.open()
-        self.page.open(sb)
+        sb.open = True
+        self.page.update()
 
     def _on_key(self, e: ft.KeyboardEvent):
         if e.key != "Escape":
             return
-
-        overlays = list(self.page.overlay or [])
-
-        # открытый DatePicker/TimePicker закрывает сам Flutter — не трогаем остальное
-        for ctrl in overlays:
-            if isinstance(ctrl, (ft.DatePicker, ft.TimePicker)) and getattr(ctrl, "open", False):
-                return
-
-        # 1) активный диалог приложения
-        dlg = getattr(self.page, "_planner_active_dialog", None) or getattr(self.page, "dialog", None)
-        if dlg is not None and getattr(dlg, "open", False):
-            close_alert_dialog(self.page)
+        if self.page.dialog and getattr(self.page.dialog, "open", False):
+            self.page.dialog.open = False
+            self.page.update()
             return
-        for ctrl in overlays:
-            if isinstance(ctrl, ft.AlertDialog) and getattr(ctrl, "open", False):
-                try:
-                    self.page.close(ctrl)
-                except Exception:
-                    ctrl.open = False
-                    self.page.update()
-                return
-
-        # 2) верхний планнерный оверлей
-        for ctrl in reversed(overlays):
-            if getattr(ctrl, "data", None) == "planner_layer" and getattr(ctrl, "open", False):
-                close_overlay(self.page, ctrl)
-                return
-
-        # 3) подчистить закрытые остатки
+        if self.page.overlay:
+            try:
+                self.page.overlay.pop()
+            except Exception:
+                pass
+            self.page.update()
         self.cleanup_overlays()
 
     # ---------- утилиты ----------
