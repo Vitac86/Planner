@@ -16,6 +16,14 @@ def _column_exists(conn, table: str, column: str) -> bool:
     return any(row[1] == column for row in result)
 
 
+def _table_exists(conn, table: str) -> bool:
+    result = conn.execute(
+        text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"),
+        {"name": table},
+    )
+    return result.first() is not None
+
+
 def ensure_task_columns(conn) -> None:
     columns = {
         "gcal_event_id": "TEXT",
@@ -117,12 +125,46 @@ def ensure_daily_task_columns(conn) -> None:
     _ensure_columns(conn, "dailytask", columns)
 
 
+def ensure_sync_map_undated_columns(conn) -> None:
+    """Bring a pre-``task_uid`` ``syncmapundated`` table up to date.
+
+    Fresh databases get the full schema from SQLModel metadata; this only
+    upgrades tables created by an older model. Must run after
+    ``ensure_task_uid`` so the backfill can copy ``task.uid``.
+    """
+    if not _table_exists(conn, "syncmapundated"):
+        return
+    _ensure_columns(conn, "syncmapundated", {"task_uid": "TEXT"})
+    if _table_exists(conn, "task"):
+        conn.execute(
+            text(
+                """
+                UPDATE syncmapundated
+                SET task_uid = (
+                    SELECT uid FROM task
+                    WHERE CAST(task.id AS TEXT) = syncmapundated.task_id
+                )
+                WHERE task_uid IS NULL OR task_uid = ''
+                """
+            )
+        )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_syncmapundated_task_uid
+            ON syncmapundated (task_uid)
+            """
+        )
+    )
+
+
 def run_all(engine) -> None:
     with engine.begin() as conn:
         ensure_task_columns(conn)
         ensure_task_uid(conn)
         ensure_daily_task_columns(conn)
         ensure_tag_tables(conn)
+        ensure_sync_map_undated_columns(conn)
         # SQLModel creates the pendingop table, but ensure indexes exist in legacy DBs
         ensure_pending_ops_table(conn)
 
