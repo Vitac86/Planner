@@ -9,7 +9,7 @@ from sqlmodel import select
 from sqlalchemy import func
 
 from utils.datetime_utils import utc_now
-from models.pending_op import PendingOp
+from models.pending_op import DeadLetterOp, PendingOp
 from storage.db import get_session
 
 
@@ -40,6 +40,11 @@ class PendingOperation:
 
 
 class PendingOpsQueue:
+    def __init__(self, session_factory=None):
+        # Инъекция фабрики сессий нужна тестам (in-memory SQLite);
+        # по умолчанию — рабочая база приложения.
+        self._session = session_factory or get_session
+
     def enqueue(self, op: str, task_id: int, payload: dict) -> None:
         if op not in VALID_OPS:
             raise ValueError(f"Unsupported op: {op}")
@@ -50,12 +55,12 @@ class PendingOpsQueue:
             created_at=utc_now(),
             next_try_at=utc_now(),
         )
-        with get_session() as session:
+        with self._session() as session:
             session.add(record)
             session.commit()
 
     def requeue(self, op_id: int, error: str) -> None:
-        with get_session() as session:
+        with self._session() as session:
             record = session.get(PendingOp, op_id)
             if not record:
                 return
@@ -66,15 +71,39 @@ class PendingOpsQueue:
             session.commit()
 
     def remove(self, op_id: int) -> None:
-        with get_session() as session:
+        with self._session() as session:
             record = session.get(PendingOp, op_id)
             if record:
                 session.delete(record)
                 session.commit()
 
+    def mark_failed(self, op_id: int, error: str) -> None:
+        """Move the op to the dead-letter table: terminal, never retried.
+
+        The full op (op, task_id, payload, attempt count, error) is preserved
+        for inspection/manual recovery; only the queue row is removed.
+        """
+        with self._session() as session:
+            record = session.get(PendingOp, op_id)
+            if not record:
+                return
+            session.add(
+                DeadLetterOp(
+                    op=record.op,
+                    task_id=record.task_id,
+                    payload=record.payload,
+                    attempts=record.attempts + 1,
+                    last_error=error[:1000],
+                    created_at=record.created_at,
+                    failed_at=utc_now(),
+                )
+            )
+            session.delete(record)
+            session.commit()
+
     def due(self, limit: int = 10) -> List[PendingOperation]:
         now = utc_now()
-        with get_session() as session:
+        with self._session() as session:
             stmt = (
                 select(PendingOp)
                 .where(PendingOp.next_try_at <= now)
@@ -103,8 +132,12 @@ class PendingOpsQueue:
         return result
 
     def count(self) -> int:
-        with get_session() as session:
+        with self._session() as session:
             return int(session.exec(select(func.count()).select_from(PendingOp)).one())
+
+    def failed_count(self) -> int:
+        with self._session() as session:
+            return int(session.exec(select(func.count()).select_from(DeadLetterOp)).one())
 
 
 __all__ = ["PendingOpsQueue", "PendingOperation"]

@@ -49,6 +49,7 @@ class FakeQueue:
         self.enqueued: List[Tuple[str, int, dict]] = []
         self.requeued: List[Tuple[int, str]] = []
         self.removed: List[int] = []
+        self.failed: List[Tuple[int, str]] = []
         self._next_id = 1
 
     def enqueue(self, op: str, task_id: int, payload: dict) -> None:
@@ -78,8 +79,15 @@ class FakeQueue:
     def requeue(self, op_id: int, error: str) -> None:
         self.requeued.append((op_id, error))
 
+    def mark_failed(self, op_id: int, error: str) -> None:
+        self.failed.append((op_id, error))
+        self.entries = [e for e in self.entries if e.id != op_id]
+
     def count(self) -> int:
         return len(self.entries)
+
+    def failed_count(self) -> int:
+        return len(self.failed)
 
     def enqueued_ops(self) -> List[str]:
         return [op for op, _task_id, _payload in self.enqueued]

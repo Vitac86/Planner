@@ -248,11 +248,30 @@ class SyncService:
             except HttpError as exc:
                 status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
                 code = int(status or 0)
-                self.logger.warning("Push op %s failed with %s", entry.op, code)
-                if code in RETRYABLE_STATUS:
+                # Неизвестный статус (0) считаем транзиентным: это скорее
+                # обрыв транспорта, чем ответ Google.
+                if code in RETRYABLE_STATUS or code == 0:
+                    self.logger.warning(
+                        "Push op %s for task %s failed with %s; will retry",
+                        entry.op,
+                        entry.task_id,
+                        code or "unknown status",
+                    )
                     self.queue.requeue(entry.id, str(exc))
                 else:
-                    self.queue.requeue(entry.id, str(exc))
+                    # 400/401/403/404 и прочие 4xx не чинятся повтором того же
+                    # запроса: уводим оп в dead-letter, локальную задачу не трогаем.
+                    self.logger.error(
+                        "Push op %s for task %s failed with non-retryable HTTP %s; "
+                        "moving to dead-letter (payload keys: %s, attempts: %s): %s",
+                        entry.op,
+                        entry.task_id,
+                        code,
+                        sorted((entry.payload or {}).keys()),
+                        entry.attempts + 1,
+                        exc,
+                    )
+                    self.queue.mark_failed(entry.id, f"HTTP {code}: {exc}")
             except Exception as exc:  # pragma: no cover - defensive
                 self.logger.error("Push op %s crashed: %s", entry.op, exc)
                 self.queue.requeue(entry.id, str(exc))
@@ -281,6 +300,7 @@ class SyncService:
             },
             "lastPushAt": self.tokens.get_last_push_timestamp(),
             "queueSize": self.queue.count(),
+            "deadLetterSize": self.queue.failed_count(),
             "undatedEngine": {
                 "selected": GOOGLE_SYNC.undated_engine,
                 "tasksLaneBlocked": self.tasks_lane_blocked_reason(),
