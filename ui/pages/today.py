@@ -27,10 +27,11 @@ class TodayPage:
         self._current_task_id: int | None = None
 
         # ---------- Быстрый ввод ----------
+        # Без expand: поле лежит прямой дочкой Column и само растягивается
+        # на всю ширину; expand внутри wrap-Row ломает рендер (Expanded в Wrap).
         self.title_tf = ft.TextField(
             label="Название задачи",
             hint_text="Например: Позвонить Ивану",
-            expand=True,
             prefix=ft.Icon(ft.Icons.TASK_ALT),
         )
 
@@ -85,21 +86,27 @@ class TodayPage:
         )
         self.add_btn = ft.FilledButton("Добавить", icon=ft.Icons.ADD, on_click=self.on_add)
 
+        # В wrap-Row допустимы только контролы с собственной шириной:
+        # фикс-ширина у полей, tight=True у вложенных Row. Контролы без
+        # ограничения ширины (TextField с expand) внутри Wrap валят layout
+        # всей страницы (серый прямоугольник, наложение секций).
         quick_add = ft.Card(
             content=ft.Container(
                 content=ft.Column(
                     [
                         ft.Text("Быстрый ввод", size=18, weight=ft.FontWeight.W_600),
+                        self.title_tf,
                         ft.Row(
                             [
-                                self.title_tf,
-                                ft.Row([self.date_tf, self.date_btn], spacing=6),
-                                ft.Row([self.time_tf, self.time_btn], spacing=6),
+                                ft.Row([self.date_tf, self.date_btn], spacing=6, tight=True),
+                                ft.Row([self.time_tf, self.time_btn], spacing=6, tight=True),
                                 self.dur_tf,
                                 self.priority_dd,
                                 self.to_calendar_cb,
                                 self.add_btn,
                             ],
+                            spacing=12,
+                            run_spacing=8,
                             alignment=ft.MainAxisAlignment.START,
                             vertical_alignment=ft.CrossAxisAlignment.END,
                             wrap=True,
@@ -149,22 +156,24 @@ class TodayPage:
             vertical_alignment=ft.CrossAxisAlignment.START,
         )
 
+        # Один вертикальный скролл на всю страницу. Вложенные списки задач
+        # намеренно ограничены фиксированной высотой (LIST_SECTION_HEIGHT),
+        # чтобы не создавать второй неограниченный скролл внутри скролла.
         self.view = ft.Container(
-    content=ft.Column(
-        [
-            ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD),
-            quick_add,
-            lists_row,
-            self.daily_tasks_panel.view,
-        ],
-        spacing=12,
-        expand=True,
-        scroll=ft.ScrollMode.AUTO,   # ← ПЕРЕНЕСЕНО СЮДА
-    ),
-    expand=True,
-    padding=20,
-    # scroll=ft.ScrollMode.AUTO,    # ← УДАЛЕНО: у Container этого параметра нет
-)
+            content=ft.Column(
+                [
+                    ft.Text("Задачи", size=24, weight=ft.FontWeight.BOLD),
+                    self.daily_tasks_panel.view,
+                    quick_add,
+                    lists_row,
+                ],
+                spacing=12,
+                expand=True,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            expand=True,
+            padding=20,
+        )
 
 
     def mount(self):
