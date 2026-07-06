@@ -14,12 +14,20 @@ all-day events (recurring all-day instances such as
   flag survives create/update/unlink;
 * the migration adds the column idempotently to legacy databases.
 
+Updating an *existing* all-day event is remote-aware (events.patch merges
+start/end per field, and moving an all-day recurring instance is rejected
+with HTTP 400 "Invalid start time."): the push fetches the event once and
+omits start/end when the dates are unchanged, moves plain all-day events
+with explicit dateTime nulls, and refuses (dead-letter with a readable
+reason, nothing sent) recurring-instance moves and shape mismatches.
+
 Existing dead-letter rows are never replayed automatically; after this
 fix is verified manually they may be inspected and requeued by hand in a
 later task.
 
 Everything runs against fakes and in-memory SQLite; no real Google APIs.
 """
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -237,25 +245,120 @@ def test_pull_cancelled_event_unlinks_and_clears_flag(tmp_path):
 # Push keeps the event shape (recurring all-day instances included)
 # ---------------------------------------------------------------------------
 
-def test_update_all_day_recurring_instance_uses_date_payload(tmp_path):
+def _remote_all_day_instance(start="2026-07-06", end="2026-07-07", **extra) -> dict:
+    event = {
+        "id": RECURRING_INSTANCE_ID,
+        "status": "confirmed",
+        "recurringEventId": "ivc7pjg531mq4i9328p9hqdhi4",
+        "originalStartTime": {"date": start},
+        "start": {"date": start},
+        "end": {"date": end},
+    }
+    event.update(extra)
+    return event
+
+
+def test_update_all_day_recurring_instance_with_same_date_omits_start_end(tmp_path, caplog):
+    """The repaired-dead-letter case: dates match remote, so the patch must
+    not try to move the instance at all (Google rejects such moves with
+    HTTP 400 "Invalid start time.")."""
     queue = FakeQueue()
     repo = FakeRepo()
     repo.add(_all_day_task(2, gcal_event_id=RECURRING_INSTANCE_ID))
-    gcal = FakeGoogleCalendar()
+    gcal = FakeGoogleCalendar(
+        events_by_id={RECURRING_INSTANCE_ID: _remote_all_day_instance()}
+    )
     service = _make_service(tmp_path, gcal=gcal, repo=repo, queue=queue)
     queue.enqueue("gcal_update", 2, {"eventId": RECURRING_INSTANCE_ID})
 
-    assert service.push_queue_worker() == 1
+    with caplog.at_level(logging.INFO, logger="planner.sync"):
+        assert service.push_queue_worker() == 1
 
     ((_cal, event_id, body),) = gcal.service.patched
     assert event_id == RECURRING_INSTANCE_ID
-    assert body["start"] == {"date": "2026-07-06"}
-    assert body["end"] == {"date": "2026-07-07"}
-    assert "dateTime" not in body["start"]
-    assert "dateTime" not in body["end"]
+    assert "start" not in body, "unchanged dates must not be patched"
+    assert "end" not in body
+    assert body["summary"] == "All day"
+    assert queue.failed_count() == 0
+    # The outgoing payload shape is logged for diagnosis.
+    assert any("start=omitted" in message for message in caplog.messages)
 
 
-def test_update_timed_task_keeps_datetime_payload(tmp_path):
+def test_update_all_day_plain_event_with_changed_date_sends_date_payload(tmp_path):
+    queue = FakeQueue()
+    repo = FakeRepo()
+    repo.add(_all_day_task(2, gcal_event_id="ev-allday"))
+    remote = {
+        "id": "ev-allday",
+        "status": "confirmed",
+        "start": {"date": "2026-07-01"},
+        "end": {"date": "2026-07-02"},
+    }
+    gcal = FakeGoogleCalendar(events_by_id={"ev-allday": remote})
+    service = _make_service(tmp_path, gcal=gcal, repo=repo, queue=queue)
+    queue.enqueue("gcal_update", 2, {"eventId": "ev-allday"})
+
+    assert service.push_queue_worker() == 1
+
+    ((_cal, _event_id, body),) = gcal.service.patched
+    # A real date move on a non-recurring all-day event: date/date with
+    # explicit dateTime nulls (events.patch merges start/end per field).
+    assert body["start"] == {"date": "2026-07-06", "dateTime": None}
+    assert body["end"] == {"date": "2026-07-07", "dateTime": None}
+    assert queue.failed_count() == 0
+
+
+def test_update_all_day_recurring_instance_with_changed_date_dead_letters(tmp_path):
+    queue = FakeQueue()
+    repo = FakeRepo()
+    task = repo.add(_all_day_task(2, gcal_event_id=RECURRING_INSTANCE_ID))
+    gcal = FakeGoogleCalendar(
+        events_by_id={
+            RECURRING_INSTANCE_ID: _remote_all_day_instance("2026-07-01", "2026-07-02")
+        }
+    )
+    service = _make_service(tmp_path, gcal=gcal, repo=repo, queue=queue)
+    queue.enqueue("gcal_update", 2, {"eventId": RECURRING_INSTANCE_ID})
+
+    assert service.push_queue_worker() == 0
+
+    # No invalid payload is ever sent; the op dead-letters with a clear reason.
+    assert gcal.service.patched == []
+    assert queue.count() == 0
+    assert queue.failed_count() == 1
+    ((_op_id, reason),) = queue.failed
+    assert "recurring instance" in reason
+    assert "2026-07-06" in reason and "2026-07-01" in reason
+    # The local task is intact.
+    assert repo.get(2) is task
+    assert task.gcal_all_day is True
+
+
+def test_update_all_day_task_with_timed_remote_dead_letters_with_repair_hint(tmp_path):
+    queue = FakeQueue()
+    repo = FakeRepo()
+    repo.add(_all_day_task(2, gcal_event_id="ev-timed"))
+    remote = {
+        "id": "ev-timed",
+        "status": "confirmed",
+        "start": {"dateTime": "2026-07-06T09:00:00Z"},
+        "end": {"dateTime": "2026-07-06T10:00:00Z"},
+    }
+    gcal = FakeGoogleCalendar(events_by_id={"ev-timed": remote})
+    service = _make_service(tmp_path, gcal=gcal, repo=repo, queue=queue)
+    queue.enqueue("gcal_update", 2, {"eventId": "ev-timed"})
+
+    assert service.push_queue_worker() == 0
+
+    assert gcal.service.patched == []
+    assert queue.failed_count() == 1
+    ((_op_id, reason),) = queue.failed
+    assert "timed" in reason
+    assert "dead_letter_recovery" in reason, "reason must point at the repair tool"
+    assert repo.get(2) is not None
+
+
+def test_update_timed_task_keeps_datetime_payload_and_skips_remote_fetch(tmp_path):
     queue = FakeQueue()
     repo = FakeRepo()
     repo.add(_timed_task(3, gcal_event_id="ev-3"))
@@ -269,22 +372,28 @@ def test_update_timed_task_keeps_datetime_payload(tmp_path):
     assert body["start"]["dateTime"] == "2026-07-06T09:30:00Z"
     assert body["end"]["dateTime"] == "2026-07-06T10:15:00Z"
     assert "date" not in body["start"]
+    # Timed updates keep the old one-call behavior: no events().get().
+    assert gcal.service.got == []
 
 
 def test_pulled_all_day_event_round_trips_as_all_day(tmp_path):
-    """Pull an all-day instance, then push a local edit: shape is preserved."""
+    """Pull an all-day instance, then push a title edit: the patch keeps the
+    all-day event intact by not touching its unchanged start/end."""
     repo = FakeRepo()
     queue = FakeQueue()
-    gcal = _gcal_with_events(
-        _calendar_event(
-            id=RECURRING_INSTANCE_ID,
-            start={"date": "2026-07-06"},
-            end={"date": "2026-07-07"},
-        )
+    remote = _calendar_event(
+        id=RECURRING_INSTANCE_ID,
+        start={"date": "2026-07-06"},
+        end={"date": "2026-07-07"},
+    )
+    gcal = FakeGoogleCalendar(
+        list_payloads=[{"items": [remote], "nextSyncToken": "tok-1"}],
+        events_by_id={RECURRING_INSTANCE_ID: remote},
     )
     service = _make_service(tmp_path, gcal=gcal, repo=repo, queue=queue)
     assert service.pull_all() is True
     (task,) = repo.tasks.values()
+    assert task.gcal_all_day is True
 
     task.title = "Edited locally"
     queue.enqueue("gcal_update", task.id, {"eventId": RECURRING_INSTANCE_ID})
@@ -292,8 +401,9 @@ def test_pulled_all_day_event_round_trips_as_all_day(tmp_path):
 
     ((_cal, _event_id, body),) = gcal.service.patched
     assert body["summary"] == "Edited locally"
-    assert body["start"] == {"date": "2026-07-06"}
-    assert body["end"] == {"date": "2026-07-07"}
+    assert "start" not in body, "pulled dates match remote: start/end omitted"
+    assert "end" not in body
+    assert "dateTime" not in str(body)
 
 
 def test_user_created_timed_task_pushes_timed_payload(tmp_path):

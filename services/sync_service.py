@@ -30,6 +30,16 @@ from services.tasks import TaskService
 
 RETRYABLE_STATUS = {409, 412, 429, 500, 502, 503, 504}
 SYNC_LOG_PATH = "logs/sync.log"
+
+
+class NonRetryableSyncError(Exception):
+    """Sending this request is known to be invalid; do not send or retry it.
+
+    Raised by ``_execute_op`` before an API call when the payload would be
+    rejected by Google (e.g. moving an all-day recurring instance). The
+    worker dead-letters the op with this message instead of retrying, so
+    the reason is preserved for manual recovery.
+    """
 # How long a read of the shared "engine" ownership marker stays valid.
 ENGINE_MARKER_TTL_SEC = 300
 
@@ -275,6 +285,16 @@ class SyncService:
                         exc,
                     )
                     self.queue.mark_failed(entry.id, f"HTTP {code}: {exc}")
+            except NonRetryableSyncError as exc:
+                # Заведомо невалидный запрос: не отправляем и не повторяем,
+                # переносим в dead-letter с понятной причиной для ручного разбора.
+                self.logger.error(
+                    "Push op %s for task %s refused without sending: %s",
+                    entry.op,
+                    entry.task_id,
+                    exc,
+                )
+                self.queue.mark_failed(entry.id, str(exc))
             except Exception as exc:  # pragma: no cover - defensive
                 self.logger.error("Push op %s crashed: %s", entry.op, exc)
                 self.queue.requeue(entry.id, str(exc))
@@ -543,6 +563,93 @@ class SyncService:
         self.queue.enqueue("gtasks_delete", task.id, {"taskId": task.gtasks_id})
 
     # ------------------------------------------------------------------
+    # Push payload helpers
+    def _log_payload_shape(self, op: str, task_id, event_id, body: dict) -> None:
+        """Instrumentation: record the outgoing Calendar payload shape.
+
+        Keys only (['date'] vs ['dateTime', 'timeZone'] vs 'omitted'), so the
+        exact request shape of every push is diagnosable from logs/sync.log
+        without dumping event contents.
+        """
+        def shape(part: str):
+            value = body.get(part)
+            return sorted(value.keys()) if isinstance(value, dict) else "omitted"
+
+        self.logger.info(
+            "%s task %s event %s payload: start=%s end=%s fields=%s",
+            op,
+            task_id,
+            event_id,
+            shape("start"),
+            shape("end"),
+            sorted(body.keys()),
+        )
+
+    def _fetch_event(self, service, event_id: str):
+        try:
+            return service.events().get(
+                calendarId=self.gcal.calendar_id, eventId=event_id
+            ).execute()
+        except HttpError as exc:
+            status = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+            if status and int(status) == 404:
+                return None
+            raise
+
+    def _adapt_all_day_patch(self, service, event_id: str, task: Task, body: dict) -> dict:
+        """Decide what an all-day gcal_update patch may safely carry.
+
+        events.patch merges start/end per field, and Google rejects moving
+        an all-day recurring instance ("Invalid start time."), so before
+        patching an all-day event the remote shape is checked once:
+
+        * dates unchanged -> start/end are omitted entirely (patch only
+          summary/description); this is the common repaired-task case;
+        * dates changed on a plain all-day event -> date/date is sent with
+          explicit dateTime nulls (guards against merge leaving a stale
+          dateTime behind);
+        * dates changed on a recurring instance, remote timed/cancelled/
+          missing -> refuse without sending: the op dead-letters with the
+          reason instead of a cryptic HTTP 400.
+        """
+        remote = self._fetch_event(service, event_id)
+        if remote is None:
+            raise NonRetryableSyncError(
+                f"remote event {event_id} not found; not patching a deleted event"
+            )
+        if remote.get("status") == "cancelled":
+            raise NonRetryableSyncError(
+                f"remote event {event_id} is cancelled; not patching it"
+            )
+        remote_start = remote.get("start") or {}
+        remote_end = remote.get("end") or {}
+        if "date" not in remote_start:
+            raise NonRetryableSyncError(
+                f"task {task.id} is flagged all-day but remote event {event_id} is timed; "
+                "run 'python -m services.dead_letter_recovery repair' before replaying"
+            )
+
+        local_start = body["start"]["date"]
+        local_end = body["end"]["date"]
+        if local_start == remote_start.get("date") and local_end == remote_end.get("date"):
+            # Only title/notes changed: never touch start/end of an existing
+            # all-day event when its dates are already right.
+            return {k: v for k, v in body.items() if k not in ("start", "end")}
+
+        if remote.get("recurringEventId") or remote.get("originalStartTime"):
+            raise NonRetryableSyncError(
+                f"refusing to move all-day recurring instance {event_id}: "
+                f"local {local_start}..{local_end} vs remote "
+                f"{remote_start.get('date')}..{remote_end.get('date')}; "
+                "adjust the date in Google Calendar or repair the local task"
+            )
+
+        moved = dict(body)
+        moved["start"] = {"date": local_start, "dateTime": None}
+        moved["end"] = {"date": local_end, "dateTime": None}
+        return moved
+
+    # ------------------------------------------------------------------
     def _execute_op(self, entry) -> bool:
         op = entry.op
         payload = entry.payload or {}
@@ -556,6 +663,7 @@ class SyncService:
             if service is None:
                 return False
             body = build_event_payload(task)
+            self._log_payload_shape("gcal_create", task.id, None, body)
             response = service.events().insert(calendarId=self.gcal.calendar_id, body=body).execute()
             updated = event_updated(response) or utc_now()
             self.repo.update_from_sync(
@@ -579,6 +687,9 @@ class SyncService:
             if service is None:
                 return False
             body = build_event_payload(task)
+            if task.gcal_all_day:
+                body = self._adapt_all_day_patch(service, event_id, task, body)
+            self._log_payload_shape("gcal_update", task.id, event_id, body)
             response = service.events().patch(
                 calendarId=self.gcal.calendar_id, eventId=event_id, body=body
             ).execute()
@@ -683,4 +794,4 @@ class SyncService:
         return False
 
 
-__all__ = ["SyncService", "SYNC_LOG_PATH"]
+__all__ = ["NonRetryableSyncError", "SyncService", "SYNC_LOG_PATH"]

@@ -20,6 +20,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+import httplib2
+from googleapiclient.errors import HttpError
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from core.settings import (
@@ -191,16 +193,33 @@ class _Response:
         return self._payload
 
 
+def _fake_http_error(code: int, message: str = "boom") -> HttpError:
+    resp = httplib2.Response({"status": str(code), "reason": message})
+    content = json.dumps({"error": {"code": code, "message": message}}).encode()
+    return HttpError(resp, content, uri="https://example.invalid/calendar")
+
+
 class FakeCalendarService:
-    def __init__(self, list_payloads=()):
+    def __init__(self, list_payloads=(), events_by_id=None):
         self._list_payloads = list(list_payloads)
         self.list_calls: List[dict] = []
+        self.got: List[tuple] = []
         self.inserted: List[tuple] = []
         self.patched: List[tuple] = []
         self.deleted: List[tuple] = []
+        # events().get() source: eventId -> event dict; missing ids raise 404
+        # like the real API.
+        self.events_by_id: Dict[str, dict] = dict(events_by_id or {})
 
     def events(self):
         return self
+
+    def get(self, calendarId=None, eventId=None):
+        self.got.append((calendarId, eventId))
+        event = self.events_by_id.get(eventId)
+        if event is None:
+            raise _fake_http_error(404, "Not Found")
+        return _Response(event)
 
     def list(self, **params):
         self.list_calls.append(params)
@@ -231,8 +250,8 @@ class FakeCalendarService:
 class FakeGoogleCalendar:
     calendar_id = "primary"
 
-    def __init__(self, list_payloads=()):
-        self.service = FakeCalendarService(list_payloads)
+    def __init__(self, list_payloads=(), events_by_id=None):
+        self.service = FakeCalendarService(list_payloads, events_by_id)
         self.connect_calls = 0
 
     def connect(self):
