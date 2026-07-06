@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from core.settings import GOOGLE_SYNC
+from services.google_sync import event_time_payload
 from utils.datetime_utils import to_rfc3339_utc
 
 try:
@@ -133,30 +134,24 @@ class GoogleCalendar:
         res = self.service.events().list(**params).execute()
         return res.get("items", [])
 
-    def create_event_for_task(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
-        self._maybe_build_service(strict=True)
-        end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
+    def _event_body(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         notes = (getattr(task, "notes", None) or "").strip()
-        body = {
-            "summary": getattr(task, "title", "Задача"),
-            "start": {"dateTime": _to_rfc3339(start_dt)},
-            "end": {"dateTime": _to_rfc3339(end_dt)},
-        }
+        body = {"summary": getattr(task, "title", "Задача")}
+        # All-day events must keep {"date": ...} start/end; a dateTime payload
+        # is rejected by Google (HTTP 400 "Invalid start time.").
+        body.update(event_time_payload(task, _ensure_utc(start_dt), duration_minutes))
         if notes:
             body["description"] = notes
+        return body
+
+    def create_event_for_task(self, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
+        self._maybe_build_service(strict=True)
+        body = self._event_body(task, start_dt, duration_minutes)
         return self.service.events().insert(calendarId=self.calendar_id, body=body).execute()
 
     def update_event_for_task(self, event_id: str, task, start_dt: datetime, duration_minutes: int) -> Dict[str, Any]:
         self._maybe_build_service(strict=True)
-        end_dt = _ensure_utc(start_dt) + timedelta(minutes=duration_minutes)
-        notes = (getattr(task, "notes", None) or "").strip()
-        body = {
-            "summary": getattr(task, "title", "Задача"),
-            "start": {"dateTime": _to_rfc3339(start_dt)},
-            "end": {"dateTime": _to_rfc3339(end_dt)},
-        }
-        if notes:
-            body["description"] = notes
+        body = self._event_body(task, start_dt, duration_minutes)
         return self.service.events().patch(
             calendarId=self.calendar_id, eventId=event_id, body=body
         ).execute()

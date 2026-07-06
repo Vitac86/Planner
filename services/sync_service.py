@@ -261,6 +261,9 @@ class SyncService:
                 else:
                     # 400/401/403/404 и прочие 4xx не чинятся повтором того же
                     # запроса: уводим оп в dead-letter, локальную задачу не трогаем.
+                    # Существующие dead-letter строки никогда не переигрываются
+                    # автоматически; после ручной проверки исправленных all-day
+                    # payload'ов их можно выборочно вернуть в очередь отдельной задачей.
                     self.logger.error(
                         "Push op %s for task %s failed with non-retryable HTTP %s; "
                         "moving to dead-letter (payload keys: %s, attempts: %s): %s",
@@ -365,6 +368,7 @@ class SyncService:
                 duration_minutes=None,
                 gcal_event_id=None,
                 gcal_etag=None,
+                gcal_all_day=False,
                 gcal_updated=remote_updated,
                 updated_at=remote_updated,
             )
@@ -373,6 +377,9 @@ class SyncService:
 
         start, end = extract_event_times(event)
         duration = _duration_minutes(start, end)
+        # All-day events come with {"date": ...} instead of {"dateTime": ...};
+        # remember the shape so pushes keep it (Google rejects dateTime there).
+        all_day = "date" in (event.get("start") or {})
         notes = extract_notes(event)
         summary = event.get("summary") or "Без названия"
 
@@ -386,6 +393,7 @@ class SyncService:
                 status="todo",
                 gcal_event_id=event_id,
                 gcal_etag=event.get("etag"),
+                gcal_all_day=all_day,
                 gcal_updated=remote_updated,
             )
             return True
@@ -405,6 +413,7 @@ class SyncService:
                 duration_minutes=duration,
                 gcal_event_id=event_id,
                 gcal_etag=event.get("etag"),
+                gcal_all_day=all_day,
                 gcal_updated=remote_updated,
                 updated_at=remote_updated,
             )
@@ -607,6 +616,7 @@ class SyncService:
                     task.id,
                     gcal_event_id=None,
                     gcal_etag=None,
+                    gcal_all_day=False,
                     gcal_updated=utc_now(),
                 )
             return True

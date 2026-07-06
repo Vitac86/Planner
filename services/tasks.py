@@ -201,6 +201,7 @@ class TaskService:
         status: Optional[str] = None,
         gcal_event_id: Optional[str] = None,
         gcal_etag: Optional[str] = None,
+        gcal_all_day: bool = False,
         gcal_updated: Optional[datetime] = None,
         gtasks_id: Optional[str] = None,
         gtasks_updated: Optional[datetime] = None,
@@ -215,6 +216,7 @@ class TaskService:
                 status=status or "todo",
                 gcal_event_id=gcal_event_id,
                 gcal_etag=gcal_etag,
+                gcal_all_day=gcal_all_day,
                 gcal_updated=ensure_utc(gcal_updated),
                 gtasks_id=gtasks_id,
                 gtasks_updated=ensure_utc(gtasks_updated),
@@ -264,6 +266,7 @@ class TaskService:
             t.start = None
             t.duration_minutes = None
             t.gcal_event_id = None
+            t.gcal_all_day = False
             s.add(t)
             s.commit()
             s.refresh(t)

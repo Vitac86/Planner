@@ -29,6 +29,7 @@ def ensure_task_columns(conn) -> None:
         "gcal_event_id": "TEXT",
         "gcal_etag": "TEXT",
         "gcal_updated": "TEXT",
+        "gcal_all_day": "INTEGER NOT NULL DEFAULT 0",
         "gtasks_id": "TEXT",
         "gtasks_updated": "TEXT",
     }
