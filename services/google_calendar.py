@@ -156,6 +156,18 @@ class GoogleCalendar:
             calendarId=self.calendar_id, eventId=event_id, body=body
         ).execute()
 
+    def get_event_by_id(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single event; returns None when Google reports 404."""
+        self._maybe_build_service(strict=True)
+        try:
+            return self.service.events().get(
+                calendarId=self.calendar_id, eventId=event_id
+            ).execute()
+        except HttpError as e:
+            if getattr(e, "resp", None) and getattr(e.resp, "status", None) == 404:
+                return None
+            raise
+
     def delete_event_by_id(self, event_id: str) -> None:
         self._maybe_build_service(strict=True)
         try:
