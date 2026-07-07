@@ -1,6 +1,9 @@
 # UI
 flet
 
+# Новый экспериментальный десктоп (planner_desktop, run_desktop.py)
+PySide6
+
 # База/модели
 sqlmodel
 sqlalchemy
