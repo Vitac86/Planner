@@ -38,10 +38,11 @@ python run_desktop.py
 - задачи **без даты** в телефонный календарь в фазе 1 не попадают;
   позже их можно явно замапить на Google Tasks или all-day события.
 
-**Реальная синхронизация по-прежнему не реализована** — есть только
-контракт (`sync/calendar_contract.py`). Ни одного вызова Google API
-новый пакет не делает. Следующей фазой появится реализация
-`CalendarSyncGateway` поверх SQLite-репозитория.
+**Ядро синхронизации реализовано и покрыто тестами, но работает пока
+только на фейковом шлюзе** (`sync/fake_calendar_gateway.py`). Реального
+Google-шлюза нет: ни одного вызова Google API, ни OAuth, ни сети новый
+пакет не делает. Следующей фазой появится `GoogleCalendarGateway`,
+реализующий тот же контракт `CalendarGateway` поверх Calendar API.
 
 ## Локальное хранилище (экспериментальное)
 
@@ -73,19 +74,88 @@ Domain (planner_desktop/domain)
 Repository (planner_desktop/repositories + planner_desktop/storage)
    ↓  SQLiteTaskRepository — по умолчанию (изолированный app_desktop.db);
       FakeTaskRepository — для тестов и демо-режима; общий контракт —
-      Protocol TaskRepository
-Use cases / ViewModels (planner_desktop/viewmodels)
-   ↓  QObject-обёртки: свойства, сигналы, слоты для QML
+      Protocol TaskRepository; CalendarSyncStore — очередь Calendar-операций
+      и состояние синка в той же БД
+Use cases (planner_desktop/usecases)
+   ↓  DesktopTaskService: CRUD задач + постановка Calendar-операций в очередь
+ViewModels (planner_desktop/viewmodels)
+   ↓  QObject-обёртки: свойства, сигналы, слоты для QML; CRUD — через сервис
 QML UI (planner_desktop/qml)
    ↓  ApplicationWindow + Sidebar + страницы (Сегодня/Календарь/История/Настройки)
-Sync gateways (planner_desktop/sync)
-      контракты CalendarSyncGateway / CalendarEventMapper; реализация — позже
+Sync (planner_desktop/sync)
+      CalendarSyncEngine + calendar_mapper + FakeCalendarGateway;
+      реальный Google-шлюз — позже, по контракту CalendarGateway
 ```
 
 Правило зависимостей: стрелки только вниз по списку недопустимы —
 domain не знает ни про repository, ни про Qt; QML разговаривает только
-с viewmodels; будущий движок синхронизации будет работать с domain +
-repository через шлюзы, не трогая UI.
+с viewmodels; движок синхронизации работает с domain + repository +
+очередью через шлюзы, не трогая UI.
+
+## Ядро Calendar-синхронизации (фейковый шлюз)
+
+Состав (`planner_desktop/sync/` + `planner_desktop/storage/`):
+
+- `sync_types.py` — `CalendarEvent` (собственная модель события, без
+  Google-клиентов), `PendingOp`, ошибки шлюза
+  (`RetryableGatewayError` / `TerminalGatewayError`);
+- `calendar_mapper.py` — чистый маппинг Task ↔ CalendarEvent;
+- `calendar_sync_engine.py` — двусторонний движок: push очереди,
+  pull изменений, конфликтная политика;
+- `fake_calendar_gateway.py` — in-memory календарь для тестов/разработки:
+  etag-и, updated_at, журнал изменений с курсором (аналог syncToken),
+  all-day и timed события, метаданные повторяющихся экземпляров,
+  инъекция ошибок;
+- `storage/calendar_sync_store.py` — локальная очередь push-операций
+  (`desktop_pending_calendar_ops`) и состояние синка
+  (`desktop_sync_state`) в том же изолированном `app_desktop.db`.
+
+Поток данных:
+
+- Quick Add / правки в UI → `DesktopTaskService` → репозиторий +
+  постановка операции в очередь (создание события — только задачам
+  с датой);
+- `CalendarSyncEngine.push_pending()` — отложенные операции уходят в
+  шлюз: create возвращает id/etag (записываются в задачу), update идёт
+  патчем, тумбстоун — delete-ом; временная ошибка → ретрай с бэкоффом,
+  после `MAX_ATTEMPTS` или постоянной ошибки — dead-letter (terminal),
+  бесконечных ретраев нет;
+- `CalendarSyncEngine.pull_remote_changes()` — правки «с телефона»:
+  новое событие → новая задача, правка → обновление задачи, отмена →
+  тумбстоун задачи.
+
+### Конфликтная политика (фаза 1, детерминированная)
+
+1. Есть pending-операция у задачи → remote-правка её НЕ перезаписывает
+   (недопушенная локальная правка важнее; задача догонит календарь
+   после push-а).
+2. Etag события совпадает с сохранённым в задаче → это эхо нашего
+   push-а, пропускаем.
+3. Иначе побеждает бОльший `updated_at`: remote новее → накатываем
+   на задачу; локальная новее → ставим push update в очередь.
+4. Ничья (или неизвестный remote updated_at) → локальная версия
+   остаётся, ничего не пушится (лог/отладка).
+
+Политика может эволюционировать, но пока она зафиксирована тестами.
+
+### Правила безопасности all-day и повторяющихся событий
+
+- all-day задача ↔ событие с «голыми» датами (`date`/`date`), конец —
+  **эксклюзивный**; формы `date` и `dateTime` не смешиваются никогда;
+- экземпляр повторяющегося события (`recurring_event_id` заполнен)
+  **не патчится по start/end вслепую**: маппер сознательно опускает
+  start/end в патче (обновляются только текстовые поля), а фейковый
+  шлюз, как и Google, отвечает постоянной ошибкой на слепой перенос;
+  осознанный перенос экземпляра — отдельная будущая фича;
+- завершённая задача остаётся событием в календаре (галочка локальная,
+  в Calendar не уходит);
+- unschedule (снятие даты у синхронизированной задачи) в фазе 1 не
+  реализован — в UI нет такого действия; операция снимается с очереди,
+  событие остаётся;
+- локальный тумбстоун «липкий»: после допушенного delete поздние
+  remote-правки задачу не воскрешают;
+- задачи **без даты** остаются локальными для нового десктопа в этой
+  фазе: в календарь (и вообще наружу) они не отправляются.
 
 ## Правила маппинга Task ↔ событие Calendar (закреплены заранее)
 
@@ -116,13 +186,17 @@ repository через шлюзы, не трогая UI.
 | QML-оболочка (4 страницы, светлая тема) | готова как скелет |
 | CalendarPage | заглушка недельной сетки |
 | HistoryPage | заглушка |
-| Контракт Calendar-синка | только интерфейсы/докстринги |
-| Реальный Google Calendar sync | НЕ реализован; следующая фаза — CalendarSyncGateway |
+| DesktopTaskService (usecases/) | готов; ставит Calendar-операции в очередь |
+| Очередь Calendar-операций (calendar_sync_store.py) | готова, с ретраями и dead-letter |
+| Маппер Task ↔ CalendarEvent | готов, покрыт тестами |
+| CalendarSyncEngine (двусторонний) | готов, работает на FakeCalendarGateway |
+| FakeCalendarGateway | готов: журнал изменений, etag-и, инъекция ошибок |
+| Реальный Google Calendar sync | НЕ реализован; следующая фаза — GoogleCalendarGateway (сеть/OAuth) |
 
 ## Тесты
 
 Чистая Python-логика тестируется без окна:
 
 ```
-python -m pytest tests/test_desktop_today_viewmodel.py tests/test_desktop_calendar_contract.py tests/test_desktop_storage_paths.py tests/test_desktop_sqlite_repository.py -q
+python -m pytest tests/test_desktop_today_viewmodel.py tests/test_desktop_calendar_contract.py tests/test_desktop_storage_paths.py tests/test_desktop_sqlite_repository.py tests/test_desktop_calendar_mapper.py tests/test_desktop_calendar_sync_store.py tests/test_desktop_calendar_sync_engine.py tests/test_desktop_task_service_sync_queue.py -q
 ```

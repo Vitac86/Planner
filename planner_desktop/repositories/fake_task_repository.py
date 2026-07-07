@@ -91,6 +91,13 @@ class FakeTaskRepository:
                 return task
         return None
 
+    def get_by_google_event_id(self, event_id: str) -> Optional[Task]:
+        """Как у SQLite-репозитория: ищет и среди тумбстоунов."""
+        for task in self._tasks:
+            if task.google_calendar_event_id == event_id:
+                return task
+        return None
+
     def update(self, task: Task) -> Task:
         """Задачи хранятся по ссылке, поэтому достаточно обновить updated_at."""
         task.touch()

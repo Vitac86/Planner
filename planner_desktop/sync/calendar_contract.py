@@ -31,9 +31,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Mapping, Optional, Protocol, runtime_checkable
 
 from planner_desktop.domain.task import Task
+from planner_desktop.sync.sync_types import CalendarEvent, RemoteChangeBatch
 
 
 @dataclass
@@ -89,6 +90,43 @@ class CalendarSyncGateway(Protocol):
     def push_task_delete(self, task: Task) -> None:
         """Удалить/отменить связанное событие для локально удалённой задачи
         (task несёт тумбстоун deleted_at)."""
+        ...
+
+
+@runtime_checkable
+class CalendarGateway(Protocol):
+    """Событийный шлюз календаря для движка синхронизации.
+
+    Работает в терминах собственной модели CalendarEvent (sync_types.py),
+    а не сырых payload-ов Google — поэтому один и тот же движок гоняется
+    и на FakeCalendarGateway (сейчас), и на будущем GoogleCalendarGateway.
+    Сеть/OAuth появятся только внутри реальной реализации; движок и тесты
+    про них не знают.
+    """
+
+    def insert_event(self, event: CalendarEvent) -> CalendarEvent:
+        """Создать событие; возвращает событие с назначенными id/etag."""
+        ...
+
+    def patch_event(self, event_id: str, patch: Mapping[str, Any]) -> CalendarEvent:
+        """Частично обновить событие (имена полей CalendarEvent).
+
+        Экземпляр повторяющегося события нельзя слепо патчить по
+        start/end — шлюз (как и Google) вправе ответить ошибкой;
+        безопасный патч для экземпляра строит маппер (без start/end).
+        """
+        ...
+
+    def delete_event(self, event_id: str) -> None:
+        """Удалить/отменить событие; уже отсутствующее — не ошибка."""
+        ...
+
+    def list_changes(self, cursor: Optional[str]) -> RemoteChangeBatch:
+        """Изменения после курсора (аналог syncToken) + новый курсор.
+
+        Сюда попадают в том числе правки с телефона (приложение
+        Google Calendar): создание, перенос, удаление событий.
+        """
         ...
 
 

@@ -168,6 +168,14 @@ class SQLiteTaskRepository:
         ).fetchone()
         return _row_to_task(row) if row is not None else None
 
+    def get_by_google_event_id(self, event_id: str) -> Optional[Task]:
+        """Задача, привязанная к событию календаря, включая тумбстоуны:
+        pull не должен воскрешать локально удалённую задачу как новую."""
+        row = self._connection.execute(
+            "SELECT * FROM tasks WHERE google_calendar_event_id = ?", (event_id,)
+        ).fetchone()
+        return _row_to_task(row) if row is not None else None
+
     def delete(self, task_id: int) -> bool:
         """Тумбстоун: помечает deleted_at, физически строку не удаляет."""
         task = self.get(task_id)

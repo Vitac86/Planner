@@ -9,23 +9,31 @@ from PySide6.QtQml import QQmlApplicationEngine
 
 from planner_desktop.repositories import TaskRepository
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
+from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
+from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
 
 QML_DIR = Path(__file__).resolve().parent / "qml"
 
 
-def _default_repository() -> TaskRepository:
-    """SQLite-хранилище нового десктопа (PlannerDesktop/app_desktop.db).
+def _default_service() -> DesktopTaskService:
+    """Сервис задач поверх SQLite-хранилища (PlannerDesktop/app_desktop.db).
+
+    Календарная очередь живёт в той же изолированной БД: задачи с датой
+    из Quick Add копят pending-операции для будущего движка синка —
+    сетевых вызовов при этом нет, реальный Google-шлюз ещё не подключён.
 
     PLANNER_DESKTOP_DEMO=1 включает фейковый репозиторий с демо-данными —
-    ничего не пишется на диск. Старый Planner/app.db не открывается ни в
-    одном из режимов.
+    ничего не пишется на диск (и очередь не создаётся). Старый
+    Planner/app.db не открывается ни в одном из режимов.
     """
     if os.environ.get("PLANNER_DESKTOP_DEMO") == "1":
-        return FakeTaskRepository()
-    return SQLiteTaskRepository()
+        return DesktopTaskService(FakeTaskRepository())
+    repository = SQLiteTaskRepository()
+    queue = CalendarSyncStore(repository.db_path)
+    return DesktopTaskService(repository, calendar_queue=queue)
 
 
 class MainWindow:
@@ -36,8 +44,12 @@ class MainWindow:
     """
 
     def __init__(self, repository: Optional[TaskRepository] = None) -> None:
-        self.repository = repository if repository is not None else _default_repository()
-        self.today_viewmodel = TodayViewModel(self.repository)
+        if repository is not None:
+            self.service = DesktopTaskService(repository)  # тесты: без очереди
+        else:
+            self.service = _default_service()
+        self.repository = self.service.repository
+        self.today_viewmodel = TodayViewModel(service=self.service)
         self.calendar_viewmodel = CalendarViewModel(self.repository)
 
         self.engine = QQmlApplicationEngine()

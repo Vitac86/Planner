@@ -15,6 +15,7 @@ from planner_desktop.domain.commands import QuickAddCommand, execute_quick_add
 from planner_desktop.domain.task import Task
 from planner_desktop.repositories import TaskRepository
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
+from planner_desktop.usecases.task_service import DesktopTaskService
 
 
 def _task_to_row(task: Task) -> Dict[str, Any]:
@@ -43,9 +44,18 @@ class TodayViewModel(QObject):
     errorChanged = Signal()
 
     def __init__(self, repository: TaskRepository | None = None,
-                 parent: QObject | None = None) -> None:
+                 parent: QObject | None = None,
+                 service: DesktopTaskService | None = None) -> None:
+        """CRUD идёт через DesktopTaskService: он же ставит Calendar-операции
+        в очередь, когда сервис создан с CalendarSyncStore (см. main_window).
+        Старый вызов TodayViewModel(repository) работает как раньше —
+        сервис без очереди собирается автоматически."""
         super().__init__(parent)
-        self._repository = repository or FakeTaskRepository()
+        if service is not None:
+            self._service = service
+        else:
+            self._service = DesktopTaskService(repository or FakeTaskRepository())
+        self._repository = self._service.repository
         self._error = ""
         self._daily_done: Dict[str, bool] = {
             title: False for title in self._repository.daily_titles
@@ -99,14 +109,14 @@ class TodayViewModel(QObject):
             self._set_error(" ".join(result.errors))
             return False
 
-        self._repository.add(result.task)
+        self._service.create_task(result.task)
         self._set_error("")
         self.tasksChanged.emit()
         return True
 
     @Slot(str, result=bool)
     def toggleCompleted(self, uid: str) -> bool:
-        changed = self._repository.toggle_completed(uid)
+        changed = self._service.toggle_completed(uid)
         if changed:
             self.tasksChanged.emit()
         return changed
