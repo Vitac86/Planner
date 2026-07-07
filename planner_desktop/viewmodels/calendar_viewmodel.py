@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
+from planner_desktop.repositories import TaskRepository
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
 
 _WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -25,7 +26,7 @@ class CalendarViewModel(QObject):
     weekChanged = Signal()
     selectionChanged = Signal()
 
-    def __init__(self, repository: FakeTaskRepository | None = None,
+    def __init__(self, repository: TaskRepository | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._repository = repository or FakeTaskRepository()

@@ -38,18 +38,42 @@ python run_desktop.py
 - задачи **без даты** в телефонный календарь в фазе 1 не попадают;
   позже их можно явно замапить на Google Tasks или all-day события.
 
-**В этом скелете реальная синхронизация не реализована** — есть только
-контракт (`sync/calendar_contract.py`). Ни одного вызова Google API,
-ни одного чтения/записи БД новый пакет не делает.
+**Реальная синхронизация по-прежнему не реализована** — есть только
+контракт (`sync/calendar_contract.py`). Ни одного вызова Google API
+новый пакет не делает. Следующей фазой появится реализация
+`CalendarSyncGateway` поверх SQLite-репозитория.
+
+## Локальное хранилище (экспериментальное)
+
+Фаза 0 (скелет) обходилась `FakeTaskRepository` — данные жили только в
+памяти процесса. Теперь по умолчанию приложение использует
+`SQLiteTaskRepository` (`planner_desktop/storage/`) — **экспериментальное
+изолированное** хранилище:
+
+- файл БД: `<user data dir>/PlannerDesktop/app_desktop.db`
+  (на Windows — `%APPDATA%\PlannerDesktop\app_desktop.db`);
+- каталог и имя файла намеренно отличаются от профиля старого
+  Flet-приложения (`<user data dir>/Planner/app.db`) — старый `app.db`
+  **никогда не читается и не пишется**;
+- **миграции старых данных нет** — новый десктоп стартует с пустой БД;
+- переопределение пути для разработки/тестов — переменная окружения
+  `PLANNER_DESKTOP_DATA_DIR` (тесты передают `tmp_path` прямо в
+  конструктор репозитория);
+- `PLANNER_DESKTOP_DEMO=1` возвращает фейковый репозиторий с
+  демо-данными, на диск ничего не пишется;
+- удаление задачи — тумбстоун `deleted_at`, строка остаётся в БД;
+- схема (`storage/schema.py`) — простой sqlite3, без SQLModel и без
+  импорта старых `models/`.
 
 ## Слои
 
 ```
 Domain (planner_desktop/domain)
    ↓  чистые dataclass-ы и правила валидации; без Qt, Flet, SQLModel
-Repository (planner_desktop/repositories)
-   ↓  сейчас FakeTaskRepository (in-memory, ВРЕМЕННЫЙ);
-      настоящий появится отдельной фазой с тем же интерфейсом
+Repository (planner_desktop/repositories + planner_desktop/storage)
+   ↓  SQLiteTaskRepository — по умолчанию (изолированный app_desktop.db);
+      FakeTaskRepository — для тестов и демо-режима; общий контракт —
+      Protocol TaskRepository
 Use cases / ViewModels (planner_desktop/viewmodels)
    ↓  QObject-обёртки: свойства, сигналы, слоты для QML
 QML UI (planner_desktop/qml)
@@ -86,18 +110,19 @@ repository через шлюзы, не трогая UI.
 |---|---|
 | Доменная модель Task с полями Calendar-синка | готова |
 | Валидация Quick Add (domain/commands.py) | готова, покрыта тестами |
-| FakeTaskRepository | временный, только для скелета |
+| FakeTaskRepository | фаза 0; остаётся для тестов и демо-режима |
+| SQLiteTaskRepository (storage/) | экспериментальный, изолированный, по умолчанию |
+| Миграция старого app.db | НЕ выполняется (и не планируется в этой фазе) |
 | QML-оболочка (4 страницы, светлая тема) | готова как скелет |
 | CalendarPage | заглушка недельной сетки |
 | HistoryPage | заглушка |
 | Контракт Calendar-синка | только интерфейсы/докстринги |
-| Реальный Google Calendar sync | НЕ реализован |
-| Реальный репозиторий/БД | НЕ реализован |
+| Реальный Google Calendar sync | НЕ реализован; следующая фаза — CalendarSyncGateway |
 
 ## Тесты
 
 Чистая Python-логика тестируется без окна:
 
 ```
-python -m pytest tests/test_desktop_today_viewmodel.py tests/test_desktop_calendar_contract.py -q
+python -m pytest tests/test_desktop_today_viewmodel.py tests/test_desktop_calendar_contract.py tests/test_desktop_storage_paths.py tests/test_desktop_sqlite_repository.py -q
 ```

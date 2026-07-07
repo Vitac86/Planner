@@ -1,12 +1,12 @@
 """Фейковый in-memory репозиторий задач.
 
-Временная заглушка на время скелета: никакой БД, никаких файлов,
-никаких Google API. Настоящий репозиторий появится отдельным шагом
-и реализует тот же интерфейс (list_*/add/toggle_completed).
+Остаётся для тестов и демо-режима: никакой БД, никаких файлов,
+никаких Google API. По умолчанию приложение теперь использует
+SQLiteTaskRepository (planner_desktop/storage) с тем же интерфейсом.
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import List, Optional
 
 from planner_desktop.domain.task import Task
@@ -75,22 +75,53 @@ class FakeTaskRepository:
     def all(self) -> List[Task]:
         return [t for t in self._tasks if not t.is_deleted]
 
+    def list_all(self) -> List[Task]:
+        return self.all()
+
+    def get(self, task_id: int) -> Optional[Task]:
+        """Возвращает задачу по id, включая тумбстоуны (как SQLite-репозиторий)."""
+        for task in self._tasks:
+            if task.id == task_id:
+                return task
+        return None
+
     def get_by_uid(self, uid: str) -> Optional[Task]:
         for task in self._tasks:
             if task.uid == uid:
                 return task
         return None
 
-    def list_today(self) -> List[Task]:
-        today = datetime.now().date()
+    def update(self, task: Task) -> Task:
+        """Задачи хранятся по ссылке, поэтому достаточно обновить updated_at."""
+        task.touch()
+        return task
+
+    def list_today(self, reference_date: Optional[date] = None) -> List[Task]:
+        day = reference_date or datetime.now().date()
         return [
             t
             for t in self.all()
-            if t.start is not None and t.start.date() == today
+            if t.start is not None and t.start.date() == day
         ]
 
     def list_undated(self) -> List[Task]:
         return [t for t in self.all() if t.start is None]
+
+    def delete(self, task_id: int) -> bool:
+        """Тумбстоун (deleted_at), запись из списка не выбрасывается."""
+        task = self.get(task_id)
+        if task is None or task.is_deleted:
+            return False
+        task.mark_deleted()
+        return True
+
+    def complete(self, task_id: int, completed: bool = True) -> bool:
+        task = self.get(task_id)
+        if task is None or task.is_deleted:
+            return False
+        task.completed = completed
+        task.touch()
+        return True
 
     def toggle_completed(self, uid: str) -> bool:
         task = self.get_by_uid(uid)

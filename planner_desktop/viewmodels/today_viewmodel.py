@@ -13,6 +13,7 @@ from PySide6.QtCore import Property, QObject, Signal, Slot
 
 from planner_desktop.domain.commands import QuickAddCommand, execute_quick_add
 from planner_desktop.domain.task import Task
+from planner_desktop.repositories import TaskRepository
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
 
 
@@ -41,7 +42,7 @@ class TodayViewModel(QObject):
     dailyChanged = Signal()
     errorChanged = Signal()
 
-    def __init__(self, repository: FakeTaskRepository | None = None,
+    def __init__(self, repository: TaskRepository | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._repository = repository or FakeTaskRepository()
@@ -128,5 +129,5 @@ class TodayViewModel(QObject):
             self.errorChanged.emit()
 
     @property
-    def repository(self) -> FakeTaskRepository:
+    def repository(self) -> TaskRepository:
         return self._repository
