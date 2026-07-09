@@ -2,10 +2,12 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
+import "../theme"
+
 Rectangle {
     id: sidebar
     implicitWidth: 224
-    color: "#FFFFFF"
+    color: Theme.surface
 
     property int currentIndex: 0
     signal pageSelected(int index)
@@ -15,25 +17,25 @@ Rectangle {
         anchors.right: parent.right
         width: 1
         height: parent.height
-        color: "#E6E8F0"
+        color: Theme.border
     }
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 4
+        anchors.margins: Theme.spacingLg
+        spacing: Theme.spacingXs
 
         Label {
             text: "Planner"
             font.pixelSize: 22
             font.weight: Font.DemiBold
-            color: "#23283D"
+            color: Theme.textPrimary
             Layout.bottomMargin: 2
         }
         Label {
             text: "экспериментальная версия"
             font.pixelSize: 11
-            color: "#8A90A6"
+            color: Theme.textMuted
             Layout.bottomMargin: 18
         }
 
@@ -51,24 +53,26 @@ Rectangle {
 
                 Layout.fillWidth: true
                 implicitHeight: 42
-                radius: 10
-                color: sidebar.currentIndex === index ? "#EEF1FE"
-                     : navMouse.containsMouse ? "#F6F7FB" : "transparent"
+                radius: Theme.radiusSmall + 2
+                color: sidebar.currentIndex === index ? Theme.accentSoft
+                     : navMouse.containsMouse ? Theme.surfaceHover : "transparent"
+
+                Behavior on color { ColorAnimation { duration: 90 } }
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 12
-                    anchors.rightMargin: 12
-                    spacing: 10
+                    anchors.leftMargin: Theme.spacingMd
+                    anchors.rightMargin: Theme.spacingMd
+                    spacing: Theme.spacingSm + 2
 
                     Label { text: modelData.icon; font.pixelSize: 15 }
                     Label {
                         text: modelData.label
-                        font.pixelSize: 14
+                        font.pixelSize: Theme.fontBody
                         font.weight: sidebar.currentIndex === index
                                      ? Font.DemiBold : Font.Normal
                         color: sidebar.currentIndex === index
-                               ? "#4F6BED" : "#3C4257"
+                               ? Theme.accent : Theme.textSecondary
                         Layout.fillWidth: true
                     }
                 }
@@ -86,9 +90,9 @@ Rectangle {
         Item { Layout.fillHeight: true }
 
         Label {
-            text: "Фейковые данные,\nбез синхронизации"
+            text: "Изолированная локальная БД.\nСинк с Google — только вручную."
             font.pixelSize: 11
-            color: "#A6ABBF"
+            color: Theme.textMuted
             lineHeight: 1.2
         }
     }

@@ -2,45 +2,72 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Заглушка календаря: недельная сетка + список выбранного дня.
-// Будущий источник данных — Google Calendar (см. sync/calendar_contract.py).
+import "../components"
+import "../theme"
+
+// Календарь MVP: недельная полоса + список задач выбранного дня.
+// Почасовая сетка и drag-and-drop — следующая фаза (см. FEATURE_PARITY.md).
 Item {
     id: page
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 24
-        spacing: 16
+        anchors.margins: Theme.spacingXl
+        spacing: Theme.spacingLg
 
-        Label {
-            text: "Календарь"
-            font.pixelSize: 26
-            font.weight: Font.DemiBold
-            color: "#23283D"
-        }
-
-        Rectangle {
+        // ---- Шапка: заголовок недели + навигация ----
+        RowLayout {
             Layout.fillWidth: true
-            radius: 10
-            implicitHeight: noteLabel.implicitHeight + 20
-            color: "#FFF7E6"
-            border.color: "#F1DFB2"
-            border.width: 1
+            spacing: Theme.spacingSm
 
-            Label {
-                id: noteLabel
-                anchors.fill: parent
-                anchors.margins: 10
-                text: "🔄 " + calendarVm.syncSourceNote
-                wrapMode: Text.WordWrap
-                font.pixelSize: 12
-                color: "#8A6D1F"
+            ColumnLayout {
+                spacing: 2
+
+                Label {
+                    text: "Календарь"
+                    font.pixelSize: Theme.fontDisplay
+                    font.weight: Font.DemiBold
+                    color: Theme.textPrimary
+                }
+                Label {
+                    text: calendarVm.weekTitle
+                    font.pixelSize: Theme.fontBody
+                    color: Theme.textMuted
+                }
+            }
+            Item { Layout.fillWidth: true }
+
+            AppButton {
+                text: "‹"
+                variant: "secondary"
+                onClicked: calendarVm.previousWeek()
+                ToolTip.visible: hovered
+                ToolTip.text: "Предыдущая неделя"
+                ToolTip.delay: 600
+            }
+            AppButton {
+                text: "Сегодня"
+                variant: calendarVm.isCurrentWeek ? "ghost" : "secondary"
+                onClicked: calendarVm.goToToday()
+            }
+            AppButton {
+                text: "›"
+                variant: "secondary"
+                onClicked: calendarVm.nextWeek()
+                ToolTip.visible: hovered
+                ToolTip.text: "Следующая неделя"
+                ToolTip.delay: 600
+            }
+            AppButton {
+                text: "＋ Задача"
+                variant: "primary"
+                onClicked: editorDialog.openForCreate(calendarVm.selectedDateText)
             }
         }
 
-        // ---- недельная сетка (заглушка) ----
+        // ---- Недельная полоса ----
         RowLayout {
-            spacing: 8
+            spacing: Theme.spacingSm
             Layout.fillWidth: true
 
             Repeater {
@@ -50,39 +77,52 @@ Item {
                     required property int index
 
                     Layout.fillWidth: true
-                    implicitHeight: 96
-                    radius: 12
-                    color: modelData.isSelected ? "#EEF1FE" : "#FFFFFF"
-                    border.color: modelData.isToday ? "#4F6BED" : "#E6E8F0"
+                    implicitHeight: 92
+                    radius: Theme.radiusMedium
+                    color: modelData.isSelected ? Theme.accentSoft
+                         : dayMouse.containsMouse ? Theme.surfaceHover : Theme.surface
+                    border.color: modelData.isToday ? Theme.accent
+                                : modelData.isSelected ? Theme.accentSoftBorder : Theme.border
                     border.width: modelData.isToday ? 2 : 1
+
+                    Behavior on color { ColorAnimation { duration: 90 } }
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 10
+                        anchors.margins: Theme.spacingSm + 2
                         spacing: 2
 
                         Label {
                             text: modelData.label
-                            font.pixelSize: 12
-                            color: "#8A90A6"
+                            font.pixelSize: Theme.fontCaption
+                            color: modelData.isSelected ? Theme.accent : Theme.textMuted
                         }
                         Label {
                             text: modelData.dateText
                             font.pixelSize: 16
                             font.weight: Font.DemiBold
-                            color: modelData.isToday ? "#4F6BED" : "#23283D"
+                            color: modelData.isToday ? Theme.accent : Theme.textPrimary
                         }
                         Item { Layout.fillHeight: true }
+                        Badge {
+                            visible: modelData.taskCount > 0
+                            text: String(modelData.taskCount)
+                            fg: modelData.isSelected ? Theme.accent : Theme.textSecondary
+                            bg: modelData.isSelected ? Theme.surface : Theme.surfacePressed
+                        }
                         Label {
-                            text: modelData.taskCount > 0
-                                  ? modelData.taskCount + " задач(и)" : "—"
-                            font.pixelSize: 11
-                            color: modelData.taskCount > 0 ? "#4F6BED" : "#C2C6D6"
+                            visible: modelData.taskCount === 0
+                            text: "—"
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
+                            opacity: 0.6
                         }
                     }
 
                     MouseArea {
+                        id: dayMouse
                         anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: calendarVm.selectDay(index)
                     }
@@ -90,59 +130,64 @@ Item {
             }
         }
 
-        // ---- список выбранного дня (заглушка) ----
-        Label {
-            text: calendarVm.selectedDayTitle
-            font.pixelSize: 15
-            font.weight: Font.DemiBold
-            color: "#5A6072"
+        // ---- Список выбранного дня ----
+        SectionHeader {
+            title: calendarVm.selectedDayTitle
+            count: calendarVm.selectedDayTasks.length
         }
 
-        Rectangle {
+        Panel {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            radius: 12
-            color: "#FFFFFF"
-            border.color: "#E6E8F0"
-            border.width: 1
 
-            ColumnLayout {
+            ListView {
+                id: dayList
                 anchors.fill: parent
-                anchors.margins: 16
-                spacing: 8
+                anchors.margins: Theme.spacingLg
+                clip: true
+                spacing: Theme.spacingSm
+                model: calendarVm.selectedDayTasks
+                boundsBehavior: Flickable.StopAtBounds
 
-                Repeater {
-                    model: calendarVm.selectedDayTasks
-                    delegate: RowLayout {
-                        required property var modelData
-                        spacing: 10
-                        Layout.fillWidth: true
-
-                        Label {
-                            text: modelData.timeLabel
-                            font.pixelSize: 13
-                            color: "#4F6BED"
-                            Layout.preferredWidth: 90
-                        }
-                        Label {
-                            text: modelData.title
-                            font.pixelSize: 14
-                            color: "#23283D"
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                        }
-                    }
+                delegate: TaskCard {
+                    required property var modelData
+                    width: dayList.width
+                    uid: modelData.uid
+                    title: modelData.title
+                    notes: modelData.notes
+                    timeLabel: modelData.timeLabel
+                    isAllDay: modelData.isAllDay
+                    priority: modelData.priority
+                    completed: modelData.completed
+                    hasPendingSync: modelData.hasPendingSync
+                    isLinked: modelData.isLinked
+                    onToggled: uid => calendarVm.toggleCompleted(uid)
+                    onEditRequested: uid => editorDialog.openForEdit(uid)
+                    onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
                 }
+            }
 
-                Label {
-                    visible: calendarVm.selectedDayTasks.length === 0
-                    text: "На этот день задач нет."
-                    color: "#8A90A6"
-                    font.pixelSize: 13
-                }
-
-                Item { Layout.fillHeight: true }
+            EmptyState {
+                anchors.centerIn: parent
+                visible: calendarVm.selectedDayTasks.length === 0
+                glyph: "📅"
+                text: "На этот день задач нет"
+                hint: "Нажмите «＋ Задача», чтобы запланировать задачу на выбранный день"
             }
         }
+    }
+
+    TaskEditorDialog {
+        id: editorDialog
+        objectName: "calendarEditorDialog"
+        vm: calendarVm
+    }
+
+    ConfirmDialog {
+        id: confirmDeleteDialog
+        headerText: "Удалить задачу?"
+        message: "Задача будет помечена удалённой; если её событие уже есть "
+                 + "в календаре, удаление события встанет в очередь синка."
+        onConfirmed: uid => calendarVm.deleteTask(uid)
     }
 }

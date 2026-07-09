@@ -13,6 +13,7 @@ from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
+from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
 from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
 
 QML_DIR = Path(__file__).resolve().parent / "qml"
@@ -50,12 +51,21 @@ class MainWindow:
             self.service = _default_service()
         self.repository = self.service.repository
         self.today_viewmodel = TodayViewModel(service=self.service)
-        self.calendar_viewmodel = CalendarViewModel(self.repository)
+        self.calendar_viewmodel = CalendarViewModel(service=self.service)
+        self.settings_viewmodel = SettingsViewModel(self.service)
+
+        # Мутация на одной странице освежает остальные. Петли нет:
+        # refresh() эмитит только *Changed-сигналы, а не tasksMutated.
+        self.today_viewmodel.tasksMutated.connect(self.calendar_viewmodel.refresh)
+        self.today_viewmodel.tasksMutated.connect(self.settings_viewmodel.refresh)
+        self.calendar_viewmodel.tasksMutated.connect(self.today_viewmodel.refresh)
+        self.calendar_viewmodel.tasksMutated.connect(self.settings_viewmodel.refresh)
 
         self.engine = QQmlApplicationEngine()
         context = self.engine.rootContext()
         context.setContextProperty("todayVm", self.today_viewmodel)
         context.setContextProperty("calendarVm", self.calendar_viewmodel)
+        context.setContextProperty("settingsVm", self.settings_viewmodel)
 
     def show(self) -> None:
         self.engine.load(str(QML_DIR / "Main.qml"))

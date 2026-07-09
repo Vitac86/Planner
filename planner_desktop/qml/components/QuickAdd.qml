@@ -2,15 +2,21 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
+import "../theme"
+
 // Быстрое добавление задачи. Вся валидация — в Python (todayVm.addTask):
 // невалидный ввод даёт видимую ошибку и никогда не «вешает» интерфейс.
-Rectangle {
+Panel {
     id: quickAdd
-    radius: 12
-    color: "#FFFFFF"
-    border.color: "#E6E8F0"
-    border.width: 1
-    implicitHeight: layout.implicitHeight + 32
+
+    implicitHeight: layout.implicitHeight + 2 * Theme.spacingLg
+
+    function todayText() { return Qt.formatDate(new Date(), "yyyy-MM-dd") }
+    function tomorrowText() {
+        var d = new Date()
+        d.setDate(d.getDate() + 1)
+        return Qt.formatDate(d, "yyyy-MM-dd")
+    }
 
     function submit() {
         var ok = todayVm.addTask(
@@ -37,22 +43,23 @@ Rectangle {
     ColumnLayout {
         id: layout
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 8
+        anchors.margins: Theme.spacingLg
+        spacing: Theme.spacingSm
 
         RowLayout {
-            spacing: 8
+            spacing: Theme.spacingSm
             Layout.fillWidth: true
 
             TextField {
                 id: titleField
                 placeholderText: "Новая задача…"
+                font.pixelSize: Theme.fontBody
                 Layout.fillWidth: true
                 onAccepted: quickAdd.submit()
             }
-            Button {
+            AppButton {
                 text: "Добавить"
-                highlighted: true
+                variant: "primary"
                 onClicked: quickAdd.submit()
             }
         }
@@ -60,46 +67,62 @@ Rectangle {
         TextField {
             id: notesField
             placeholderText: "Заметка (необязательно)"
+            font.pixelSize: Theme.fontBody
             Layout.fillWidth: true
         }
 
         RowLayout {
-            spacing: 12
+            spacing: Theme.spacingMd
             Layout.fillWidth: true
 
             CheckBox {
                 id: calendarCheck
                 text: "Добавить в календарь"
+                font.pixelSize: Theme.fontBody
             }
             CheckBox {
                 id: allDayCheck
                 text: "Весь день"
                 visible: calendarCheck.checked
+                font.pixelSize: Theme.fontBody
             }
             Item { Layout.fillWidth: true }
         }
 
         RowLayout {
-            spacing: 8
+            spacing: Theme.spacingSm
             visible: calendarCheck.checked
             Layout.fillWidth: true
 
             TextField {
                 id: dateField
                 placeholderText: "Дата: ГГГГ-ММ-ДД"
-                Layout.preferredWidth: 170
+                font.pixelSize: Theme.fontBody
+                Layout.preferredWidth: 165
+            }
+            AppButton {
+                text: "Сегодня"
+                variant: "ghost"
+                onClicked: dateField.text = quickAdd.todayText()
+            }
+            AppButton {
+                text: "Завтра"
+                variant: "ghost"
+                onClicked: dateField.text = quickAdd.tomorrowText()
             }
             TextField {
                 id: timeField
                 placeholderText: "Время: ЧЧ:ММ"
                 enabled: !allDayCheck.checked
-                Layout.preferredWidth: 140
+                font.pixelSize: Theme.fontBody
+                Layout.preferredWidth: 135
             }
             TextField {
                 id: durationField
-                placeholderText: "Длительность, мин"
+                placeholderText: "Длит., мин"
                 enabled: !allDayCheck.checked
-                Layout.preferredWidth: 170
+                font.pixelSize: Theme.fontBody
+                Layout.preferredWidth: 110
             }
             Item { Layout.fillWidth: true }
         }
@@ -107,8 +130,8 @@ Rectangle {
         Label {
             text: todayVm.errorMessage
             visible: todayVm.errorMessage.length > 0
-            color: "#C62828"
-            font.pixelSize: 12
+            color: Theme.danger
+            font.pixelSize: Theme.fontCaption
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }

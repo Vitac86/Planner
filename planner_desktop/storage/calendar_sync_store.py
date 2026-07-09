@@ -169,6 +169,31 @@ class CalendarSyncStore:
         ).fetchone()
         return row is not None
 
+    def count_pending_ops(self) -> int:
+        """Сколько операций ждёт push-а (для статистики в UI/настройках)."""
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS n FROM desktop_pending_calendar_ops WHERE status = ?",
+            (OpStatus.PENDING.value,),
+        ).fetchone()
+        return int(row["n"])
+
+    def count_terminal_ops(self) -> int:
+        """Сколько операций в dead-letter (для статистики в UI/настройках)."""
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS n FROM desktop_pending_calendar_ops WHERE status = ?",
+            (OpStatus.TERMINAL.value,),
+        ).fetchone()
+        return int(row["n"])
+
+    def list_pending_uids(self) -> set:
+        """uid-ы задач с pending-операциями — для бейджей «Синк…» в списках."""
+        rows = self._connection.execute(
+            "SELECT DISTINCT task_uid FROM desktop_pending_calendar_ops "
+            "WHERE status = ?",
+            (OpStatus.PENDING.value,),
+        ).fetchall()
+        return {row["task_uid"] for row in rows}
+
     def remove_op(self, op_id: int) -> None:
         """Успешный push: операция выполнена и больше не нужна."""
         self._connection.execute(
