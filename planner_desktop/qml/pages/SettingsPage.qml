@@ -78,7 +78,7 @@ ScrollView {
 
         PageHeader {
             title: "Настройки"
-            subtitle: "Локальный режим · автосинхронизации нет"
+            subtitle: "Данные хранятся локально на этом компьютере · синхронизация с Google — только вручную"
             Layout.fillWidth: true
         }
 

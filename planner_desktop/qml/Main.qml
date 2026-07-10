@@ -52,12 +52,50 @@ ApplicationWindow {
                 anchors.fill: parent
                 currentIndex: root.currentPage
 
-                TodayPage {}
-                CalendarPage {}
+                TodayPage { id: todayPage; objectName: "todayPage" }
+                CalendarPage { id: calendarPage; objectName: "calendarPage" }
                 HistoryPage {}
                 SettingsPage {}
             }
         }
+    }
+
+    // ---- клавиатурные сокращения ----
+    // Не срабатывают, когда фокус в текстовом поле (кроме Ctrl-сочетаний):
+    // так «/» и Delete не мешают вводу.
+    function _typingNow() {
+        var it = root.activeFocusItem
+        return it && (it instanceof TextInput || it instanceof TextEdit)
+    }
+    function _newTaskOnCurrentPage() {
+        if (root.currentPage === 1) calendarPage.newTask()
+        else { root.currentPage = 0; todayPage.newTask() }
+    }
+
+    Shortcut {
+        sequences: [StandardKey.New, "Ctrl+N"]
+        onActivated: root._newTaskOnCurrentPage()
+    }
+    Shortcut {
+        sequences: ["Ctrl+K", "Meta+K"]
+        onActivated: { root.currentPage = 0; todayPage.focusQuickAdd() }
+    }
+    Shortcut {
+        sequence: "/"
+        enabled: {
+            var it = root.activeFocusItem
+            return !(it && (it instanceof TextInput || it instanceof TextEdit))
+        }
+        onActivated: { root.currentPage = 0; todayPage.focusQuickAdd() }
+    }
+    Shortcut {
+        sequences: ["Delete", "Backspace"]
+        enabled: {
+            var it = root.activeFocusItem
+            var typing = it && (it instanceof TextInput || it instanceof TextEdit)
+            return !typing && root.currentPage === 0 && todayPage.selectedUid !== ""
+        }
+        onActivated: todayPage.deleteSelected()
     }
 
     // ---- всплывашка «Сохранено»/«Удалено» ----
@@ -140,6 +178,10 @@ ApplicationWindow {
     }
     Connections {
         target: calendarVm
+        function onToastMessage(text) { toast.show(text) }
+    }
+    Connections {
+        target: dailyVm
         function onToastMessage(text) { toast.show(text) }
     }
 }

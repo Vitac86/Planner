@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -70,6 +70,36 @@ CREATE TABLE IF NOT EXISTS desktop_sync_state (
 )
 """
 
+# Ежедневные (повторяющиеся по дням недели) локальные задачи.
+# Полностью локальны: в Google Calendar не уходят, Calendar-операций
+# не порождают. weekdays_mask — 7 бит (Пн..Вс), см. domain/daily_task.py.
+CREATE_DAILY_TASKS_TABLE = """
+CREATE TABLE IF NOT EXISTS desktop_daily_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    weekdays_mask INTEGER NOT NULL DEFAULT 127,
+    preferred_time TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+)
+"""
+
+# Отметки выполнения ежедневной задачи на конкретную дату.
+# Наличие строки = задача выполнена в этот день. Ключ (uid, дата) —
+# отметка идемпотентна и хранится по-дневно.
+CREATE_DAILY_COMPLETIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS desktop_daily_completions (
+    daily_uid TEXT NOT NULL,
+    done_date TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (daily_uid, done_date)
+)
+"""
+
 
 def create_schema(connection: sqlite3.Connection) -> None:
     """Создаёт таблицы, если их ещё нет (безопасно вызывать повторно).
@@ -81,5 +111,7 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_PENDING_CALENDAR_OPS_TABLE)
     connection.execute(CREATE_PENDING_OPS_DUE_INDEX)
     connection.execute(CREATE_SYNC_STATE_TABLE)
+    connection.execute(CREATE_DAILY_TASKS_TABLE)
+    connection.execute(CREATE_DAILY_COMPLETIONS_TABLE)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

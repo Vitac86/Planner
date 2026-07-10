@@ -21,9 +21,18 @@ from typing import Any, Dict, List
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
-from planner_desktop.domain.commands import QuickAddCommand, execute_quick_add
+from planner_desktop.domain.commands import (
+    QuickAddCommand,
+    execute_quick_add,
+    normalize_priority,
+)
+from planner_desktop.domain.quick_parse import parse_natural
 from planner_desktop.repositories import TaskRepository
+from planner_desktop.repositories.daily_task_repository import (
+    InMemoryDailyTaskRepository,
+)
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
+from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.viewmodels.task_rows import (
     editor_payload,
@@ -51,6 +60,7 @@ def _header_date_text(day: date) -> str:
 class TodayViewModel(QObject):
     tasksChanged = Signal()
     dailyChanged = Signal()
+    dailyMutated = Signal()
     errorChanged = Signal()
     editorErrorChanged = Signal()
     toastMessage = Signal(str)
@@ -58,22 +68,25 @@ class TodayViewModel(QObject):
 
     def __init__(self, repository: TaskRepository | None = None,
                  parent: QObject | None = None,
-                 service: DesktopTaskService | None = None) -> None:
+                 service: DesktopTaskService | None = None,
+                 daily_service: DailyTaskService | None = None) -> None:
         """CRUD идёт через DesktopTaskService: он же ставит Calendar-операции
         в очередь, когда сервис создан с CalendarSyncStore (см. main_window).
         Старый вызов TodayViewModel(repository) работает как раньше —
-        сервис без очереди собирается автоматически."""
+        сервис без очереди собирается автоматически.
+
+        Ежедневные задачи — через DailyTaskService (общий с DailyTasksViewModel
+        в MainWindow). Без явного daily_service поднимается in-memory сервис,
+        поэтому старые вызовы TodayViewModel(repository) не ломаются."""
         super().__init__(parent)
         if service is not None:
             self._service = service
         else:
             self._service = DesktopTaskService(repository or FakeTaskRepository())
         self._repository = self._service.repository
+        self._daily = daily_service or DailyTaskService(InMemoryDailyTaskRepository())
         self._error = ""
         self._editor_error = ""
-        self._daily_done: Dict[str, bool] = {
-            title: False for title in self._repository.daily_titles
-        }
 
     # ---- свойства для QML -------------------------------------------------
 
@@ -93,10 +106,25 @@ class TodayViewModel(QObject):
 
     @Property("QVariantList", notify=dailyChanged)
     def dailyTasks(self) -> List[Dict[str, Any]]:
+        """Пункты ежедневного чек-листа на сегодня с отметкой выполнения."""
         return [
-            {"title": title, "done": done}
-            for title, done in self._daily_done.items()
+            {
+                "uid": occ.task.uid,
+                "title": occ.task.title,
+                "timeLabel": occ.task.preferred_time,
+                "notes": occ.task.notes,
+                "done": occ.done,
+            }
+            for occ in self._daily.occurrences_for(date.today())
         ]
+
+    @Property(int, notify=dailyChanged)
+    def dailyTotalCount(self) -> int:
+        return len(self._daily.occurrences_for(date.today()))
+
+    @Property(int, notify=dailyChanged)
+    def dailyDoneCount(self) -> int:
+        return sum(1 for occ in self._daily.occurrences_for(date.today()) if occ.done)
 
     # ---- статистика шапки ---------------------------------------------------
 
@@ -134,9 +162,10 @@ class TodayViewModel(QObject):
     def addTask(self, title: str, notes: str, add_to_calendar: bool,
                 is_all_day: bool, date_text: str, time_text: str,
                 duration_text: str) -> bool:
-        """Quick Add. Любой невалидный ввод даёт False + errorMessage,
-        исключения наружу не выпускаются — UI не зависает."""
-        command = QuickAddCommand(
+        """Quick Add с явными полями (обратная совместимость). Любой
+        невалидный ввод даёт False + errorMessage, исключения наружу не
+        выпускаются — UI не зависает."""
+        return self._create_from_command(QuickAddCommand(
             title=title,
             notes=notes,
             add_to_calendar=add_to_calendar,
@@ -144,7 +173,37 @@ class TodayViewModel(QObject):
             date_text=date_text,
             time_text=time_text,
             duration_text=duration_text,
+        ))
+
+    @Slot(str, int, result=bool)
+    def addQuick(self, text: str, priority: int) -> bool:
+        """Компактный Quick Add с лёгким разбором ввода: «Отчет 15:00»,
+        «Позвонить Ивану завтра». Разбор консервативный (см. quick_parse),
+        приоритет приходит из компактной строки."""
+        parsed = parse_natural(text)
+        return self._create_from_command(parsed.to_command(), priority=priority)
+
+    @Slot(str, str, int, bool, bool, str, str, str, result=bool)
+    def addTaskDetailed(self, title: str, notes: str, priority: int,
+                        add_to_calendar: bool, is_all_day: bool,
+                        date_text: str, time_text: str,
+                        duration_text: str) -> bool:
+        """Развёрнутый Quick Add: явные поля расписания + приоритет."""
+        return self._create_from_command(
+            QuickAddCommand(
+                title=title,
+                notes=notes,
+                add_to_calendar=add_to_calendar,
+                is_all_day=is_all_day,
+                date_text=date_text,
+                time_text=time_text,
+                duration_text=duration_text,
+            ),
+            priority=priority,
         )
+
+    def _create_from_command(self, command: QuickAddCommand,
+                             priority: int | None = None) -> bool:
         try:
             result = execute_quick_add(command)
         except Exception as exc:  # страховка: битый ввод не должен ронять UI
@@ -155,6 +214,8 @@ class TodayViewModel(QObject):
             self._set_error(" ".join(result.errors))
             return False
 
+        if priority is not None:
+            result.task.priority = normalize_priority(priority)
         self._service.create_task(result.task)
         self._set_error("")
         self._notify_mutation("Задача добавлена")
@@ -209,11 +270,20 @@ class TodayViewModel(QObject):
         """Перечитать данные (вызывается извне после чужих мутаций)."""
         self.tasksChanged.emit()
 
-    @Slot(str)
-    def toggleDaily(self, title: str) -> None:
-        if title in self._daily_done:
-            self._daily_done[title] = not self._daily_done[title]
-            self.dailyChanged.emit()
+    @Slot(str, result=bool)
+    def toggleDaily(self, uid: str) -> bool:
+        """Отметить/снять выполнение ежедневной задачи на сегодня."""
+        result = self._daily.toggle_completed(uid, date.today())
+        if result is None:
+            return False
+        self.dailyChanged.emit()
+        self.dailyMutated.emit()
+        return True
+
+    @Slot()
+    def refreshDaily(self) -> None:
+        """Перечитать ежедневные (вызывается после мутаций DailyTasksViewModel)."""
+        self.dailyChanged.emit()
 
     @Slot()
     def clearError(self) -> None:

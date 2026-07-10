@@ -4,17 +4,24 @@ import QtQuick.Layouts
 
 import "../theme"
 
-// Быстрое добавление задачи. Компактная строка ввода по умолчанию;
-// расширенные поля (заметка, календарь, дата/время) раскрываются по
-// кнопке «Детали». Вся валидация — в Python (todayVm.addTask):
-// невалидный ввод даёт видимую ошибку и никогда не «вешает» интерфейс.
+// Быстрое добавление задачи. Компактная строка по умолчанию: название +
+// приоритет + «Детали». В компактном режиме название разбирается лёгким
+// парсером (todayVm.addQuick): «Отчёт завтра 15:00» → дата/время сами.
+// Раскрытые «Детали» дают явные поля (todayVm.addTaskDetailed).
+// Enter создаёт задачу, Escape очищает/сворачивает. Вся валидация — в
+// Python: невалидный ввод даёт видимую ошибку и не «вешает» интерфейс.
 Panel {
     id: quickAdd
 
     property bool expanded: false
+    property int priority: 0
 
     implicitHeight: layout.implicitHeight + 2 * Theme.spacingLg
 
+    function focusInput() {
+        titleField.forceActiveFocus()
+        titleField.selectAll()
+    }
     function todayText() { return Qt.formatDate(new Date(), "yyyy-MM-dd") }
     function tomorrowText() {
         var d = new Date()
@@ -22,26 +29,40 @@ Panel {
         return Qt.formatDate(d, "yyyy-MM-dd")
     }
 
+    function clearForm() {
+        titleField.text = ""
+        notesField.text = ""
+        dateField.text = ""
+        timeField.text = ""
+        durationField.text = ""
+        calendarCheck.checked = false
+        allDayCheck.checked = false
+        quickAdd.priority = 0
+    }
+
     function submit() {
-        var ok = todayVm.addTask(
-            titleField.text,
-            notesField.text,
-            calendarCheck.checked,
-            allDayCheck.checked,
-            dateField.text,
-            timeField.text,
-            durationField.text
-        )
+        var ok
+        if (quickAdd.expanded) {
+            ok = todayVm.addTaskDetailed(
+                titleField.text, notesField.text, quickAdd.priority,
+                calendarCheck.checked, allDayCheck.checked,
+                dateField.text, timeField.text, durationField.text)
+        } else {
+            ok = todayVm.addQuick(titleField.text, quickAdd.priority)
+        }
         if (ok) {
-            titleField.text = ""
-            notesField.text = ""
-            dateField.text = ""
-            timeField.text = ""
-            durationField.text = ""
-            calendarCheck.checked = false
-            allDayCheck.checked = false
+            clearForm()
             titleField.forceActiveFocus()
         }
+    }
+
+    // Меню выбора приоритета — держит компактную строку лёгкой.
+    Menu {
+        id: priorityMenu
+        MenuItem { text: "Без приоритета"; onTriggered: quickAdd.priority = 0 }
+        MenuItem { text: "Низкий";        onTriggered: quickAdd.priority = 1 }
+        MenuItem { text: "Средний";       onTriggered: quickAdd.priority = 2 }
+        MenuItem { text: "Высокий";       onTriggered: quickAdd.priority = 3 }
     }
 
     ColumnLayout {
@@ -71,9 +92,55 @@ Panel {
 
             AppTextField {
                 id: titleField
-                placeholderText: "Новая задача…"
+                placeholderText: "Новая задача…  напр. «Отчёт завтра 15:00»"
                 Layout.fillWidth: true
                 onAccepted: quickAdd.submit()
+                Keys.onEscapePressed: {
+                    if (text.length > 0) quickAdd.clearForm()
+                    else quickAdd.expanded = false
+                }
+            }
+
+            // компактный выбор приоритета
+            Rectangle {
+                id: prioChip
+                Layout.alignment: Qt.AlignVCenter
+                implicitHeight: 34
+                implicitWidth: prioRow.implicitWidth + 20
+                radius: Theme.radiusSmall
+                color: prioMouse.containsMouse ? Theme.surfaceHover : Theme.surface
+                border.color: quickAdd.priority > 0 ? Theme.priorityColor(quickAdd.priority) : Theme.border
+                border.width: 1
+                Behavior on border.color { ColorAnimation { duration: 100 } }
+
+                Row {
+                    id: prioRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 10; height: 10; radius: 5
+                        color: quickAdd.priority > 0 ? Theme.priorityColor(quickAdd.priority) : Theme.textMuted
+                    }
+                    Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: quickAdd.priority > 0 ? Theme.priorityName(quickAdd.priority) : "Приоритет"
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        color: Theme.textSecondary
+                    }
+                    AppIcon {
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: "chevron-down"; size: 13; color: Theme.textMuted
+                    }
+                }
+                MouseArea {
+                    id: prioMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: priorityMenu.popup()
+                }
             }
 
             AppButton {

@@ -23,10 +23,12 @@ Item {
     property bool isLinked: false
 
     property bool hovered: hoverHandler.hovered
+    property bool selected: false
 
     signal toggled(string uid)
     signal editRequested(string uid)
     signal deleteRequested(string uid)
+    signal selectRequested(string uid)
 
     implicitHeight: Math.max(content.implicitHeight + 24, 60)
 
@@ -34,9 +36,11 @@ Item {
         id: bg
         anchors.fill: parent
         radius: Theme.radiusMedium
-        color: card.hovered ? Theme.surfaceHover : Theme.surface
-        border.color: card.hovered ? Theme.borderStrong : Theme.border
-        border.width: 1
+        color: card.selected ? Theme.accentSoft
+             : card.hovered ? Theme.surfaceHover : Theme.surface
+        border.color: card.selected ? Theme.accent
+                    : card.hovered ? Theme.borderStrong : Theme.border
+        border.width: card.selected ? 1.6 : 1
 
         Behavior on color { ColorAnimation { duration: 110 } }
         Behavior on border.color { ColorAnimation { duration: 110 } }
@@ -57,7 +61,9 @@ Item {
 
     HoverHandler { id: hoverHandler }
     TapHandler {
-        // Двойной клик по карточке — быстрый путь в редактор.
+        // Одиночный клик выделяет карточку (детали в инспекторе справа),
+        // двойной — быстрый путь в редактор.
+        onSingleTapped: card.selectRequested(card.uid)
         onDoubleTapped: card.editRequested(card.uid)
     }
 

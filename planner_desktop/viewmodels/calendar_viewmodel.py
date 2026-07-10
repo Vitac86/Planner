@@ -210,10 +210,14 @@ class CalendarViewModel(QObject):
         return self._week_start + timedelta(days=self._selected_index)
 
     def _tasks_for(self, day: date) -> List:
-        return [
+        """Задачи выбранного дня, отсортированные для агенды: сначала «весь
+        день», затем по времени начала."""
+        tasks = [
             t for t in self._repository.all()
             if t.start is not None and t.start.date() == day
         ]
+        tasks.sort(key=lambda t: (0 if t.is_all_day else 1, t.start))
+        return tasks
 
     @property
     def repository(self) -> TaskRepository:
