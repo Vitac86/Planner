@@ -11,20 +11,23 @@ Rectangle {
     property color fg: Theme.textSecondary
     property color bg: Theme.surfaceHover
     property color borderColor: bg  // по умолчанию рамка сливается с фоном
+    property int fontSize: Theme.fontCaption
 
     radius: height / 2
     color: bg
     border.color: borderColor
     border.width: 1
     implicitHeight: 22
-    implicitWidth: label.implicitWidth + 16
+    implicitWidth: label.implicitWidth + 18
     visible: text.length > 0
 
     Label {
         id: label
         anchors.centerIn: parent
         text: badge.text
-        font.pixelSize: Theme.fontCaption
+        font.pixelSize: badge.fontSize
+        font.family: Theme.fontFamily
+        font.weight: Font.Medium
         color: badge.fg
     }
 }

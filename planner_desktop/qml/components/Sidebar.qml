@@ -4,9 +4,11 @@ import QtQuick.Layouts
 
 import "../theme"
 
+// Навигационная панель приложения: бренд-марка, пункты меню с линейными
+// иконками, активным индикатором-полоской и hover-состоянием, футер.
 Rectangle {
     id: sidebar
-    implicitWidth: 224
+    implicitWidth: 236
     color: Theme.surface
 
     property int currentIndex: 0
@@ -22,57 +24,105 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spacingLg
+        anchors.topMargin: Theme.spacingXl
+        anchors.bottomMargin: Theme.spacingLg
+        anchors.leftMargin: Theme.spacingLg
+        anchors.rightMargin: Theme.spacingLg
         spacing: Theme.spacingXs
 
-        Label {
-            text: "Planner"
-            font.pixelSize: 22
-            font.weight: Font.DemiBold
-            color: Theme.textPrimary
-            Layout.bottomMargin: 2
-        }
-        Label {
-            text: "экспериментальная версия"
-            font.pixelSize: 11
-            color: Theme.textMuted
-            Layout.bottomMargin: 18
+        // ---- бренд ----
+        RowLayout {
+            spacing: Theme.spacingSm
+            Layout.leftMargin: Theme.spacingSm
+            Layout.bottomMargin: Theme.spacingXl
+
+            Rectangle {
+                implicitWidth: 36
+                implicitHeight: 36
+                radius: Theme.radiusSmall + 2
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: Theme.accentGradTop }
+                    GradientStop { position: 1.0; color: Theme.accentGradBottom }
+                }
+                AppIcon {
+                    anchors.centerIn: parent
+                    name: "sparkle"
+                    color: Theme.textOnAccent
+                    size: 20
+                }
+            }
+            ColumnLayout {
+                spacing: 0
+                Label {
+                    text: "Planner"
+                    font.pixelSize: 19
+                    font.family: Theme.fontFamily
+                    font.weight: Font.DemiBold
+                    color: Theme.textPrimary
+                }
+                Label {
+                    text: "экспериментальная версия"
+                    font.pixelSize: 11
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                }
+            }
         }
 
+        // ---- пункты навигации ----
         Repeater {
             model: [
-                { icon: "☀️", label: "Сегодня" },
-                { icon: "📅", label: "Календарь" },
-                { icon: "🕘", label: "История" },
-                { icon: "⚙️", label: "Настройки" }
+                { icon: "today", label: "Сегодня" },
+                { icon: "calendar", label: "Календарь" },
+                { icon: "history", label: "История" },
+                { icon: "settings", label: "Настройки" }
             ]
 
             delegate: Rectangle {
+                id: navItem
                 required property var modelData
                 required property int index
 
+                readonly property bool active: sidebar.currentIndex === index
+
                 Layout.fillWidth: true
-                implicitHeight: 42
+                implicitHeight: 44
                 radius: Theme.radiusSmall + 2
-                color: sidebar.currentIndex === index ? Theme.accentSoft
+                color: active ? Theme.accentSoft
                      : navMouse.containsMouse ? Theme.surfaceHover : "transparent"
 
-                Behavior on color { ColorAnimation { duration: 90 } }
+                Behavior on color { ColorAnimation { duration: 110 } }
+
+                // активный индикатор-полоска слева
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 3
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 3
+                    height: navItem.active ? 20 : 0
+                    radius: 2
+                    color: Theme.accent
+                    Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                }
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: Theme.spacingMd
+                    anchors.leftMargin: Theme.spacingLg
                     anchors.rightMargin: Theme.spacingMd
-                    spacing: Theme.spacingSm + 2
+                    spacing: Theme.spacingMd
 
-                    Label { text: modelData.icon; font.pixelSize: 15 }
+                    AppIcon {
+                        name: navItem.modelData.icon
+                        size: 20
+                        color: navItem.active ? Theme.accent : Theme.textSecondary
+                        strokeWidth: navItem.active ? 2.1 : 1.9
+                    }
                     Label {
-                        text: modelData.label
+                        text: navItem.modelData.label
                         font.pixelSize: Theme.fontBody
-                        font.weight: sidebar.currentIndex === index
-                                     ? Font.DemiBold : Font.Normal
-                        color: sidebar.currentIndex === index
-                               ? Theme.accent : Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.weight: navItem.active ? Font.DemiBold : Font.Medium
+                        color: navItem.active ? Theme.accent : Theme.textSecondary
                         Layout.fillWidth: true
                     }
                 }
@@ -82,18 +132,44 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: sidebar.pageSelected(index)
+                    onClicked: sidebar.pageSelected(navItem.index)
                 }
             }
         }
 
         Item { Layout.fillHeight: true }
 
-        Label {
-            text: "Изолированная локальная БД.\nСинк с Google — только вручную."
-            font.pixelSize: 11
-            color: Theme.textMuted
-            lineHeight: 1.2
+        // ---- футер ----
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: footerRow.implicitHeight + Theme.spacingMd * 2
+            radius: Theme.radiusSmall
+            color: Theme.surfaceMuted
+            border.color: Theme.border
+            border.width: 1
+
+            RowLayout {
+                id: footerRow
+                anchors.fill: parent
+                anchors.margins: Theme.spacingMd
+                spacing: Theme.spacingSm
+
+                AppIcon {
+                    name: "info"
+                    size: 16
+                    color: Theme.textMuted
+                    Layout.alignment: Qt.AlignTop
+                }
+                Label {
+                    text: "Изолированная локальная БД.\nСинк с Google — только вручную."
+                    font.pixelSize: 11
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    lineHeight: 1.25
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+            }
         }
     }
 }

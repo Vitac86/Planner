@@ -9,13 +9,12 @@ Item {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.spacingXl
-        spacing: Theme.spacingMd
+        spacing: Theme.spacingLg
 
-        Label {
-            text: "История"
-            font.pixelSize: Theme.fontDisplay
-            font.weight: Font.DemiBold
-            color: Theme.textPrimary
+        PageHeader {
+            title: "История"
+            subtitle: "Журнал выполненных задач"
+            Layout.fillWidth: true
         }
 
         Panel {

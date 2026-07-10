@@ -16,34 +16,18 @@ Item {
         spacing: Theme.spacingLg
 
         // ---- Шапка: заголовок недели + навигация ----
-        RowLayout {
+        PageHeader {
+            title: "Календарь"
+            subtitle: calendarVm.weekTitle
             Layout.fillWidth: true
-            spacing: Theme.spacingSm
-
-            ColumnLayout {
-                spacing: 2
-
-                Label {
-                    text: "Календарь"
-                    font.pixelSize: Theme.fontDisplay
-                    font.weight: Font.DemiBold
-                    color: Theme.textPrimary
-                }
-                Label {
-                    text: calendarVm.weekTitle
-                    font.pixelSize: Theme.fontBody
-                    color: Theme.textMuted
-                }
-            }
-            Item { Layout.fillWidth: true }
 
             AppButton {
-                text: "‹"
                 variant: "secondary"
+                iconName: "chevron-left"
                 onClicked: calendarVm.previousWeek()
                 ToolTip.visible: hovered
                 ToolTip.text: "Предыдущая неделя"
-                ToolTip.delay: 600
+                ToolTip.delay: 500
             }
             AppButton {
                 text: "Сегодня"
@@ -51,16 +35,17 @@ Item {
                 onClicked: calendarVm.goToToday()
             }
             AppButton {
-                text: "›"
                 variant: "secondary"
+                iconName: "chevron-right"
                 onClicked: calendarVm.nextWeek()
                 ToolTip.visible: hovered
                 ToolTip.text: "Следующая неделя"
-                ToolTip.delay: 600
+                ToolTip.delay: 500
             }
             AppButton {
-                text: "＋ Задача"
+                text: "Задача"
                 variant: "primary"
+                iconName: "plus"
                 onClicked: editorDialog.openForCreate(calendarVm.selectedDateText)
             }
         }
@@ -72,48 +57,54 @@ Item {
 
             Repeater {
                 model: calendarVm.weekDays
-                delegate: Rectangle {
+                delegate: Panel {
+                    id: dayCell
                     required property var modelData
                     required property int index
 
                     Layout.fillWidth: true
-                    implicitHeight: 92
+                    implicitHeight: 96
                     radius: Theme.radiusMedium
                     color: modelData.isSelected ? Theme.accentSoft
                          : dayMouse.containsMouse ? Theme.surfaceHover : Theme.surface
-                    border.color: modelData.isToday ? Theme.accent
-                                : modelData.isSelected ? Theme.accentSoftBorder : Theme.border
-                    border.width: modelData.isToday ? 2 : 1
-
-                    Behavior on color { ColorAnimation { duration: 90 } }
+                    borderColor: modelData.isToday ? Theme.accent
+                               : modelData.isSelected ? Theme.accentSoftBorder : Theme.border
+                    borderWidth: modelData.isToday ? 2 : 1
+                    elevationOpacity: modelData.isSelected ? 0.16 : Theme.elevCardOpacity
+                    elevationY: modelData.isSelected ? 8 : Theme.elevCardY
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: Theme.spacingSm + 2
+                        anchors.margins: Theme.spacingMd
                         spacing: 2
 
                         Label {
-                            text: modelData.label
+                            text: dayCell.modelData.label.toUpperCase()
                             font.pixelSize: Theme.fontCaption
-                            color: modelData.isSelected ? Theme.accent : Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.5
+                            color: dayCell.modelData.isSelected ? Theme.accent : Theme.textMuted
                         }
                         Label {
-                            text: modelData.dateText
-                            font.pixelSize: 16
+                            text: dayCell.modelData.dateText
+                            font.pixelSize: 17
+                            font.family: Theme.fontFamily
                             font.weight: Font.DemiBold
-                            color: modelData.isToday ? Theme.accent : Theme.textPrimary
+                            color: dayCell.modelData.isToday ? Theme.accent : Theme.textPrimary
                         }
                         Item { Layout.fillHeight: true }
                         Badge {
-                            visible: modelData.taskCount > 0
-                            text: String(modelData.taskCount)
-                            fg: modelData.isSelected ? Theme.accent : Theme.textSecondary
-                            bg: modelData.isSelected ? Theme.surface : Theme.surfacePressed
+                            visible: dayCell.modelData.taskCount > 0
+                            text: String(dayCell.modelData.taskCount)
+                            fg: dayCell.modelData.isSelected ? Theme.accent : Theme.textSecondary
+                            bg: dayCell.modelData.isSelected ? Theme.surface : Theme.surfacePressed
                         }
                         Label {
-                            visible: modelData.taskCount === 0
+                            visible: dayCell.modelData.taskCount === 0
                             text: "—"
                             font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
                             color: Theme.textMuted
                             opacity: 0.6
                         }
@@ -124,7 +115,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: calendarVm.selectDay(index)
+                        onClicked: calendarVm.selectDay(dayCell.index)
                     }
                 }
             }
@@ -134,6 +125,7 @@ Item {
         SectionHeader {
             title: calendarVm.selectedDayTitle
             count: calendarVm.selectedDayTasks.length
+            Layout.fillWidth: true
         }
 
         Panel {
@@ -172,7 +164,7 @@ Item {
                 visible: calendarVm.selectedDayTasks.length === 0
                 glyph: "📅"
                 text: "На этот день задач нет"
-                hint: "Нажмите «＋ Задача», чтобы запланировать задачу на выбранный день"
+                hint: "Нажмите «Задача», чтобы запланировать задачу на выбранный день"
             }
         }
     }

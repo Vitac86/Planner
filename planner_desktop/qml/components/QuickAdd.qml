@@ -4,10 +4,14 @@ import QtQuick.Layouts
 
 import "../theme"
 
-// Быстрое добавление задачи. Вся валидация — в Python (todayVm.addTask):
+// Быстрое добавление задачи. Компактная строка ввода по умолчанию;
+// расширенные поля (заметка, календарь, дата/время) раскрываются по
+// кнопке «Детали». Вся валидация — в Python (todayVm.addTask):
 // невалидный ввод даёт видимую ошибку и никогда не «вешает» интерфейс.
 Panel {
     id: quickAdd
+
+    property bool expanded: false
 
     implicitHeight: layout.implicitHeight + 2 * Theme.spacingLg
 
@@ -44,87 +48,119 @@ Panel {
         id: layout
         anchors.fill: parent
         anchors.margins: Theme.spacingLg
-        spacing: Theme.spacingSm
+        spacing: Theme.spacingMd
 
+        // ---- компактная строка ----
         RowLayout {
             spacing: Theme.spacingSm
             Layout.fillWidth: true
 
-            TextField {
+            Rectangle {
+                Layout.alignment: Qt.AlignVCenter
+                implicitWidth: 34
+                implicitHeight: 34
+                radius: Theme.radiusSmall
+                color: Theme.accentSoft
+                AppIcon {
+                    anchors.centerIn: parent
+                    name: "plus"
+                    color: Theme.accent
+                    size: 20
+                }
+            }
+
+            AppTextField {
                 id: titleField
                 placeholderText: "Новая задача…"
-                font.pixelSize: Theme.fontBody
                 Layout.fillWidth: true
                 onAccepted: quickAdd.submit()
+            }
+
+            AppButton {
+                text: quickAdd.expanded ? "Свернуть" : "Детали"
+                variant: "ghost"
+                iconName: quickAdd.expanded ? "chevron-down" : "note"
+                onClicked: quickAdd.expanded = !quickAdd.expanded
             }
             AppButton {
                 text: "Добавить"
                 variant: "primary"
+                iconName: "plus"
                 onClicked: quickAdd.submit()
             }
         }
 
-        TextField {
-            id: notesField
-            placeholderText: "Заметка (необязательно)"
-            font.pixelSize: Theme.fontBody
-            Layout.fillWidth: true
-        }
-
-        RowLayout {
+        // ---- расширенные поля ----
+        ColumnLayout {
+            id: details
+            visible: quickAdd.expanded
             spacing: Theme.spacingMd
             Layout.fillWidth: true
+            opacity: visible ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
 
-            CheckBox {
-                id: calendarCheck
-                text: "Добавить в календарь"
-                font.pixelSize: Theme.fontBody
+            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+            AppTextField {
+                id: notesField
+                placeholderText: "Заметка (необязательно)"
+                Layout.fillWidth: true
             }
-            CheckBox {
-                id: allDayCheck
-                text: "Весь день"
+
+            RowLayout {
+                spacing: Theme.spacingMd
+                Layout.fillWidth: true
+
+                CheckBox {
+                    id: calendarCheck
+                    text: "Добавить в календарь"
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                }
+                CheckBox {
+                    id: allDayCheck
+                    text: "Весь день"
+                    visible: calendarCheck.checked
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                }
+                Item { Layout.fillWidth: true }
+            }
+
+            RowLayout {
+                spacing: Theme.spacingSm
                 visible: calendarCheck.checked
-                font.pixelSize: Theme.fontBody
-            }
-            Item { Layout.fillWidth: true }
-        }
+                Layout.fillWidth: true
 
-        RowLayout {
-            spacing: Theme.spacingSm
-            visible: calendarCheck.checked
-            Layout.fillWidth: true
-
-            TextField {
-                id: dateField
-                placeholderText: "Дата: ГГГГ-ММ-ДД"
-                font.pixelSize: Theme.fontBody
-                Layout.preferredWidth: 165
+                AppTextField {
+                    id: dateField
+                    placeholderText: "ГГГГ-ММ-ДД"
+                    Layout.preferredWidth: 150
+                }
+                AppButton {
+                    text: "Сегодня"
+                    variant: "secondary"
+                    onClicked: dateField.text = quickAdd.todayText()
+                }
+                AppButton {
+                    text: "Завтра"
+                    variant: "secondary"
+                    onClicked: dateField.text = quickAdd.tomorrowText()
+                }
+                AppTextField {
+                    id: timeField
+                    placeholderText: "ЧЧ:ММ"
+                    enabled: !allDayCheck.checked
+                    Layout.preferredWidth: 120
+                }
+                AppTextField {
+                    id: durationField
+                    placeholderText: "Длит., мин"
+                    enabled: !allDayCheck.checked
+                    Layout.preferredWidth: 110
+                }
+                Item { Layout.fillWidth: true }
             }
-            AppButton {
-                text: "Сегодня"
-                variant: "ghost"
-                onClicked: dateField.text = quickAdd.todayText()
-            }
-            AppButton {
-                text: "Завтра"
-                variant: "ghost"
-                onClicked: dateField.text = quickAdd.tomorrowText()
-            }
-            TextField {
-                id: timeField
-                placeholderText: "Время: ЧЧ:ММ"
-                enabled: !allDayCheck.checked
-                font.pixelSize: Theme.fontBody
-                Layout.preferredWidth: 135
-            }
-            TextField {
-                id: durationField
-                placeholderText: "Длит., мин"
-                enabled: !allDayCheck.checked
-                font.pixelSize: Theme.fontBody
-                Layout.preferredWidth: 110
-            }
-            Item { Layout.fillWidth: true }
         }
 
         Label {
@@ -132,6 +168,7 @@ Panel {
             visible: todayVm.errorMessage.length > 0
             color: Theme.danger
             font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }

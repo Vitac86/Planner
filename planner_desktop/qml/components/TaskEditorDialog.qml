@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.Basic as B
 import QtQuick.Layouts
+import QtQuick.Effects
 
 import "../theme"
 
@@ -24,11 +26,39 @@ Dialog {
     padding: Theme.spacingXl
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+    enter: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 150 }
+            NumberAnimation { property: "scale"; from: 0.96; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
+        }
+    }
+    exit: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: 120 }
+            NumberAnimation { property: "scale"; from: 1.0; to: 0.98; duration: 120; easing.type: Easing.InCubic }
+        }
+    }
+
+    Overlay.modal: Rectangle {
+        color: Qt.rgba(0.09, 0.10, 0.16, 0.42)
+        Behavior on opacity { NumberAnimation { duration: 140 } }
+    }
+
     background: Rectangle {
         radius: Theme.radiusLarge
         color: Theme.surface
         border.color: Theme.border
         border.width: 1
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: Theme.shadowColor
+            blurMax: Theme.shadowBlurMax
+            shadowBlur: Theme.elevDialogBlur
+            shadowVerticalOffset: Theme.elevDialogY
+            shadowOpacity: Theme.elevDialogOpacity
+            autoPaddingEnabled: true
+        }
     }
 
     function todayText() { return Qt.formatDate(new Date(), "yyyy-MM-dd") }
@@ -97,31 +127,70 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: Theme.spacingMd
 
-        Label {
-            text: dialog.isEdit ? "Редактировать задачу" : "Новая задача"
-            font.pixelSize: Theme.fontTitle
-            font.weight: Font.DemiBold
-            color: Theme.textPrimary
+        RowLayout {
+            spacing: Theme.spacingSm
+            Layout.fillWidth: true
+
+            Rectangle {
+                implicitWidth: 34
+                implicitHeight: 34
+                radius: Theme.radiusSmall
+                color: Theme.accentSoft
+                AppIcon {
+                    anchors.centerIn: parent
+                    name: dialog.isEdit ? "edit" : "plus"
+                    color: Theme.accent
+                    size: 19
+                }
+            }
+            Label {
+                text: dialog.isEdit ? "Редактировать задачу" : "Новая задача"
+                font.pixelSize: Theme.fontTitle
+                font.family: Theme.fontFamily
+                font.weight: Font.DemiBold
+                color: Theme.textPrimary
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Item { Layout.fillWidth: true }
+            IconButton {
+                iconName: "close"
+                tip: "Закрыть"
+                onClicked: dialog.close()
+            }
         }
 
-        TextField {
+        AppTextField {
             id: titleField
             placeholderText: "Название задачи"
-            font.pixelSize: Theme.fontBody
             Layout.fillWidth: true
             onAccepted: dialog.submit()
         }
 
-        ScrollView {
+        Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 76
-            clip: true
+            Layout.preferredHeight: 82
+            radius: Theme.radiusSmall
+            color: Theme.surface
+            border.color: notesArea.activeFocus ? Theme.accent : Theme.border
+            border.width: notesArea.activeFocus ? 1.6 : 1
+            Behavior on border.color { ColorAnimation { duration: 100 } }
 
-            TextArea {
-                id: notesArea
-                placeholderText: "Заметки (необязательно)"
-                wrapMode: TextArea.Wrap
-                font.pixelSize: Theme.fontBody
+            ScrollView {
+                anchors.fill: parent
+                anchors.margins: 3
+                clip: true
+
+                B.TextArea {
+                    id: notesArea
+                    placeholderText: "Заметки (необязательно)"
+                    placeholderTextColor: Theme.textMuted
+                    wrapMode: TextArea.Wrap
+                    selectByMouse: true
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.textPrimary
+                    background: null
+                }
             }
         }
 
@@ -130,8 +199,9 @@ Dialog {
             Layout.fillWidth: true
 
             Label {
-                text: "Приоритет:"
+                text: "Приоритет"
                 font.pixelSize: Theme.fontBody
+                font.family: Theme.fontFamily
                 color: Theme.textSecondary
             }
             ComboBox {
@@ -139,6 +209,7 @@ Dialog {
                 model: Theme.priorityNames
                 Layout.preferredWidth: 190
                 font.pixelSize: Theme.fontBody
+                font.family: Theme.fontFamily
             }
             Item { Layout.fillWidth: true }
             CheckBox {
@@ -146,6 +217,7 @@ Dialog {
                 text: "Выполнено"
                 visible: dialog.isEdit
                 font.pixelSize: Theme.fontBody
+                font.family: Theme.fontFamily
             }
         }
 
@@ -163,12 +235,14 @@ Dialog {
                 id: scheduledCheck
                 text: "Запланировать (попадёт в календарь)"
                 font.pixelSize: Theme.fontBody
+                font.family: Theme.fontFamily
             }
             CheckBox {
                 id: allDayCheck
                 text: "Весь день"
                 visible: scheduledCheck.checked
                 font.pixelSize: Theme.fontBody
+                font.family: Theme.fontFamily
             }
             Item { Layout.fillWidth: true }
         }
@@ -180,35 +254,32 @@ Dialog {
             rowSpacing: Theme.spacingSm
             Layout.fillWidth: true
 
-            TextField {
+            AppTextField {
                 id: dateField
                 placeholderText: "Дата: ГГГГ-ММ-ДД"
-                font.pixelSize: Theme.fontBody
                 Layout.preferredWidth: 170
             }
             AppButton {
                 text: "Сегодня"
-                variant: "ghost"
+                variant: "secondary"
                 onClicked: dateField.text = dialog.todayText()
             }
             AppButton {
                 text: "Завтра"
-                variant: "ghost"
+                variant: "secondary"
                 onClicked: dateField.text = dialog.tomorrowText()
             }
 
-            TextField {
+            AppTextField {
                 id: timeField
                 placeholderText: "Время: ЧЧ:ММ"
                 enabled: !allDayCheck.checked
-                font.pixelSize: Theme.fontBody
                 Layout.preferredWidth: 170
             }
-            TextField {
+            AppTextField {
                 id: durationField
                 placeholderText: "Длительность, мин"
                 enabled: !allDayCheck.checked
-                font.pixelSize: Theme.fontBody
                 Layout.preferredWidth: 170
                 Layout.columnSpan: 2
             }
@@ -219,6 +290,7 @@ Dialog {
             text: "⚠ Это экземпляр повторяющегося события Google Calendar: "
                   + "снять дату (отвязать от календаря) у него нельзя."
             font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
             color: Theme.warningText
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
@@ -228,6 +300,7 @@ Dialog {
             text: dialog.vm ? dialog.vm.editorError : ""
             visible: text.length > 0
             font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
             color: Theme.danger
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
@@ -247,6 +320,7 @@ Dialog {
             AppButton {
                 text: dialog.isEdit ? "Сохранить" : "Создать"
                 variant: "primary"
+                iconName: dialog.isEdit ? "check" : "plus"
                 onClicked: dialog.submit()
             }
         }
