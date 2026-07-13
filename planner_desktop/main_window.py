@@ -32,7 +32,9 @@ def _build_services() -> tuple[DesktopTaskService, DailyTaskService]:
     """Сервисы задач и ежедневных задач поверх SQLite (app_desktop.db).
 
     Календарная очередь и ежедневные задачи живут в той же изолированной
-    БД: сетевых вызовов нет, реальный Google-шлюз ещё не подключён.
+    БД. Сетевых вызовов при сборке сервисов нет: реальный Google-шлюз
+    строится лениво внутри ManualSyncService и только по явному действию
+    пользователя (кнопка синка в настройках).
 
     PLANNER_DESKTOP_DEMO=1 включает фейковые in-memory репозитории с
     демо-данными — ничего не пишется на диск. Старый Planner/app.db не
@@ -73,14 +75,16 @@ class MainWindow:
         self.calendar_viewmodel = CalendarViewModel(
             service=self.service, daily_service=self.daily_service)
         self.settings_viewmodel = SettingsViewModel(
-            self.service, daily_service=self.daily_service)
+            self.service, daily_service=self.daily_service,
+            manual_sync_service=self._build_manual_sync_service())
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
 
         # Мутация задач на одной странице освежает остальные. Петли нет:
         # refresh() эмитит только *Changed-сигналы, а не tasksMutated.
+        # Настройки — тоже мутатор: pull ручного синка меняет задачи.
         task_mutators = (self.today_viewmodel, self.calendar_viewmodel,
-                         self.history_viewmodel)
+                         self.history_viewmodel, self.settings_viewmodel)
         task_listeners = (self.today_viewmodel, self.calendar_viewmodel,
                           self.settings_viewmodel, self.history_viewmodel)
         for mutator in task_mutators:
@@ -107,6 +111,27 @@ class MainWindow:
         context.setContextProperty("settingsVm", self.settings_viewmodel)
         context.setContextProperty("dailyVm", self.daily_viewmodel)
         context.setContextProperty("historyVm", self.history_viewmodel)
+
+    def _build_manual_sync_service(self):
+        """ManualSyncService для кнопки «Синхронизировать сейчас».
+
+        Провайдер шлюза ленивый (google_auth.build_real_gateway): ни OAuth,
+        ни сети при создании окна — только при явном нажатии кнопки.
+        for_db_path обязателен: run_once() выполняется в фоновом Qt-потоке,
+        а SQLite-соединения GUI-потока туда переносить нельзя — сервис
+        открывает свои на время цикла. В режимах без очереди (демо/
+        тестовая инъекция) синк недоступен.
+        """
+        if not self.service.has_sync_queue:
+            return None
+
+        from planner_desktop.sync.google_auth import build_real_gateway
+        from planner_desktop.usecases.manual_sync_service import ManualSyncService
+
+        return ManualSyncService.for_db_path(
+            self.service.calendar_queue.db_path,
+            gateway_provider=build_real_gateway,
+        )
 
     def show(self) -> None:
         self.engine.load(str(QML_DIR / "Main.qml"))

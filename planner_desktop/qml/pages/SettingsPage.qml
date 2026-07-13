@@ -249,28 +249,140 @@ ScrollView {
                     color: Theme.textMuted
                 }
 
-                // Заглушка ручного синка: настоящего Google-шлюза ещё нет.
+                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+                // ---- Подключение и ручной синк (реальный Google-шлюз) ----
+
+                // Статус подключения (только файлы изолированного профиля).
                 RowLayout {
                     Layout.fillWidth: true
-                    Layout.topMargin: Theme.spacingXs
+                    spacing: Theme.spacingSm
+
+                    Rectangle {
+                        implicitWidth: 22
+                        implicitHeight: 22
+                        radius: height / 2
+                        color: settingsVm.googleConnected
+                               ? Theme.successSoft : Theme.surfacePressed
+                        Layout.alignment: Qt.AlignTop
+                        AppIcon {
+                            anchors.centerIn: parent
+                            name: settingsVm.googleConnected ? "check" : "info"
+                            size: 13
+                            color: settingsVm.googleConnected
+                                   ? Theme.success : Theme.textMuted
+                        }
+                    }
+                    Label {
+                        text: settingsVm.connectionStatusText
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        color: Theme.textPrimary
+                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                        Layout.fillWidth: true
+                    }
+                }
+
+                // Действия: явное подключение и явный одноразовый синк.
+                RowLayout {
+                    Layout.fillWidth: true
                     spacing: Theme.spacingSm
 
                     AppButton {
-                        text: "Синхронизировать сейчас"
+                        objectName: "connectGoogleButton"
+                        visible: !settingsVm.googleConnected
+                        text: settingsVm.connectRunning
+                              ? "Ожидание входа в браузере…"
+                              : "Подключить Google Calendar"
+                        variant: "primary"
+                        iconName: "plus"
+                        loading: settingsVm.connectRunning
+                        enabled: settingsVm.connectEnabled
+                        onClicked: settingsVm.connectGoogle()
+                        ToolTip.visible: hovered && !settingsVm.hasClientSecret
+                        ToolTip.text: "Сначала положите client_secret.json в:\n"
+                                      + settingsVm.clientSecretPath
+                    }
+                    AppButton {
+                        objectName: "syncNowButton"
+                        visible: settingsVm.googleConnected
+                        text: settingsVm.syncRunning
+                              ? "Синхронизация…" : "Синхронизировать сейчас"
                         variant: "primary"
                         iconName: "refresh"
+                        loading: settingsVm.syncRunning
                         enabled: settingsVm.manualSyncEnabled
-                        ToolTip.visible: hovered
-                        ToolTip.text: settingsVm.manualSyncNote
+                        onClicked: settingsVm.syncNow()
+                    }
+                    BusyIndicator {
+                        visible: settingsVm.syncBusy
+                        running: settingsVm.syncBusy
+                        implicitWidth: 24
+                        implicitHeight: 24
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+
+                // Сводка последнего синка + ошибка (без токенов).
+                GridLayout {
+                    visible: settingsVm.googleConnected
+                             && (settingsVm.lastSyncSummary.length > 0
+                                 || settingsVm.lastSyncAt !== "—")
+                    columns: 2
+                    columnSpacing: Theme.spacingLg
+                    rowSpacing: Theme.spacingSm
+                    Layout.fillWidth: true
+
+                    Label {
+                        text: "Последний успешный синк:"
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        color: Theme.textSecondary
                     }
                     Label {
-                        text: settingsVm.manualSyncNote
-                        font.pixelSize: Theme.fontCaption
+                        text: settingsVm.lastSyncAt
+                        font.pixelSize: Theme.fontBody
                         font.family: Theme.fontFamily
-                        color: Theme.textMuted
+                        font.weight: Font.DemiBold
+                        color: Theme.textPrimary
+                    }
+
+                    Label {
+                        visible: settingsVm.lastSyncSummary.length > 0
+                        text: "Итог:"
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        color: Theme.textSecondary
+                    }
+                    Label {
+                        visible: settingsVm.lastSyncSummary.length > 0
+                        text: settingsVm.lastSyncSummary
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        color: Theme.textPrimary
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
+                }
+
+                Label {
+                    objectName: "syncErrorLabel"
+                    visible: settingsVm.lastSyncError.length > 0
+                    text: settingsVm.lastSyncError
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.danger
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: settingsVm.manualSyncNote
+                    font.pixelSize: Theme.fontCaption
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
                 }
             }
         }

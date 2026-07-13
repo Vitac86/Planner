@@ -230,6 +230,11 @@ class DesktopTaskService:
     def has_sync_queue(self) -> bool:
         return self._queue is not None
 
+    @property
+    def calendar_queue(self) -> Optional[CalendarSyncStore]:
+        """Локальная очередь Calendar-операций (для ManualSyncService)."""
+        return self._queue
+
     def count_pending_ops(self) -> int:
         return self._queue.count_pending_ops() if self._queue is not None else 0
 
@@ -255,6 +260,10 @@ class DesktopTaskService:
 
     def sync_cursor(self) -> Optional[str]:
         return self._queue.get_sync_cursor() if self._queue is not None else None
+
+    def get_sync_state(self, key: str) -> Optional[str]:
+        """Значение из desktop_sync_state (сводка последнего синка и т.п.)."""
+        return self._queue.get_state(key) if self._queue is not None else None
 
     # ---- диагностика (для панели «Настройки») -----------------------------------
 

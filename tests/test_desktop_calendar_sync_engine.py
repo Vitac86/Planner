@@ -451,13 +451,46 @@ FORBIDDEN_IMPORT = re.compile(
     re.MULTILINE,
 )
 
+# Единственное разрешённое место google-импортов — назначенный адаптер
+# авторизации, и только ЛЕНИВО (внутри функций, т.е. с отступом): импорт
+# модуля не должен тянуть Google-клиенты. Для него запрещаем только
+# top-level импорты (колонка 0). Модули старого приложения запрещены и там.
+GOOGLE_ADAPTER_FILENAME = "google_auth.py"
+FORBIDDEN_TOP_LEVEL_GOOGLE_IMPORT = re.compile(
+    r"^(?:from|import)\s+"
+    r"(?:googleapiclient|google_auth_oauthlib|google_auth_httplib2|google"
+    r"|requests|httplib2)\b",
+    re.MULTILINE,
+)
+FORBIDDEN_OLD_APP_IMPORT = re.compile(
+    r"^\s*(?:from|import)\s+(?:models|services|storage|core|ui|main)\b",
+    re.MULTILINE,
+)
+
 
 def test_desktop_sync_packages_import_no_google_and_no_old_app():
-    """Ни Google-клиентов/OAuth, ни модулей старого Flet-приложения."""
+    """Ни Google-клиентов/OAuth, ни модулей старого Flet-приложения.
+
+    Исключение: sync/google_auth.py — назначенный адаптер OAuth; ему
+    разрешены google-импорты, но только ленивые (внутри функций), чтобы
+    импорт модуля не запускал ни OAuth, ни сети.
+    """
     root = Path(__file__).resolve().parent.parent / "planner_desktop"
     for package in ("sync", "storage", "usecases"):
         for source_file in sorted((root / package).glob("*.py")):
             source = source_file.read_text(encoding="utf-8")
+            if source_file.name == GOOGLE_ADAPTER_FILENAME:
+                match = FORBIDDEN_TOP_LEVEL_GOOGLE_IMPORT.search(source)
+                assert match is None, (
+                    f"{package}/{source_file.name}: google-импорт должен быть "
+                    f"ленивым (внутри функции), найден top-level {match.group()!r}"
+                )
+                match = FORBIDDEN_OLD_APP_IMPORT.search(source)
+                assert match is None, (
+                    f"{package}/{source_file.name}: запрещённый импорт "
+                    f"старого приложения {match.group()!r}"
+                )
+                continue
             match = FORBIDDEN_IMPORT.search(source)
             assert match is None, (
                 f"{package}/{source_file.name}: запрещённый импорт {match.group()!r}"

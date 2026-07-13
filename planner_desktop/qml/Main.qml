@@ -199,4 +199,8 @@ ApplicationWindow {
         target: historyVm
         function onToastMessage(text) { toast.show(text) }
     }
+    Connections {
+        target: settingsVm
+        function onToastMessage(text) { toast.show(text) }
+    }
 }

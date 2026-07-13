@@ -1,0 +1,222 @@
+"""Ручной запуск одного цикла Calendar-синка (use-case-слой десктопа).
+
+Единственная точка, откуда выполняется реальный синк: её делят кнопка
+«Синхронизировать сейчас» в настройках и CLI
+``python -m scripts.desktop_calendar_sync_once --real-google`` — логика
+не дублируется.
+
+Гарантии:
+
+- ровно один цикл push+pull за вызов, САМ ПО СЕБЕ сервис никогда не
+  запускается (ни таймеров, ни фоновых потоков здесь нет);
+- два одновременных запуска исключены: неблокирующий lock, второй вызов
+  честно возвращает ошибку «уже выполняется»;
+- результат структурный (ManualSyncResult) — сколько ушло/пришло,
+  очередь до/после, dead-letter, обновился ли курсор, человекочитаемая
+  ошибка; исключения наружу не летят;
+- шлюз строится лениво через инъецированный ``gateway_provider`` —
+  импорт модуля и создание сервиса сети не делают; в тестах провайдер
+  отдаёт FakeCalendarGateway;
+- сводка последнего синка сохраняется в desktop_sync_state
+  (ключи LAST_SYNC_*_KEY) — «Настройки» показывают её после перезапуска.
+
+QML/Qt здесь нет — модуль чистый Python и тестируется без окна.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Optional, Union
+
+from planner_desktop.domain.task import utc_now
+from planner_desktop.sync.calendar_sync_engine import CalendarSyncEngine
+
+if TYPE_CHECKING:
+    from planner_desktop.repositories import TaskRepository
+    from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
+
+logger = logging.getLogger(__name__)
+
+SYNC_ALREADY_RUNNING_ERROR = "Синхронизация уже выполняется — дождитесь завершения."
+
+LAST_SYNC_AT_KEY = "last_sync_at"
+LAST_SYNC_SUMMARY_KEY = "last_sync_summary"
+LAST_SYNC_ERROR_KEY = "last_sync_error"
+
+
+@dataclass
+class ManualSyncResult:
+    """Итог одного ручного цикла синка (для UI и CLI)."""
+
+    ok: bool
+    pushed: int = 0
+    pulled: int = 0
+    pending_before: int = 0
+    pending_after: int = 0
+    terminal_ops: int = 0
+    cursor_updated: bool = False
+    error: str = ""
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    @property
+    def summary(self) -> str:
+        """Короткая человекочитаемая сводка для настроек/CLI."""
+        if not self.ok:
+            return self.error or "Синхронизация не выполнена."
+        parts = [f"отправлено {self.pushed}", f"получено {self.pulled}"]
+        if self.pending_after:
+            parts.append(f"в очереди осталось {self.pending_after}")
+        if self.terminal_ops:
+            parts.append(f"dead-letter: {self.terminal_ops}")
+        return "Синхронизировано: " + ", ".join(parts) + "."
+
+
+class ManualSyncService:
+    """Один цикл push+pull по требованию пользователя. Без автозапуска.
+
+    Два режима владения соединениями:
+
+    - прямая инъекция ``(repository, store)`` — для тестов и однопоточных
+      сценариев: соединения живут снаружи, сервис их не закрывает;
+    - ``ManualSyncService.for_db_path(...)`` — для GUI: run_once() выполняется
+      в фоновом потоке, а SQLite-соединения нельзя переносить между потоками,
+      поэтому сервис открывает СВОИ соединения в потоке выполнения на время
+      одного цикла и закрывает их в finally.
+    """
+
+    def __init__(
+        self,
+        repository: Optional["TaskRepository"],
+        store: Optional["CalendarSyncStore"],
+        gateway_provider: Callable[[], object],
+        *,
+        clock: Callable[[], datetime] = utc_now,
+    ) -> None:
+        self._repository = repository
+        self._store = store
+        self._gateway_provider = gateway_provider
+        self._clock = clock
+        self._db_path: Optional[Path] = None
+        self._lock = threading.Lock()
+
+    @classmethod
+    def for_db_path(
+        cls,
+        db_path: Union[Path, str],
+        gateway_provider: Callable[[], object],
+        *,
+        clock: Callable[[], datetime] = utc_now,
+    ) -> "ManualSyncService":
+        """Сервис, открывающий соединения per-run в потоке выполнения
+        (безопасно для запуска из фонового Qt-потока)."""
+        service = cls(None, None, gateway_provider, clock=clock)
+        service._db_path = Path(db_path)
+        return service
+
+    @property
+    def is_running(self) -> bool:
+        return self._lock.locked()
+
+    def run_once(self) -> ManualSyncResult:
+        """Выполнить ровно один цикл синка; никогда не бросает исключений."""
+        if not self._lock.acquire(blocking=False):
+            return ManualSyncResult(ok=False, error=SYNC_ALREADY_RUNNING_ERROR)
+        try:
+            if self._db_path is not None:
+                return self._run_with_own_connections()
+            return self._run_cycle(self._repository, self._store)
+        finally:
+            self._lock.release()
+
+    # ---- внутреннее -------------------------------------------------------------
+
+    def _run_with_own_connections(self) -> ManualSyncResult:
+        """Свежие соединения в ТЕКУЩЕМ потоке (sqlite3 не переносится
+        между потоками); закрываются всегда, даже при ошибке."""
+        from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
+        from planner_desktop.storage.sqlite_task_repository import (
+            SQLiteTaskRepository,
+        )
+
+        repository = SQLiteTaskRepository(self._db_path)
+        try:
+            store = CalendarSyncStore(self._db_path, clock=self._clock)
+            try:
+                return self._run_cycle(repository, store)
+            finally:
+                store.close()
+        finally:
+            repository.close()
+
+    def _run_cycle(self, repository: "TaskRepository",
+                   store: "CalendarSyncStore") -> ManualSyncResult:
+        started = self._clock()
+        pending_before = store.count_pending_ops()
+        cursor_before = store.get_sync_cursor()
+
+        try:
+            gateway = self._gateway_provider()
+        except Exception as exc:  # нет токена/секрета и т.п. — честно в UI
+            return self._finish(store, ManualSyncResult(
+                ok=False, pending_before=pending_before,
+                pending_after=pending_before,
+                terminal_ops=store.count_terminal_ops(),
+                error=str(exc), started_at=started,
+            ))
+
+        engine = CalendarSyncEngine(repository, store, gateway)
+        try:
+            pushed = engine.push_pending()
+            pulled = engine.pull_remote_changes()
+        except Exception as exc:
+            # Ошибки отдельных операций push гасятся очередью (requeue/
+            # dead-letter); сюда попадает падение pull-а или неожиданное.
+            logger.exception("Ручной синк упал")
+            return self._finish(store, ManualSyncResult(
+                ok=False, pending_before=pending_before,
+                pending_after=store.count_pending_ops(),
+                terminal_ops=store.count_terminal_ops(),
+                error=f"Синхронизация прервана: {exc}",
+                started_at=started,
+            ))
+
+        cursor_after = store.get_sync_cursor()
+        return self._finish(store, ManualSyncResult(
+            ok=True,
+            pushed=pushed,
+            pulled=pulled,
+            pending_before=pending_before,
+            pending_after=store.count_pending_ops(),
+            terminal_ops=store.count_terminal_ops(),
+            cursor_updated=cursor_after != cursor_before,
+            started_at=started,
+        ))
+
+    def _finish(self, store: "CalendarSyncStore",
+                result: ManualSyncResult) -> ManualSyncResult:
+        result.finished_at = self._clock()
+        try:
+            if result.ok:
+                store.set_state(LAST_SYNC_AT_KEY,
+                                result.finished_at.isoformat())
+                store.set_state(LAST_SYNC_SUMMARY_KEY, result.summary)
+                store.set_state(LAST_SYNC_ERROR_KEY, None)
+            else:
+                store.set_state(LAST_SYNC_ERROR_KEY, result.error)
+        except Exception:  # сводка — не повод уронить результат
+            logger.exception("Не удалось сохранить сводку синка")
+        return result
+
+
+__all__ = [
+    "ManualSyncResult",
+    "ManualSyncService",
+    "SYNC_ALREADY_RUNNING_ERROR",
+    "LAST_SYNC_AT_KEY",
+    "LAST_SYNC_SUMMARY_KEY",
+    "LAST_SYNC_ERROR_KEY",
+]

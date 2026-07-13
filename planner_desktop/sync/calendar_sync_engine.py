@@ -145,7 +145,10 @@ class CalendarSyncEngine:
         self.push_pending()
         self.pull_remote_changes()
 
-    def push_pending(self, limit: int = 50) -> None:
+    def push_pending(self, limit: int = 50) -> int:
+        """Отправляет отложенные операции; возвращает число УСПЕШНЫХ push-ей
+        (requeue/dead-letter не считаются) — для сводки ручного синка."""
+        pushed = 0
         for op in self._store.list_due_ops(limit):
             try:
                 self._push_op(op)
@@ -155,12 +158,17 @@ class CalendarSyncEngine:
                 self._store.mark_terminal(op.id, str(exc))
             else:
                 self._store.remove_op(op.id)
+                pushed += 1
+        return pushed
 
-    def pull_remote_changes(self) -> None:
+    def pull_remote_changes(self) -> int:
+        """Забирает и применяет удалённые изменения; возвращает число
+        полученных событий (включая эхо собственных push-ей)."""
         batch = self._gateway.list_changes(self._store.get_sync_cursor())
         for event in batch.events:
             self._apply_remote_event(event)
         self._store.set_sync_cursor(batch.next_cursor)
+        return len(batch.events)
 
     # ---- push одной операции ------------------------------------------------------
 
