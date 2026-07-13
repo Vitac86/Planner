@@ -7,10 +7,21 @@ SQLiteDailyTaskRepository (planner_desktop/storage) — локальное хр�
 """
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import List, Optional, Protocol, Set
 
 from planner_desktop.domain.daily_task import ALL_WEEKDAYS_MASK, DailyTask
+from planner_desktop.domain.task import utc_now
+
+
+@dataclass
+class DailyCompletion:
+    """Отметка выполнения ежедневной задачи на конкретную дату (для «Истории»)."""
+
+    daily_uid: str
+    done_date: date
+    completed_at: Optional[datetime] = None
 
 
 class DailyTaskRepository(Protocol):
@@ -31,6 +42,10 @@ class DailyTaskRepository(Protocol):
     def is_completed(self, uid: str, day: date) -> bool: ...
 
     def completed_uids_for(self, day: date) -> Set[str]: ...
+
+    def all_completions(
+        self, since: Optional[date] = None
+    ) -> List[DailyCompletion]: ...
 
 
 def _seed_daily_tasks() -> List[DailyTask]:
@@ -54,8 +69,8 @@ class InMemoryDailyTaskRepository:
         for task in self._tasks:
             task.id = self._next_id
             self._next_id += 1
-        # (uid, "ГГГГ-ММ-ДД") -> отметка выполнено.
-        self._completions: Set[tuple] = set()
+        # (uid, "ГГГГ-ММ-ДД") -> момент отметки (UTC); наличие ключа = выполнено.
+        self._completions: dict = {}
 
     def add(self, task: DailyTask) -> DailyTask:
         task.id = self._next_id
@@ -86,9 +101,9 @@ class InMemoryDailyTaskRepository:
     def set_completed(self, uid: str, day: date, completed: bool) -> None:
         key = (uid, day.isoformat())
         if completed:
-            self._completions.add(key)
+            self._completions[key] = utc_now()
         else:
-            self._completions.discard(key)
+            self._completions.pop(key, None)
 
     def is_completed(self, uid: str, day: date) -> bool:
         return (uid, day.isoformat()) in self._completions
@@ -96,3 +111,15 @@ class InMemoryDailyTaskRepository:
     def completed_uids_for(self, day: date) -> Set[str]:
         stamp = day.isoformat()
         return {uid for (uid, d) in self._completions if d == stamp}
+
+    def all_completions(
+        self, since: Optional[date] = None
+    ) -> List[DailyCompletion]:
+        result: List[DailyCompletion] = []
+        for (uid, iso), stamp in self._completions.items():
+            done = date.fromisoformat(iso)
+            if since is not None and done < since:
+                continue
+            result.append(DailyCompletion(uid, done, stamp))
+        result.sort(key=lambda c: c.done_date, reverse=True)
+        return result

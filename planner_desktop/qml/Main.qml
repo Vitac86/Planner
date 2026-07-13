@@ -97,6 +97,17 @@ ApplicationWindow {
         }
         onActivated: todayPage.deleteSelected()
     }
+    // Навигация по дням недели на «Календаре» стрелками (вне текстовых полей).
+    Shortcut {
+        sequence: "Left"
+        enabled: root.currentPage === 1 && !root._typingNow()
+        onActivated: calendarPage.selectPrevDay()
+    }
+    Shortcut {
+        sequence: "Right"
+        enabled: root.currentPage === 1 && !root._typingNow()
+        onActivated: calendarPage.selectNextDay()
+    }
 
     // ---- всплывашка «Сохранено»/«Удалено» ----
     Item {
@@ -182,6 +193,10 @@ ApplicationWindow {
     }
     Connections {
         target: dailyVm
+        function onToastMessage(text) { toast.show(text) }
+    }
+    Connections {
+        target: historyVm
         function onToastMessage(text) { toast.show(text) }
     }
 }

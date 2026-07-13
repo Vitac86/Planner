@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     is_all_day INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 0,
     completed INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
     google_calendar_event_id TEXT,
     google_calendar_etag TEXT,
     google_calendar_recurring_event_id TEXT,
@@ -101,11 +102,33 @@ CREATE TABLE IF NOT EXISTS desktop_daily_completions (
 """
 
 
+def _column_names(connection: sqlite3.Connection, table: str) -> set:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+    return {row[1] for row in rows}
+
+
+def _migrate_completed_at(connection: sqlite3.Connection) -> None:
+    """Аддитивно добавляет tasks.completed_at и заполняет его для уже
+    выполненных задач (v3 -> v4). Идемпотентно: колонка добавляется только
+    если её нет, backfill трогает лишь строки с NULL-меткой."""
+    if "completed_at" not in _column_names(connection, "tasks"):
+        connection.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
+    # Историю выполненных до миграции задач приблизительно датируем их
+    # последним изменением — лучшая доступная оценка момента выполнения.
+    connection.execute(
+        "UPDATE tasks SET completed_at = updated_at "
+        "WHERE completed = 1 AND completed_at IS NULL"
+    )
+
+
 def create_schema(connection: sqlite3.Connection) -> None:
     """Создаёт таблицы, если их ещё нет (безопасно вызывать повторно).
 
-    Единственный механизм «миграции» нового десктопа: только идемпотентные
-    CREATE IF NOT EXISTS; старый storage/migrations.py не используется.
+    «Миграции» нового десктопа: идемпотентные CREATE IF NOT EXISTS плюс
+    аддитивные ALTER-шаги (например, tasks.completed_at); старый
+    storage/migrations.py не используется, данные не переписываются
+    деструктивно.
     """
     connection.execute(CREATE_TASKS_TABLE)
     connection.execute(CREATE_PENDING_CALENDAR_OPS_TABLE)
@@ -113,5 +136,6 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_SYNC_STATE_TABLE)
     connection.execute(CREATE_DAILY_TASKS_TABLE)
     connection.execute(CREATE_DAILY_COMPLETIONS_TABLE)
+    _migrate_completed_at(connection)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

@@ -185,6 +185,29 @@ class CalendarSyncStore:
         ).fetchone()
         return int(row["n"])
 
+    def count_pending_by_op(self) -> Dict[str, int]:
+        """Разбивка ожидающих операций по типу: {'create': n, 'update': n,
+        'delete': n} — для наглядного статуса синка в «Настройках»."""
+        counts = {kind.value: 0 for kind in OpKind}
+        rows = self._connection.execute(
+            "SELECT op, COUNT(*) AS n FROM desktop_pending_calendar_ops "
+            "WHERE status = ? GROUP BY op",
+            (OpStatus.PENDING.value,),
+        ).fetchall()
+        for row in rows:
+            counts[row["op"]] = int(row["n"])
+        return counts
+
+    def latest_pending_created_at(self) -> Optional[datetime]:
+        """Время самой свежей ожидающей операции — «последнее локальное
+        изменение, ждущее синка». None, если очередь пуста."""
+        row = self._connection.execute(
+            "SELECT MAX(created_at) AS ts FROM desktop_pending_calendar_ops "
+            "WHERE status = ?",
+            (OpStatus.PENDING.value,),
+        ).fetchone()
+        return _text_to_dt(row["ts"]) if row is not None else None
+
     def list_pending_uids(self) -> set:
         """uid-ы задач с pending-операциями — для бейджей «Синк…» в списках."""
         rows = self._connection.execute(

@@ -46,6 +46,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         is_all_day=bool(row["is_all_day"]),
         priority=row["priority"],
         completed=bool(row["completed"]),
+        completed_at=_text_to_dt(row["completed_at"]),
         google_calendar_event_id=row["google_calendar_event_id"],
         google_calendar_etag=row["google_calendar_etag"],
         google_calendar_recurring_event_id=row["google_calendar_recurring_event_id"],
@@ -87,11 +88,11 @@ class SQLiteTaskRepository:
             """
             INSERT INTO tasks (
                 id, uid, title, notes, start, "end", duration_minutes,
-                is_all_day, priority, completed,
+                is_all_day, priority, completed, completed_at,
                 google_calendar_event_id, google_calendar_etag,
                 google_calendar_recurring_event_id, google_calendar_original_start,
                 updated_at, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task.id,
@@ -104,6 +105,7 @@ class SQLiteTaskRepository:
                 int(task.is_all_day),
                 task.priority,
                 int(task.completed),
+                _dt_to_text(task.completed_at),
                 task.google_calendar_event_id,
                 task.google_calendar_etag,
                 task.google_calendar_recurring_event_id,
@@ -127,6 +129,7 @@ class SQLiteTaskRepository:
             UPDATE tasks SET
                 uid = ?, title = ?, notes = ?, start = ?, "end" = ?,
                 duration_minutes = ?, is_all_day = ?, priority = ?, completed = ?,
+                completed_at = ?,
                 google_calendar_event_id = ?, google_calendar_etag = ?,
                 google_calendar_recurring_event_id = ?,
                 google_calendar_original_start = ?,
@@ -143,6 +146,7 @@ class SQLiteTaskRepository:
                 int(task.is_all_day),
                 task.priority,
                 int(task.completed),
+                _dt_to_text(task.completed_at),
                 task.google_calendar_event_id,
                 task.google_calendar_etag,
                 task.google_calendar_recurring_event_id,
@@ -193,11 +197,17 @@ class SQLiteTaskRepository:
         task = self.get(task_id)
         if task is None or task.is_deleted:
             return False
-        task.completed = completed
+        task.set_completed(completed)
         task.touch()
         self._connection.execute(
-            "UPDATE tasks SET completed = ?, updated_at = ? WHERE id = ?",
-            (int(completed), _dt_to_text(task.updated_at), task_id),
+            "UPDATE tasks SET completed = ?, completed_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (
+                int(task.completed),
+                _dt_to_text(task.completed_at),
+                _dt_to_text(task.updated_at),
+                task_id,
+            ),
         )
         self._connection.commit()
         return True
@@ -220,6 +230,20 @@ class SQLiteTaskRepository:
 
     def list_undated(self) -> List[Task]:
         return [t for t in self.list_all() if t.start is None]
+
+    # ---- диагностика (для панели «Настройки») --------------------------------
+
+    def schema_version(self) -> int:
+        """Фактическая версия схемы БД (PRAGMA user_version)."""
+        row = self._connection.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def count_active(self) -> int:
+        """Число живых (не удалённых) задач — для диагностики."""
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE deleted_at IS NULL"
+        ).fetchone()
+        return int(row["n"])
 
     # ---- совместимость с интерфейсом FakeTaskRepository ----------------------
 

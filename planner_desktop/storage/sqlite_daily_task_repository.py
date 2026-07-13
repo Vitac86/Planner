@@ -18,6 +18,7 @@ from typing import List, Optional, Set, Union
 
 from planner_desktop.domain.daily_task import DailyTask
 from planner_desktop.domain.task import utc_now
+from planner_desktop.repositories.daily_task_repository import DailyCompletion
 from planner_desktop.storage.paths import ensure_desktop_data_dir, get_desktop_db_path
 from planner_desktop.storage.schema import create_schema
 
@@ -174,3 +175,30 @@ class SQLiteDailyTaskRepository:
             (day.isoformat(),),
         ).fetchall()
         return {row["daily_uid"] for row in rows}
+
+    def all_completions(
+        self, since: Optional[date] = None
+    ) -> List[DailyCompletion]:
+        """Все отметки выполнения (для «Истории»), новые сверху. since —
+        нижняя граница по done_date включительно."""
+        if since is not None:
+            rows = self._connection.execute(
+                "SELECT daily_uid, done_date, completed_at "
+                "FROM desktop_daily_completions WHERE done_date >= ? "
+                "ORDER BY done_date DESC, completed_at DESC",
+                (since.isoformat(),),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT daily_uid, done_date, completed_at "
+                "FROM desktop_daily_completions "
+                "ORDER BY done_date DESC, completed_at DESC"
+            ).fetchall()
+        return [
+            DailyCompletion(
+                daily_uid=row["daily_uid"],
+                done_date=date.fromisoformat(row["done_date"]),
+                completed_at=_text_to_dt(row["completed_at"]),
+            )
+            for row in rows
+        ]

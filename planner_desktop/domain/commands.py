@@ -204,7 +204,7 @@ def build_task_from_editor(command: TaskEditorCommand) -> Task:
     """Новая задача из формы редактора (создание). Команда уже провалидирована."""
     task = Task(title=command.title.strip(), notes=command.notes.strip())
     task.priority = normalize_priority(command.priority)
-    task.completed = bool(command.completed)
+    task.set_completed(command.completed)
     start, end, duration, is_all_day = schedule_from_command(command)
     task.start = start
     task.end = end
@@ -223,4 +223,4 @@ def apply_editor_fields(command: TaskEditorCommand, task: Task) -> None:
     task.title = command.title.strip()
     task.notes = command.notes.strip()
     task.priority = normalize_priority(command.priority)
-    task.completed = bool(command.completed)
+    task.set_completed(command.completed)

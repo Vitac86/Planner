@@ -21,6 +21,7 @@ from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
+from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
 from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
 from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
 
@@ -69,22 +70,35 @@ class MainWindow:
         self.repository = self.service.repository
         self.today_viewmodel = TodayViewModel(
             service=self.service, daily_service=self.daily_service)
-        self.calendar_viewmodel = CalendarViewModel(service=self.service)
-        self.settings_viewmodel = SettingsViewModel(self.service)
+        self.calendar_viewmodel = CalendarViewModel(
+            service=self.service, daily_service=self.daily_service)
+        self.settings_viewmodel = SettingsViewModel(
+            self.service, daily_service=self.daily_service)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
+        self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
 
-        # Мутация на одной странице освежает остальные. Петли нет:
+        # Мутация задач на одной странице освежает остальные. Петли нет:
         # refresh() эмитит только *Changed-сигналы, а не tasksMutated.
-        self.today_viewmodel.tasksMutated.connect(self.calendar_viewmodel.refresh)
-        self.today_viewmodel.tasksMutated.connect(self.settings_viewmodel.refresh)
-        self.calendar_viewmodel.tasksMutated.connect(self.today_viewmodel.refresh)
-        self.calendar_viewmodel.tasksMutated.connect(self.settings_viewmodel.refresh)
+        task_mutators = (self.today_viewmodel, self.calendar_viewmodel,
+                         self.history_viewmodel)
+        task_listeners = (self.today_viewmodel, self.calendar_viewmodel,
+                          self.settings_viewmodel, self.history_viewmodel)
+        for mutator in task_mutators:
+            for listener in task_listeners:
+                if listener is not mutator:
+                    mutator.tasksMutated.connect(listener.refresh)
 
         # Ежедневные: правки в диалоге управления освежают чек-лист «Сегодня»
-        # и наоборот. refresh()/refreshDaily() эмитят только *Changed —
-        # без mutated, поэтому петли нет.
+        # и «Календаря» и наоборот. refresh()/refreshDaily()/setRange() эмитят
+        # только *Changed — без mutated, поэтому петли нет.
         self.daily_viewmodel.mutated.connect(self.today_viewmodel.refreshDaily)
+        self.daily_viewmodel.mutated.connect(self.calendar_viewmodel.refreshDaily)
         self.today_viewmodel.dailyMutated.connect(self.daily_viewmodel.refresh)
+        self.today_viewmodel.dailyMutated.connect(self.calendar_viewmodel.refreshDaily)
+        self.today_viewmodel.dailyMutated.connect(self.history_viewmodel.refresh)
+        self.calendar_viewmodel.dailyMutated.connect(self.today_viewmodel.refreshDaily)
+        self.calendar_viewmodel.dailyMutated.connect(self.daily_viewmodel.refresh)
+        self.calendar_viewmodel.dailyMutated.connect(self.history_viewmodel.refresh)
 
         self.engine = QQmlApplicationEngine()
         context = self.engine.rootContext()
@@ -92,6 +106,7 @@ class MainWindow:
         context.setContextProperty("calendarVm", self.calendar_viewmodel)
         context.setContextProperty("settingsVm", self.settings_viewmodel)
         context.setContextProperty("dailyVm", self.daily_viewmodel)
+        context.setContextProperty("historyVm", self.history_viewmodel)
 
     def show(self) -> None:
         self.engine.load(str(QML_DIR / "Main.qml"))

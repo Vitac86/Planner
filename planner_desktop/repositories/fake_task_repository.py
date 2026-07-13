@@ -126,7 +126,7 @@ class FakeTaskRepository:
         task = self.get(task_id)
         if task is None or task.is_deleted:
             return False
-        task.completed = completed
+        task.set_completed(completed)
         task.touch()
         return True
 
@@ -134,6 +134,16 @@ class FakeTaskRepository:
         task = self.get_by_uid(uid)
         if task is None or task.is_deleted:
             return False
-        task.completed = not task.completed
+        task.set_completed(not task.completed)
         task.touch()
         return True
+
+    # ---- диагностика (паритет с SQLiteTaskRepository) ------------------------
+
+    def schema_version(self) -> int:
+        """В памяти реальной схемы нет — отдаём текущую версию кода."""
+        from planner_desktop.storage.schema import SCHEMA_VERSION
+        return SCHEMA_VERSION
+
+    def count_active(self) -> int:
+        return len(self.all())

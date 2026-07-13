@@ -140,6 +140,47 @@ ScrollView {
                     }
                 }
 
+                // Разбивка ожидающих операций по типу (наглядный статус синка).
+                RowLayout {
+                    visible: settingsVm.hasSyncQueue
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+
+                    component OpChip: Rectangle {
+                        property string label: ""
+                        property int value: 0
+                        implicitHeight: 52
+                        Layout.fillWidth: true
+                        radius: Theme.radiusMedium
+                        color: Theme.surfaceMuted
+                        border.color: Theme.border
+                        border.width: 1
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 0
+                            Label {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: String(parent.parent.value)
+                                font.pixelSize: Theme.fontSubtitle
+                                font.family: Theme.fontFamily
+                                font.weight: Font.DemiBold
+                                color: parent.parent.value > 0 ? Theme.warningText : Theme.textPrimary
+                            }
+                            Label {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: parent.parent.label
+                                font.pixelSize: Theme.fontCaption
+                                font.family: Theme.fontFamily
+                                color: Theme.textMuted
+                            }
+                        }
+                    }
+                    OpChip { label: "создать"; value: settingsVm.pendingCreateCount }
+                    OpChip { label: "обновить"; value: settingsVm.pendingUpdateCount }
+                    OpChip { label: "удалить"; value: settingsVm.pendingDeleteCount }
+                    OpChip { label: "dead-letter"; value: settingsVm.terminalOpsCount }
+                }
+
                 GridLayout {
                     visible: settingsVm.hasSyncQueue
                     columns: 2
@@ -148,7 +189,7 @@ ScrollView {
                     Layout.fillWidth: true
 
                     Label {
-                        text: "Операций ждёт отправки:"
+                        text: "Всего операций в очереди:"
                         font.pixelSize: Theme.fontBody
                         font.family: Theme.fontFamily
                         color: Theme.textSecondary
@@ -172,18 +213,16 @@ ScrollView {
                     }
 
                     Label {
-                        text: "Dead-letter (постоянные ошибки):"
+                        text: "Последнее локальное изменение:"
                         font.pixelSize: Theme.fontBody
                         font.family: Theme.fontFamily
                         color: Theme.textSecondary
                     }
                     Label {
-                        text: String(settingsVm.terminalOpsCount)
+                        text: settingsVm.lastLocalChange
                         font.pixelSize: Theme.fontBody
                         font.family: Theme.fontFamily
-                        font.weight: Font.DemiBold
-                        color: settingsVm.terminalOpsCount > 0
-                               ? Theme.danger : Theme.textPrimary
+                        color: Theme.textPrimary
                     }
 
                     Label {
@@ -208,6 +247,124 @@ ScrollView {
                     font.pixelSize: Theme.fontBody
                     font.family: Theme.fontFamily
                     color: Theme.textMuted
+                }
+
+                // Заглушка ручного синка: настоящего Google-шлюза ещё нет.
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.spacingXs
+                    spacing: Theme.spacingSm
+
+                    AppButton {
+                        text: "Синхронизировать сейчас"
+                        variant: "primary"
+                        iconName: "refresh"
+                        enabled: settingsVm.manualSyncEnabled
+                        ToolTip.visible: hovered
+                        ToolTip.text: settingsVm.manualSyncNote
+                    }
+                    Label {
+                        text: settingsVm.manualSyncNote
+                        font.pixelSize: Theme.fontCaption
+                        font.family: Theme.fontFamily
+                        color: Theme.textMuted
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+            }
+        }
+
+        // ---- Диагностика (локально, без токенов) ----
+        Panel {
+            Layout.fillWidth: true
+            implicitHeight: diagColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: diagColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    Rectangle {
+                        implicitWidth: 36
+                        implicitHeight: 36
+                        radius: Theme.radiusSmall + 2
+                        color: Theme.surfaceMuted
+                        border.color: Theme.border
+                        border.width: 1
+                        AppIcon { anchors.centerIn: parent; name: "info"; color: Theme.textSecondary; size: 18 }
+                    }
+                    Label {
+                        text: "Диагностика"
+                        font.pixelSize: Theme.fontSubtitle
+                        font.family: Theme.fontFamily
+                        font.weight: Font.DemiBold
+                        color: Theme.textPrimary
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    Item { Layout.fillWidth: true }
+                    AppButton {
+                        id: copyButton
+                        text: copyButton.copied ? "Скопировано" : "Копировать"
+                        property bool copied: false
+                        variant: "secondary"
+                        iconName: "check"
+                        onClicked: {
+                            diagText.selectAll()
+                            diagText.copy()
+                            diagText.deselect()
+                            copyButton.copied = true
+                            copyResetTimer.restart()
+                        }
+                        Timer {
+                            id: copyResetTimer
+                            interval: 1600
+                            onTriggered: copyButton.copied = false
+                        }
+                    }
+                }
+
+                GridLayout {
+                    columns: 2
+                    columnSpacing: Theme.spacingLg
+                    rowSpacing: Theme.spacingSm
+                    Layout.fillWidth: true
+
+                    component DiagKey: Label {
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        color: Theme.textSecondary
+                    }
+                    component DiagVal: Label {
+                        font.pixelSize: Theme.fontBody
+                        font.family: Theme.fontFamily
+                        font.weight: Font.DemiBold
+                        color: Theme.textPrimary
+                    }
+
+                    DiagKey { text: "Версия схемы БД:" }
+                    DiagVal { text: String(settingsVm.schemaVersion) }
+                    DiagKey { text: "Задач (активных):" }
+                    DiagVal { text: String(settingsVm.taskCount) }
+                    DiagKey { text: "Ежедневных задач:" }
+                    DiagVal { text: String(settingsVm.dailyTaskCount) }
+                    DiagKey { text: "Операций в очереди:" }
+                    DiagVal { text: String(settingsVm.pendingOpsCount) }
+                    DiagKey { text: "Dead-letter:" }
+                    DiagVal { text: String(settingsVm.terminalOpsCount) }
+                }
+
+                // Скрытый носитель текста для «Копировать» (буфер обмена через
+                // TextEdit.copy — без зависимости от Python-clipboard).
+                TextEdit {
+                    id: diagText
+                    text: settingsVm.diagnosticsText
+                    visible: false
+                    readOnly: true
                 }
             }
         }

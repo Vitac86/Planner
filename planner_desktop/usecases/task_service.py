@@ -236,8 +236,34 @@ class DesktopTaskService:
     def count_terminal_ops(self) -> int:
         return self._queue.count_terminal_ops() if self._queue is not None else 0
 
+    def pending_ops_breakdown(self) -> dict:
+        """{'create': n, 'update': n, 'delete': n} ожидающих операций."""
+        if self._queue is None:
+            return {"create": 0, "update": 0, "delete": 0}
+        return self._queue.count_pending_by_op()
+
+    def last_local_change(self) -> Optional[datetime]:
+        """Момент последнего локального изменения, ждущего синка (или None)."""
+        return (
+            self._queue.latest_pending_created_at()
+            if self._queue is not None
+            else None
+        )
+
     def pending_task_uids(self) -> Set[str]:
         return self._queue.list_pending_uids() if self._queue is not None else set()
 
     def sync_cursor(self) -> Optional[str]:
         return self._queue.get_sync_cursor() if self._queue is not None else None
+
+    # ---- диагностика (для панели «Настройки») -----------------------------------
+
+    def schema_version(self) -> int:
+        getter = getattr(self.repository, "schema_version", None)
+        return int(getter()) if callable(getter) else 0
+
+    def count_active_tasks(self) -> int:
+        getter = getattr(self.repository, "count_active", None)
+        if callable(getter):
+            return int(getter())
+        return len(self.repository.list_all())

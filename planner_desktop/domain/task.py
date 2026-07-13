@@ -35,6 +35,10 @@ class Task:
 
     priority: int = 0
     completed: bool = False
+    # Момент выполнения (локально, UTC). Заполняется при переходе
+    # «не выполнено -> выполнено» и очищается при снятии галочки; нужен
+    # странице «История», чтобы группировать выполненное по датам.
+    completed_at: Optional[datetime] = None
 
     # Поля привязки к Google Calendar (пока всегда пустые).
     # recurring_event_id + original_start нужны, чтобы отличать экземпляр
@@ -61,6 +65,20 @@ class Task:
     def mark_deleted(self, when: Optional[datetime] = None) -> None:
         self.deleted_at = when or utc_now()
         self.updated_at = self.deleted_at
+
+    def set_completed(self, value: bool, when: Optional[datetime] = None) -> None:
+        """Меняет галочку «выполнено», сопровождая её меткой времени.
+
+        completed_at ставится ТОЛЬКО при переходе «не выполнено -> выполнено»,
+        поэтому повторное сохранение уже выполненной задачи не сдвигает её в
+        «Истории»; снятие галочки метку очищает.
+        """
+        value = bool(value)
+        if value and not self.completed:
+            self.completed_at = when or utc_now()
+        elif not value:
+            self.completed_at = None
+        self.completed = value
 
     def touch(self) -> None:
         self.updated_at = utc_now()
