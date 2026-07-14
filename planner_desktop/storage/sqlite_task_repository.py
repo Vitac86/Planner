@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 from planner_desktop.domain.task import Task, utc_now
+from planner_desktop.domain.tags import normalized_tag_name
 from planner_desktop.storage.paths import ensure_desktop_data_dir, get_desktop_db_path
 from planner_desktop.storage.schema import create_schema
 
@@ -34,12 +35,13 @@ def _text_to_dt(value: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(value) if value else None
 
 
-def _row_to_task(row: sqlite3.Row) -> Task:
+def _row_to_task(row: sqlite3.Row, tags=()) -> Task:
     return Task(
         title=row["title"],
         id=row["id"],
         uid=row["uid"],
         notes=row["notes"],
+        tags=tuple(tags),
         start=_text_to_dt(row["start"]),
         end=_text_to_dt(row["end"]),
         duration_minutes=row["duration_minutes"],
@@ -69,6 +71,7 @@ class SQLiteTaskRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self.db_path))
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
         create_schema(self._connection)
         # Тот же фиксированный чек-лист, что и у FakeTaskRepository:
         # состояние галочек живёт в ViewModel, в БД не пишется.
@@ -84,8 +87,9 @@ class SQLiteTaskRepository:
     # ---- CRUD ---------------------------------------------------------------
 
     def add(self, task: Task) -> Task:
-        cursor = self._connection.execute(
-            """
+        try:
+            cursor = self._connection.execute(
+                """
             INSERT INTO tasks (
                 id, uid, title, notes, start, "end", duration_minutes,
                 is_all_day, priority, completed, completed_at,
@@ -93,8 +97,8 @@ class SQLiteTaskRepository:
                 google_calendar_recurring_event_id, google_calendar_original_start,
                 updated_at, deleted_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+                """,
+                (
                 task.id,
                 task.uid,
                 task.title,
@@ -112,9 +116,24 @@ class SQLiteTaskRepository:
                 _dt_to_text(task.google_calendar_original_start),
                 _dt_to_text(task.updated_at),
                 _dt_to_text(task.deleted_at),
-            ),
-        )
-        self._connection.commit()
+                ),
+            )
+            for tag_name in task.tags:
+                row = self._connection.execute(
+                    "SELECT id FROM tags WHERE normalized_name = ?",
+                    (normalized_tag_name(tag_name),),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Неизвестный тег: {tag_name}")
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO task_tags "
+                    "(task_uid, tag_id, created_at) VALUES (?, ?, ?)",
+                    (task.uid, row["id"], _dt_to_text(task.updated_at)),
+                )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
         if task.id is None:
             task.id = cursor.lastrowid
         return task
@@ -164,13 +183,13 @@ class SQLiteTaskRepository:
         row = self._connection.execute(
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
-        return _row_to_task(row) if row is not None else None
+        return self._task_from_row(row) if row is not None else None
 
     def get_by_uid(self, uid: str) -> Optional[Task]:
         row = self._connection.execute(
             "SELECT * FROM tasks WHERE uid = ?", (uid,)
         ).fetchone()
-        return _row_to_task(row) if row is not None else None
+        return self._task_from_row(row) if row is not None else None
 
     def get_by_google_event_id(self, event_id: str) -> Optional[Task]:
         """Задача, привязанная к событию календаря, включая тумбстоуны:
@@ -178,7 +197,7 @@ class SQLiteTaskRepository:
         row = self._connection.execute(
             "SELECT * FROM tasks WHERE google_calendar_event_id = ?", (event_id,)
         ).fetchone()
-        return _row_to_task(row) if row is not None else None
+        return self._task_from_row(row) if row is not None else None
 
     def delete(self, task_id: int) -> bool:
         """Тумбстоун: помечает deleted_at, физически строку не удаляет."""
@@ -218,7 +237,20 @@ class SQLiteTaskRepository:
         rows = self._connection.execute(
             "SELECT * FROM tasks WHERE deleted_at IS NULL ORDER BY id"
         ).fetchall()
-        return [_row_to_task(row) for row in rows]
+        return [self._task_from_row(row) for row in rows]
+
+    def _task_from_row(self, row: sqlite3.Row) -> Task:
+        tag_rows = self._connection.execute(
+            """
+            SELECT tags.name
+            FROM tags
+            JOIN task_tags ON task_tags.tag_id = tags.id
+            WHERE task_tags.task_uid = ?
+            ORDER BY tags.normalized_name, tags.id
+            """,
+            (row["uid"],),
+        ).fetchall()
+        return _row_to_task(row, (item["name"] for item in tag_rows))
 
     def list_today(self, reference_date: Optional[date] = None) -> List[Task]:
         day = reference_date or datetime.now().date()

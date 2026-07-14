@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 
 def utc_now() -> datetime:
@@ -23,6 +23,9 @@ class Task:
     id: Optional[int] = None
     uid: str = field(default_factory=lambda: str(uuid.uuid4()))
     notes: str = ""
+    # Локальные Planner-теги. Tuple не даёт случайно разделить изменяемый
+    # список между экземплярами и сохраняет совместимость конструкторов.
+    tags: Tuple[str, ...] = field(default_factory=tuple)
 
     # Расписание. Для задачи со временем start — момент начала,
     # end либо задан явно, либо выводится из duration_minutes.

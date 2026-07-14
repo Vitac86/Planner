@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -101,6 +101,40 @@ CREATE TABLE IF NOT EXISTS desktop_daily_completions (
 )
 """
 
+CREATE_TAGS_TABLE = """
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+CREATE_TAGS_NORMALIZED_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_normalized_name
+ON tags (normalized_name)
+"""
+
+CREATE_TASK_TAGS_TABLE = """
+CREATE TABLE IF NOT EXISTS task_tags (
+    task_uid TEXT NOT NULL,
+    tag_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_uid, tag_id),
+    FOREIGN KEY (task_uid) REFERENCES tasks(uid) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+)
+"""
+
+CREATE_TASK_TAGS_TASK_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_task_tags_task_uid ON task_tags (task_uid)
+"""
+
+CREATE_TASK_TAGS_TAG_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_task_tags_tag_id ON task_tags (tag_id)
+"""
+
 
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -136,6 +170,11 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_SYNC_STATE_TABLE)
     connection.execute(CREATE_DAILY_TASKS_TABLE)
     connection.execute(CREATE_DAILY_COMPLETIONS_TABLE)
+    connection.execute(CREATE_TAGS_TABLE)
+    connection.execute(CREATE_TAGS_NORMALIZED_INDEX)
+    connection.execute(CREATE_TASK_TAGS_TABLE)
+    connection.execute(CREATE_TASK_TAGS_TASK_INDEX)
+    connection.execute(CREATE_TASK_TAGS_TAG_INDEX)
     _migrate_completed_at(connection)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()
