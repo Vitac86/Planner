@@ -9,6 +9,7 @@ ScrollView {
     id: page
     contentWidth: availableWidth
     clip: true
+    readonly property bool compact: availableWidth < 700
 
     // Счётчики очереди могли измениться на других страницах.
     onVisibleChanged: if (visible) settingsVm.refresh()
@@ -47,12 +48,14 @@ ScrollView {
             ColumnLayout {
                 spacing: 3
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Label {
                     text: name
                     font.pixelSize: Theme.fontCaption
                     font.family: Theme.fontFamily
                     color: Theme.textMuted
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     wrapMode: Text.WordWrap
                 }
                 TextEdit {
@@ -64,14 +67,15 @@ ScrollView {
                     color: Theme.textPrimary
                     wrapMode: TextEdit.WrapAnywhere
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                 }
             }
         }
     }
 
     ColumnLayout {
-        width: Math.min(page.availableWidth - 48, 780)
-        x: 24
+        width: Math.min(page.availableWidth - (page.compact ? 32 : 48), 780)
+        x: Math.max(page.compact ? 16 : 24, (page.availableWidth - width) / 2)
         spacing: Theme.spacingMd
 
         Item { implicitHeight: 20 }
@@ -80,6 +84,7 @@ ScrollView {
             title: "Настройки"
             subtitle: "Данные хранятся локально на этом компьютере · синхронизация с Google — только вручную"
             Layout.fillWidth: true
+            stackActions: page.compact
         }
 
         Item { implicitHeight: Theme.spacingXs }
@@ -109,6 +114,7 @@ ScrollView {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     spacing: Theme.spacingSm
 
                     Rectangle {
@@ -130,27 +136,35 @@ ScrollView {
                         font.weight: Font.DemiBold
                         color: Theme.textPrimary
                         Layout.alignment: Qt.AlignVCenter
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        wrapMode: Text.WordWrap
                     }
-                    Item { Layout.fillWidth: true }
                     AppButton {
-                        text: "Обновить"
+                        text: page.compact ? "" : "Обновить"
                         variant: "secondary"
                         iconName: "refresh"
                         onClicked: settingsVm.refresh()
+                        ToolTip.visible: page.compact && hovered
+                        ToolTip.text: "Обновить локальные данные"
                     }
                 }
 
                 // Разбивка ожидающих операций по типу (наглядный статус синка).
-                RowLayout {
+                GridLayout {
                     visible: settingsVm.hasSyncQueue
                     Layout.fillWidth: true
-                    spacing: Theme.spacingSm
+                    Layout.minimumWidth: 0
+                    columns: page.compact ? 2 : 4
+                    rowSpacing: Theme.spacingSm
+                    columnSpacing: Theme.spacingSm
 
                     component OpChip: Rectangle {
                         property string label: ""
                         property int value: 0
                         implicitHeight: 52
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         radius: Theme.radiusMedium
                         color: Theme.surfaceMuted
                         border.color: Theme.border
@@ -183,10 +197,11 @@ ScrollView {
 
                 GridLayout {
                     visible: settingsVm.hasSyncQueue
-                    columns: 2
+                    columns: page.compact ? 1 : 2
                     columnSpacing: Theme.spacingLg
                     rowSpacing: Theme.spacingSm
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
 
                     Label {
                         text: "Всего операций в очереди:"
@@ -196,6 +211,7 @@ ScrollView {
                     }
                     RowLayout {
                         spacing: Theme.spacingSm
+                        Layout.minimumWidth: 0
                         Label {
                             text: String(settingsVm.pendingOpsCount)
                             font.pixelSize: Theme.fontBody
@@ -223,6 +239,7 @@ ScrollView {
                         font.pixelSize: Theme.fontBody
                         font.family: Theme.fontFamily
                         color: Theme.textPrimary
+                        Layout.minimumWidth: 0
                     }
 
                     Label {
@@ -238,6 +255,7 @@ ScrollView {
                         color: Theme.textPrimary
                         elide: Text.ElideMiddle
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                     }
                 }
 
@@ -247,6 +265,9 @@ ScrollView {
                     font.pixelSize: Theme.fontBody
                     font.family: Theme.fontFamily
                     color: Theme.textMuted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                 }
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
@@ -256,6 +277,7 @@ ScrollView {
                 // Статус подключения (только файлы изолированного профиля).
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     spacing: Theme.spacingSm
 
                     Rectangle {
@@ -280,20 +302,24 @@ ScrollView {
                         color: Theme.textPrimary
                         wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                     }
                 }
 
                 // Действия: явное подключение и явный одноразовый синк.
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     spacing: Theme.spacingSm
 
                     AppButton {
                         objectName: "connectGoogleButton"
                         visible: !settingsVm.googleConnected
                         text: settingsVm.connectRunning
-                              ? "Ожидание входа в браузере…"
-                              : "Подключить Google Calendar"
+                              ? (page.compact ? "Ожидание входа…"
+                                              : "Ожидание входа в браузере…")
+                              : (page.compact ? "Подключить"
+                                              : "Подключить Google Calendar")
                         variant: "primary"
                         iconName: "plus"
                         loading: settingsVm.connectRunning
@@ -328,10 +354,11 @@ ScrollView {
                     visible: settingsVm.googleConnected
                              && (settingsVm.lastSyncSummary.length > 0
                                  || settingsVm.lastSyncAt !== "—")
-                    columns: 2
+                    columns: page.compact ? 1 : 2
                     columnSpacing: Theme.spacingLg
                     rowSpacing: Theme.spacingSm
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
 
                     Label {
                         text: "Последний успешный синк:"
@@ -362,6 +389,7 @@ ScrollView {
                         color: Theme.textPrimary
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                     }
                 }
 
@@ -374,6 +402,7 @@ ScrollView {
                     color: Theme.danger
                     wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                 }
 
                 Label {
@@ -383,6 +412,7 @@ ScrollView {
                     color: Theme.textMuted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                 }
             }
         }
@@ -400,6 +430,7 @@ ScrollView {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     spacing: Theme.spacingSm
                     Rectangle {
                         implicitWidth: 36
@@ -421,7 +452,9 @@ ScrollView {
                     Item { Layout.fillWidth: true }
                     AppButton {
                         id: copyButton
-                        text: copyButton.copied ? "Скопировано" : "Копировать"
+                        text: page.compact
+                              ? ""
+                              : (copyButton.copied ? "Скопировано" : "Копировать")
                         property bool copied: false
                         variant: "secondary"
                         iconName: "check"
@@ -437,14 +470,17 @@ ScrollView {
                             interval: 1600
                             onTriggered: copyButton.copied = false
                         }
+                        ToolTip.visible: page.compact && hovered
+                        ToolTip.text: copyButton.copied ? "Скопировано" : "Копировать"
                     }
                 }
 
                 GridLayout {
-                    columns: 2
+                    columns: page.compact ? 1 : 2
                     columnSpacing: Theme.spacingLg
                     rowSpacing: Theme.spacingSm
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
 
                     component DiagKey: Label {
                         font.pixelSize: Theme.fontBody
