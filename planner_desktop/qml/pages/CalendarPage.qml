@@ -75,6 +75,19 @@ Item {
         inspectorDrawer.close()
         calendarVm.clearSelection()
     }
+    function cancelInteraction() {
+        if (calendarVm.dragging || calendarVm.resizing) {
+            calendarVm.cancelInteraction()
+            timeGrid.forceActiveFocus()
+            return true
+        }
+        return false
+    }
+    function moveSelectedMinutes(delta) { calendarVm.moveSelectedByMinutes(delta) }
+    function moveSelectedDays(delta) { calendarVm.moveSelectedByDays(delta) }
+    function resizeSelectedMinutes(delta) { calendarVm.resizeSelectedByMinutes(delta) }
+    function convertSelectedToAllDay() { calendarVm.convertSelectedToAllDay() }
+    function unscheduleSelected() { calendarVm.unscheduleSelected() }
     function selectPrevDay() { calendarVm.previousDay() }
     function selectNextDay() { calendarVm.nextDay() }
     function selectPrevPeriod() { calendarVm.previousPeriod() }
@@ -156,6 +169,12 @@ Item {
                 fg: Theme.textSecondary
                 bg: Theme.surfacePressed
             }
+            InteractionHint {
+                visible: calendarVm.dragging || calendarVm.resizing
+                text: calendarVm.proposalMessage
+                valid: calendarVm.proposalValid
+                Layout.maximumWidth: page.compact ? 180 : 320
+            }
             AppButton {
                 objectName: "calendarAgendaToggle"
                 text: page.compact ? "" : (page.agendaExpanded ? "Скрыть агенду" : "Агенда")
@@ -200,6 +219,10 @@ Item {
                         initialScrollMinute: calendarVm.initialScrollMinute
                         compact: page.compact
                         actionsEnabled: !calendarVm.busy
+                        dragging: calendarVm.dragging
+                        resizing: calendarVm.resizing
+                        dropPreview: calendarVm.dropPreviewGeometry
+                        resizePreview: calendarVm.resizePreview
                         onDaySelected: index => calendarVm.selectDay(index)
                         onEventSelected: uid => page.selectTask(uid)
                         onEventEditRequested: uid => page.editEvent(uid)
@@ -207,6 +230,17 @@ Item {
                             page.selectedGridDate = dateText
                             page.selectedGridMinute = minute
                         }
+                        onDragStarted: (uid, sourceKind) =>
+                            calendarVm.beginDrag(uid, sourceKind)
+                        onDragTargetUpdated: (kind, x, y, width, height, shift) =>
+                            calendarVm.updateDragPointer(kind, x, y, width, height, shift)
+                        onDragFinished: calendarVm.commitDrop()
+                        onDragCanceled: calendarVm.cancelDrag()
+                        onResizeStarted: (uid, edge) => calendarVm.beginResize(uid, edge)
+                        onResizeTargetUpdated: (dateText, y, height, shift) =>
+                            calendarVm.updateResize(dateText, y, height, shift)
+                        onResizeFinished: calendarVm.commitResize()
+                        onResizeCanceled: calendarVm.cancelResize()
                     }
                 }
 

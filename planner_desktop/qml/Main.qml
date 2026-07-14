@@ -65,7 +65,9 @@ ApplicationWindow {
         Keys.onPressed: event => {
             var page = root._currentTaskPage()
             if (event.key === Qt.Key_Escape) {
-                if (page && root._allow("clear_selection")) {
+                if (root.currentPage === 1 && calendarPage.cancelInteraction()) {
+                    event.accepted = true
+                } else if (page && root._allow("clear_selection")) {
                     page.clearSelection()
                     event.accepted = true
                 }
@@ -197,6 +199,46 @@ ApplicationWindow {
         enabled: root.currentPage === 1 && calendarPage.gridFocused
                  && root._allow("calendar_next_event")
         onActivated: calendarPage.selectNextEvent()
+    }
+    Shortcut {
+        sequence: "Alt+Up"
+        enabled: root.currentPage === 1 && root._allow("calendar_move_slot")
+        onActivated: calendarPage.moveSelectedMinutes(-15)
+    }
+    Shortcut {
+        sequence: "Alt+Down"
+        enabled: root.currentPage === 1 && root._allow("calendar_move_slot")
+        onActivated: calendarPage.moveSelectedMinutes(15)
+    }
+    Shortcut {
+        sequence: "Alt+Shift+Left"
+        enabled: root.currentPage === 1 && root._allow("calendar_move_day")
+        onActivated: calendarPage.moveSelectedDays(-1)
+    }
+    Shortcut {
+        sequence: "Alt+Shift+Right"
+        enabled: root.currentPage === 1 && root._allow("calendar_move_day")
+        onActivated: calendarPage.moveSelectedDays(1)
+    }
+    Shortcut {
+        sequence: "Alt+Shift+Up"
+        enabled: root.currentPage === 1 && root._allow("calendar_resize")
+        onActivated: calendarPage.resizeSelectedMinutes(-15)
+    }
+    Shortcut {
+        sequence: "Alt+Shift+Down"
+        enabled: root.currentPage === 1 && root._allow("calendar_resize")
+        onActivated: calendarPage.resizeSelectedMinutes(15)
+    }
+    Shortcut {
+        sequence: "Ctrl+Alt+A"
+        enabled: root.currentPage === 1 && root._allow("calendar_to_all_day")
+        onActivated: calendarPage.convertSelectedToAllDay()
+    }
+    Shortcut {
+        sequence: "Ctrl+Alt+U"
+        enabled: root.currentPage === 1 && root._allow("calendar_unschedule")
+        onActivated: calendarPage.unscheduleSelected()
     }
 
     // ---- всплывашки успеха/ошибки ----

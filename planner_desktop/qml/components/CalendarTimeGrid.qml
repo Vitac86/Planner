@@ -17,11 +17,24 @@ Item {
     property bool compact: false
     property bool actionsEnabled: true
     property real selectedMinute: -1
+    property bool dragging: false
+    property bool resizing: false
+    property var dropPreview: ({ visible: false })
+    property var resizePreview: ({ visible: false })
 
     signal daySelected(int dayIndex)
     signal eventSelected(string uid)
     signal eventEditRequested(string uid)
     signal emptyTimeSelected(string dateText, int minute)
+    signal dragStarted(string uid, string sourceKind)
+    signal dragTargetUpdated(string kind, real x, real y, real width,
+                             real height, bool shift)
+    signal dragFinished()
+    signal dragCanceled()
+    signal resizeStarted(string uid, string edge)
+    signal resizeTargetUpdated(string dateText, real y, real height, bool shift)
+    signal resizeFinished()
+    signal resizeCanceled()
 
     readonly property real rulerWidth: compact ? 50 : 56
     readonly property real hourHeight: compact ? 60 : 66
@@ -53,6 +66,19 @@ Item {
         Qt.callLater(function() { grid.scrollToMinute(grid.initialScrollMinute) })
     }
 
+    function updateInteractionPointer(x, y, shift) {
+        var contentX = timedFlick.contentX + x - grid.rulerWidth
+        if (y <= allDayLane.height) {
+            grid.dragTargetUpdated("all_day_lane", contentX, 0,
+                                   grid.columnsContentWidth, 1, shift)
+        } else {
+            var contentY = timedFlick.contentY + y - allDayLane.height
+            grid.dragTargetUpdated("timed_grid", contentX, contentY,
+                                   grid.columnsContentWidth,
+                                   timedFlick.contentHeight, shift)
+        }
+    }
+
     onVisibleChanged: if (visible) ensureInitialScroll(false)
     Component.onCompleted: ensureInitialScroll(false)
 
@@ -70,6 +96,10 @@ Item {
         onDaySelected: index => grid.daySelected(index)
         onEventSelected: uid => grid.eventSelected(uid)
         onEventEditRequested: uid => grid.eventEditRequested(uid)
+        onDragStarted: (uid, sourceKind) => grid.dragStarted(uid, sourceKind)
+        onDragPointer: (uid, x, y, shift) => grid.updateInteractionPointer(x, y, shift)
+        onDragFinished: grid.dragFinished()
+        onDragCanceled: grid.dragCanceled()
     }
 
     Item {
@@ -153,10 +183,46 @@ Item {
                             grid.selectedMinute = minute
                             grid.emptyTimeSelected(dateText, minute)
                         }
+                        onDragStarted: (uid, sourceKind) => grid.dragStarted(uid, sourceKind)
+                        onDragPointer: function(uid, x, y, shift) {
+                            var point = mapToItem(grid, x, y)
+                            grid.updateInteractionPointer(point.x, point.y, shift)
+                        }
+                        onDragFinished: grid.dragFinished()
+                        onDragCanceled: grid.dragCanceled()
+                        onResizeStarted: (uid, edge) => grid.resizeStarted(uid, edge)
+                        onResizePointer: (dateText, y, height, shift) =>
+                            grid.resizeTargetUpdated(dateText, y, height, shift)
+                        onResizeFinished: grid.resizeFinished()
+                        onResizeCanceled: grid.resizeCanceled()
                     }
                 }
             }
         }
+    }
+
+    CalendarDropPreview {
+        id: dragPreviewItem
+        previewData: grid.dropPreview
+        x: grid.rulerWidth + previewData.dayIndex * grid.dayColumnWidth
+           - timedFlick.contentX + 3
+        y: previewData.zoneKind === "all_day_lane"
+           ? allDayLane.headerHeight + 4
+           : allDayLane.height + previewData.topRatio * timedFlick.contentHeight
+             - timedFlick.contentY
+        width: Math.max(36, grid.dayColumnWidth - 6)
+        height: previewData.zoneKind === "all_day_lane"
+                ? 28 : Math.max(20, previewData.heightRatio * timedFlick.contentHeight)
+    }
+
+    CalendarDropPreview {
+        previewData: grid.resizePreview
+        x: grid.rulerWidth + previewData.dayIndex * grid.dayColumnWidth
+           - timedFlick.contentX + 3
+        y: allDayLane.height + previewData.topRatio * timedFlick.contentHeight
+           - timedFlick.contentY
+        width: Math.max(36, grid.dayColumnWidth - 6)
+        height: Math.max(20, previewData.heightRatio * timedFlick.contentHeight)
     }
 
     Rectangle {

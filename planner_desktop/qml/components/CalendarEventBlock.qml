@@ -12,8 +12,18 @@ Rectangle {
     property var eventData: ({})
     property bool selected: false
     property bool actionsEnabled: true
+    property bool dragActivated: false
+    property bool suppressClick: false
     signal selectedRequested(string uid)
     signal editRequested(string uid)
+    signal dragStarted(string uid, string sourceKind)
+    signal dragMoved(real x, real y, bool shift)
+    signal dragFinished()
+    signal dragCanceled()
+    signal resizeStarted(string uid, string edge)
+    signal resizeMoved(real x, real y, bool shift)
+    signal resizeFinished()
+    signal resizeCanceled()
 
     readonly property bool roomy: height >= 46
     readonly property bool spacious: height >= 66 && width >= 92
@@ -125,15 +135,72 @@ Rectangle {
         cursorShape: block.actionsEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
     }
     MouseArea {
+        id: bodyMouse
         anchors.fill: parent
+        anchors.bottomMargin: 8
         enabled: block.actionsEnabled
         acceptedButtons: Qt.LeftButton
         hoverEnabled: true
-        onClicked: {
+        preventStealing: true
+        property real pressX: 0
+        property real pressY: 0
+        onPressed: mouse => {
+            pressX = mouse.x
+            pressY = mouse.y
+            block.dragActivated = false
+            block.suppressClick = false
+        }
+        onPositionChanged: mouse => {
+            if (!pressed)
+                return
+            var dx = mouse.x - pressX
+            var dy = mouse.y - pressY
+            if (!block.dragActivated
+                    && Math.sqrt(dx * dx + dy * dy) >= Qt.styleHints.startDragDistance) {
+                block.dragActivated = true
+                block.suppressClick = true
+                block.dragStarted(block.eventData.uid, "timed_grid")
+            }
+            if (block.dragActivated)
+                block.dragMoved(mouse.x, mouse.y,
+                                (mouse.modifiers & Qt.ShiftModifier) !== 0)
+        }
+        onReleased: {
+            if (block.dragActivated) {
+                block.dragFinished()
+                block.dragActivated = false
+                Qt.callLater(function() { block.suppressClick = false })
+            }
+        }
+        onCanceled: {
+            if (block.dragActivated)
+                block.dragCanceled()
+            block.dragActivated = false
+            block.suppressClick = false
+        }
+        onClicked: if (!block.suppressClick) {
             block.forceActiveFocus()
             block.selectedRequested(block.eventData.uid)
         }
-        onDoubleClicked: block.editRequested(block.eventData.uid)
+        onDoubleClicked: if (!block.suppressClick)
+            block.editRequested(block.eventData.uid)
+    }
+
+    CalendarResizeHandle {
+        id: resizeHandle
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        taskUid: block.eventData.uid || ""
+        enabled: block.actionsEnabled
+        highlighted: block.selected || eventHover.hovered || block.activeFocus
+        onResizeStarted: (uid, edge) => block.resizeStarted(uid, edge)
+        onResizeMoved: (x, y, shift) => {
+            var point = resizeHandle.mapToItem(block, x, y)
+            block.resizeMoved(point.x, point.y, shift)
+        }
+        onResizeFinished: block.resizeFinished()
+        onResizeCanceled: block.resizeCanceled()
     }
     Keys.onReturnPressed: block.editRequested(block.eventData.uid)
     Keys.onEnterPressed: block.editRequested(block.eventData.uid)

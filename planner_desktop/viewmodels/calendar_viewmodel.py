@@ -12,6 +12,17 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from PySide6.QtCore import Property, Signal, Slot
 
+from planner_desktop.domain.calendar_interactions import (
+    CalendarDragProposal,
+    CalendarDropTarget,
+    CalendarResizeProposal,
+    DropZoneKind,
+    ResizeEdge,
+    minute_from_mouse_y,
+    propose_drag,
+    propose_resize,
+    target_from_mouse,
+)
 from planner_desktop.domain.calendar_layout import (
     CalendarEventBlock,
     CalendarGridConfig,
@@ -90,6 +101,7 @@ class CalendarViewModel(TaskActionsViewModel):
     displayModeChanged = Signal()
     gridChanged = Signal()
     editEventRequested = Signal(str)
+    interactionChanged = Signal()
 
     def __init__(self, repository: TaskRepository | None = None,
                  parent=None,
@@ -112,6 +124,15 @@ class CalendarViewModel(TaskActionsViewModel):
         today = self._now().date()
         self._week_start = _monday_of(today)
         self._selected_index = today.weekday()
+        self._dragging = False
+        self._dragged_uid = ""
+        self._drag_source_kind = ""
+        self._drag_proposal: Optional[CalendarDragProposal] = None
+        self._resizing = False
+        self._resize_uid = ""
+        self._resize_edge = ResizeEdge.END
+        self._resize_proposal: Optional[CalendarResizeProposal] = None
+        self._interaction_busy = False
 
     def _emit_data_changed(self) -> None:
         self.weekChanged.emit()
@@ -406,6 +427,455 @@ class CalendarViewModel(TaskActionsViewModel):
             min(self._grid_config.visible_end_minute - 60, minute),
         )
 
+    # ---- Phase 2.2 drag/resize interaction state -------------------------------
+
+    @Property(bool, notify=interactionChanged)
+    def dragging(self) -> bool:
+        return self._dragging
+
+    @Property(str, notify=interactionChanged)
+    def draggedTaskUid(self) -> str:
+        return self._dragged_uid
+
+    @Property(str, notify=interactionChanged)
+    def dragSourceKind(self) -> str:
+        return self._drag_source_kind
+
+    @Property(bool, notify=interactionChanged)
+    def resizing(self) -> bool:
+        return self._resizing
+
+    @Property(str, notify=interactionChanged)
+    def resizeTaskUid(self) -> str:
+        return self._resize_uid
+
+    @Property(bool, notify=interactionChanged)
+    def interactionBusy(self) -> bool:
+        return self._interaction_busy
+
+    @Property(str, notify=interactionChanged)
+    def proposedTargetDate(self) -> str:
+        proposal = self._drag_proposal
+        if proposal is None or proposal.target.target_date is None:
+            return ""
+        return proposal.target.target_date.strftime("%Y-%m-%d")
+
+    @Property(str, notify=interactionChanged)
+    def proposedStartTime(self) -> str:
+        proposal = self._drag_proposal
+        if proposal is None or proposal.proposed_start is None:
+            return ""
+        return proposal.proposed_start.strftime("%H:%M")
+
+    @Property(str, notify=interactionChanged)
+    def proposedEndTime(self) -> str:
+        proposal = self._drag_proposal
+        if proposal is None or proposal.proposed_end is None:
+            return ""
+        return proposal.proposed_end.strftime("%H:%M")
+
+    @Property(bool, notify=interactionChanged)
+    def proposedAllDay(self) -> bool:
+        return bool(self._drag_proposal and self._drag_proposal.proposed_all_day)
+
+    @Property(bool, notify=interactionChanged)
+    def proposalValid(self) -> bool:
+        proposal = self._drag_proposal or self._resize_proposal
+        return bool(proposal and proposal.valid)
+
+    @Property(str, notify=interactionChanged)
+    def proposalMessage(self) -> str:
+        proposal = self._drag_proposal or self._resize_proposal
+        if proposal is None:
+            return ""
+        if not proposal.valid:
+            return proposal.message
+        if isinstance(proposal, CalendarDragProposal):
+            if proposal.target.kind == DropZoneKind.UNDATED_PANEL:
+                return "Снять дату"
+            if proposal.proposed_all_day:
+                return "Запланировать на весь день"
+            return (
+                f"{proposal.proposed_start.strftime('%d.%m %H:%M')}–"
+                f"{proposal.proposed_end.strftime('%H:%M')}"
+            )
+        return (
+            f"Новая длительность: {proposal.proposed_duration_minutes} мин."
+        )
+
+    def _preview_geometry(self, proposal) -> Dict[str, Any]:
+        if proposal is None:
+            return {"visible": False}
+        if isinstance(proposal, CalendarDragProposal):
+            target = proposal.target
+            start = proposal.proposed_start
+            end = proposal.proposed_end
+            all_day = proposal.proposed_all_day
+        else:
+            start = proposal.proposed_start
+            end = proposal.proposed_end
+            all_day = False
+            target = CalendarDropTarget(
+                DropZoneKind.TIMED_GRID,
+                start.date() if start is not None else None,
+            )
+        day = target.target_date or (start.date() if start is not None else None)
+        dates = self._visible_dates()
+        day_index = dates.index(day) if day in dates else -1
+        start_minute = (
+            start.hour * 60 + start.minute if start is not None else 0
+        )
+        duration = (
+            max(15, int((end - start).total_seconds() // 60))
+            if start is not None and end is not None else 60
+        )
+        top_ratio = (
+            (start_minute - self._grid_config.visible_start_minute)
+            / self._grid_config.visible_minutes
+        )
+        return {
+            "visible": day_index >= 0,
+            "valid": proposal.valid,
+            "message": self.proposalMessage,
+            "zoneKind": (
+                DropZoneKind.ALL_DAY_LANE.value
+                if all_day else target.kind.value
+            ),
+            "dayIndex": day_index,
+            "dateText": day.strftime("%Y-%m-%d") if day else "",
+            "topRatio": max(0.0, min(1.0, top_ratio)),
+            "heightRatio": min(1.0, duration / self._grid_config.visible_minutes),
+            "startTime": start.strftime("%H:%M") if start is not None else "",
+            "endTime": end.strftime("%H:%M") if end is not None else "",
+            "durationMinutes": duration,
+        }
+
+    @Property("QVariantMap", notify=interactionChanged)
+    def dropPreviewGeometry(self) -> Dict[str, Any]:
+        return self._preview_geometry(self._drag_proposal)
+
+    @Property("QVariantMap", notify=interactionChanged)
+    def resizePreview(self) -> Dict[str, Any]:
+        return self._preview_geometry(self._resize_proposal)
+
+    @Property(str, notify=interactionChanged)
+    def accessibleInteractionStatus(self) -> str:
+        return self.proposalMessage
+
+    def _clear_drag_state(self) -> None:
+        self._dragging = False
+        self._dragged_uid = ""
+        self._drag_source_kind = ""
+        self._drag_proposal = None
+
+    def _clear_resize_state(self) -> None:
+        self._resizing = False
+        self._resize_uid = ""
+        self._resize_proposal = None
+
+    @Slot(str, str, result=bool)
+    def beginDrag(self, task_uid: str, source_kind: str) -> bool:
+        if self._interaction_busy or self._resizing or self._dragging:
+            return False
+        task = self._service.get_task(task_uid)
+        if task is None:
+            return False
+        try:
+            source = DropZoneKind(source_kind)
+        except ValueError:
+            return False
+        self._dragging = True
+        self._dragged_uid = task_uid
+        self._drag_source_kind = source.value
+        self._drag_proposal = None
+        self.selectTask(task_uid)
+        self.interactionChanged.emit()
+        return True
+
+    @Slot(str, float, float, float, float, bool)
+    def updateDragPointer(
+        self, kind: str, x: float, y: float, width: float, height: float,
+        shift: bool,
+    ) -> None:
+        if not self._dragging or self._interaction_busy:
+            return
+        task = self._service.get_task(self._dragged_uid)
+        if task is None:
+            self.cancelDrag()
+            return
+        try:
+            zone = DropZoneKind(kind)
+        except ValueError:
+            zone = DropZoneKind.TIMED_GRID
+            width = 0
+        target = target_from_mouse(
+            x, y, width, height, self._visible_dates(), kind=zone, shift=shift,
+            visible_start_minute=self._grid_config.visible_start_minute,
+            visible_end_minute=self._grid_config.visible_end_minute,
+        )
+        self._drag_proposal = propose_drag(task, target)
+        self.interactionChanged.emit()
+
+    @Slot(str, str, float, float, bool)
+    def updateDragTarget(
+        self, kind: str, date_text: str, y_or_minute: float, height: float,
+        shift: bool,
+    ) -> None:
+        if not self._dragging or self._interaction_busy:
+            return
+        try:
+            target_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+            zone = DropZoneKind(kind)
+        except ValueError:
+            target_date = None
+            zone = DropZoneKind.TIMED_GRID
+        minute = None
+        if zone == DropZoneKind.TIMED_GRID:
+            minute = (
+                minute_from_mouse_y(
+                    y_or_minute, height,
+                    visible_start_minute=self._grid_config.visible_start_minute,
+                    visible_end_minute=self._grid_config.visible_end_minute,
+                    shift=shift,
+                )
+                if height > 0 else int(y_or_minute)
+            )
+        task = self._service.get_task(self._dragged_uid)
+        if task is None:
+            self.cancelDrag()
+            return
+        self._drag_proposal = propose_drag(task, CalendarDropTarget(
+            zone, target_date, minute,
+            self._grid_config.visible_start_minute,
+            self._grid_config.visible_end_minute,
+        ))
+        self.interactionChanged.emit()
+
+    @Slot()
+    def cancelDrag(self) -> None:
+        if not self._dragging and self._drag_proposal is None:
+            return
+        self._clear_drag_state()
+        self.interactionChanged.emit()
+
+    @Slot(result=bool)
+    def commitDrop(self) -> bool:
+        proposal = self._drag_proposal
+        uid = self._dragged_uid
+        if (
+            not self._dragging or proposal is None or self._interaction_busy
+            or not self._begin("calendarDrop", uid, dedupe=True)
+        ):
+            return False
+        self._interaction_busy = True
+        self.interactionChanged.emit()
+        try:
+            result = self._service.apply_drag_proposal(proposal)
+        except Exception as exc:
+            result = None
+            error = f"Не удалось перенести задачу: {exc}"
+        finally:
+            self._interaction_busy = False
+            self._end()
+        self._clear_drag_state()
+        self.interactionChanged.emit()
+        if result is None:
+            self.toastError.emit(error)
+            self._emit_data_changed()
+            return False
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            self._emit_data_changed()
+            return False
+        self.selectTask(uid)
+        self._notify_mutation("Расписание обновлено")
+        return True
+
+    @Slot(str, str, result=bool)
+    def beginResize(self, task_uid: str, edge: str) -> bool:
+        if self._interaction_busy or self._dragging or self._resizing:
+            return False
+        task = self._service.get_task(task_uid)
+        if task is None or task.start is None or task.is_all_day:
+            return False
+        try:
+            resize_edge = ResizeEdge(edge)
+        except ValueError:
+            return False
+        self._resizing = True
+        self._resize_uid = task_uid
+        self._resize_edge = resize_edge
+        self._resize_proposal = None
+        self.selectTask(task_uid)
+        self.interactionChanged.emit()
+        return True
+
+    @Slot(str, float, float, bool)
+    def updateResize(
+        self, date_text: str, y_or_minute: float, height: float, shift: bool
+    ) -> None:
+        if not self._resizing or self._interaction_busy:
+            return
+        task = self._service.get_task(self._resize_uid)
+        if task is None:
+            self.cancelResize()
+            return
+        try:
+            target_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+        except ValueError:
+            target_date = None
+        minute = (
+            minute_from_mouse_y(
+                y_or_minute, height,
+                visible_start_minute=self._grid_config.visible_start_minute,
+                visible_end_minute=self._grid_config.visible_end_minute,
+                shift=shift,
+            )
+            if height > 0 else int(y_or_minute)
+        )
+        target = CalendarDropTarget(
+            DropZoneKind.TIMED_GRID, target_date, minute,
+            self._grid_config.visible_start_minute,
+            self._grid_config.visible_end_minute,
+        )
+        self._resize_proposal = propose_resize(task, self._resize_edge, target)
+        self.interactionChanged.emit()
+
+    @Slot()
+    def cancelResize(self) -> None:
+        if not self._resizing and self._resize_proposal is None:
+            return
+        self._clear_resize_state()
+        self.interactionChanged.emit()
+
+    @Slot()
+    def cancelInteraction(self) -> None:
+        self._clear_drag_state()
+        self._clear_resize_state()
+        self.interactionChanged.emit()
+
+    @Slot(result=bool)
+    def commitResize(self) -> bool:
+        proposal = self._resize_proposal
+        uid = self._resize_uid
+        if (
+            not self._resizing or proposal is None or self._interaction_busy
+            or not self._begin("calendarResize", uid, dedupe=True)
+        ):
+            return False
+        self._interaction_busy = True
+        self.interactionChanged.emit()
+        try:
+            result = self._service.apply_resize_proposal(proposal)
+        except Exception as exc:
+            result = None
+            error = f"Не удалось изменить длительность: {exc}"
+        finally:
+            self._interaction_busy = False
+            self._end()
+        self._clear_resize_state()
+        self.interactionChanged.emit()
+        if result is None:
+            self.toastError.emit(error)
+            self._emit_data_changed()
+            return False
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            self._emit_data_changed()
+            return False
+        self.selectTask(uid)
+        self._notify_mutation("Длительность обновлена")
+        return True
+
+    def _keyboard_interaction(self, name: str, uid: str, operation) -> bool:
+        if not uid or self._interaction_busy or not self._begin(name, uid, dedupe=True):
+            return False
+        self._interaction_busy = True
+        self.interactionChanged.emit()
+        try:
+            result = operation()
+        except Exception as exc:
+            result = None
+            error = f"Не удалось изменить расписание: {exc}"
+        finally:
+            self._interaction_busy = False
+            self._end()
+            self.interactionChanged.emit()
+        if result is None:
+            self.toastError.emit(error)
+            return False
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        self.selectTask(uid)
+        self._notify_mutation("Расписание обновлено")
+        return True
+
+    @Slot(int, result=bool)
+    def moveSelectedByMinutes(self, delta_minutes: int) -> bool:
+        task = self._selected_live_task()
+        if task is None or task.start is None or task.is_all_day:
+            return False
+        return self._keyboard_interaction(
+            "calendarMoveMinutes", task.uid,
+            lambda: self._service.move_timed_task(
+                task.uid, task.start + timedelta(minutes=delta_minutes)
+            ),
+        )
+
+    @Slot(int, result=bool)
+    def moveSelectedByDays(self, delta_days: int) -> bool:
+        task = self._selected_live_task()
+        if task is None or task.start is None:
+            return False
+        if task.is_all_day:
+            target_date = task.start.date() + timedelta(days=delta_days)
+            operation = lambda: self._service.convert_to_all_day(
+                task.uid, target_date
+            )
+        else:
+            operation = lambda: self._service.move_timed_task(
+                task.uid, task.start + timedelta(days=delta_days)
+            )
+        return self._keyboard_interaction(
+            "calendarMoveDays", task.uid, operation
+        )
+
+    @Slot(int, result=bool)
+    def resizeSelectedByMinutes(self, delta_minutes: int) -> bool:
+        task = self._selected_live_task()
+        if task is None or task.start is None or task.is_all_day:
+            return False
+        end = task.end or task.start + timedelta(
+            minutes=task.duration_minutes or 60
+        )
+        return self._keyboard_interaction(
+            "calendarResizeKeyboard", task.uid,
+            lambda: self._service.resize_timed_task(
+                task.uid, end=end + timedelta(minutes=delta_minutes)
+            ),
+        )
+
+    @Slot(result=bool)
+    def convertSelectedToAllDay(self) -> bool:
+        task = self._selected_live_task()
+        if task is None or task.start is None:
+            return False
+        return self._keyboard_interaction(
+            "calendarAllDay", task.uid,
+            lambda: self._service.convert_to_all_day(task.uid, task.start.date()),
+        )
+
+    @Slot(result=bool)
+    def unscheduleSelected(self) -> bool:
+        task = self._selected_live_task()
+        if task is None or task.start is None:
+            return False
+        return self._keyboard_interaction(
+            "calendarUnschedule", task.uid,
+            lambda: self._service.unschedule_task(task.uid),
+        )
+
     # ---- period and day navigation ---------------------------------------------
 
     @Slot(int)
@@ -534,6 +1004,9 @@ class CalendarViewModel(TaskActionsViewModel):
     @Slot()
     def refresh(self) -> None:
         """Preserve a live selection, clear a task that disappeared."""
+        interaction_uid = self._dragged_uid or self._resize_uid
+        if interaction_uid and self._service.get_task(interaction_uid) is None:
+            self.cancelInteraction()
         if self._selected_uid and self._service.get_task(self._selected_uid) is None:
             self._selected_uid = ""
             self.selectedTaskChanged.emit()

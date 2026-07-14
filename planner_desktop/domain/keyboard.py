@@ -36,6 +36,11 @@ _WINDOW_SHORTCUTS: dict[str, bool] = {
     "calendar_today": True,  # Home
     "calendar_prev_event": True,  # Up
     "calendar_next_event": True,  # Down
+    "calendar_move_slot": True,  # Alt+Up/Down
+    "calendar_move_day": True,  # Alt+Shift+Left/Right
+    "calendar_resize": True,  # Alt+Shift+Up/Down
+    "calendar_to_all_day": True,  # Ctrl+Alt+A
+    "calendar_unschedule": True,  # Ctrl+Alt+U
     "quick_add_slash": True,    # «/»
 }
 

@@ -18,6 +18,14 @@ Item {
     signal eventSelected(string uid)
     signal eventEditRequested(string uid)
     signal emptyTimeSelected(string dateText, int minute)
+    signal dragStarted(string uid, string sourceKind)
+    signal dragPointer(string uid, real x, real y, bool shift)
+    signal dragFinished()
+    signal dragCanceled()
+    signal resizeStarted(string uid, string edge)
+    signal resizePointer(string dateText, real y, real height, bool shift)
+    signal resizeFinished()
+    signal resizeCanceled()
 
     readonly property real gridHeight: (visibleEndHour - visibleStartHour) * hourHeight
     height: gridHeight
@@ -83,6 +91,21 @@ Item {
             z: selected || activeFocus ? 5 : 3
             onSelectedRequested: uid => column.eventSelected(uid)
             onEditRequested: uid => column.eventEditRequested(uid)
+            onDragStarted: (uid, sourceKind) => column.dragStarted(uid, sourceKind)
+            onDragMoved: (x, y, shift) => {
+                var point = eventBlock.mapToItem(column, x, y)
+                column.dragPointer(modelData.uid, point.x, point.y, shift)
+            }
+            onDragFinished: column.dragFinished()
+            onDragCanceled: column.dragCanceled()
+            onResizeStarted: (uid, edge) => column.resizeStarted(uid, edge)
+            onResizeMoved: (x, y, shift) => {
+                var point = eventBlock.mapToItem(column, x, y)
+                column.resizePointer(column.dayData.dateText, point.y,
+                                     column.height, shift)
+            }
+            onResizeFinished: column.resizeFinished()
+            onResizeCanceled: column.resizeCanceled()
         }
     }
 

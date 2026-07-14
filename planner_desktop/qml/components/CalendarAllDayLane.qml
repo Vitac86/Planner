@@ -19,6 +19,10 @@ Item {
     signal daySelected(int dayIndex)
     signal eventSelected(string uid)
     signal eventEditRequested(string uid)
+    signal dragStarted(string uid, string sourceKind)
+    signal dragPointer(string uid, real x, real y, bool shift)
+    signal dragFinished()
+    signal dragCanceled()
 
     readonly property real headerHeight: 48
     readonly property int laneRows: _laneRows()
@@ -155,6 +159,8 @@ Item {
                                           : Theme.priorityColor(eventData.priority)
                             border.width: lane.selectedUid === eventData.uid ? 2 : 1
                             activeFocusOnTab: lane.actionsEnabled
+                            property bool dragActivated: false
+                            property bool suppressClick: false
 
                             RowLayout {
                                 anchors.fill: parent
@@ -184,13 +190,57 @@ Item {
                                 }
                             }
                             MouseArea {
+                                id: chipMouse
                                 anchors.fill: parent
                                 enabled: lane.actionsEnabled
-                                onClicked: {
+                                preventStealing: true
+                                property real pressX: 0
+                                property real pressY: 0
+                                onPressed: mouse => {
+                                    pressX = mouse.x
+                                    pressY = mouse.y
+                                    chip.dragActivated = false
+                                    chip.suppressClick = false
+                                }
+                                onPositionChanged: mouse => {
+                                    if (!pressed)
+                                        return
+                                    var dx = mouse.x - pressX
+                                    var dy = mouse.y - pressY
+                                    if (!chip.dragActivated
+                                            && Math.sqrt(dx * dx + dy * dy)
+                                               >= Qt.styleHints.startDragDistance) {
+                                        chip.dragActivated = true
+                                        chip.suppressClick = true
+                                        lane.dragStarted(chip.eventData.uid,
+                                                         "all_day_lane")
+                                    }
+                                    if (chip.dragActivated) {
+                                        var point = chip.mapToItem(lane, mouse.x, mouse.y)
+                                        lane.dragPointer(chip.eventData.uid,
+                                                         point.x, point.y,
+                                                         (mouse.modifiers & Qt.ShiftModifier) !== 0)
+                                    }
+                                }
+                                onReleased: {
+                                    if (chip.dragActivated) {
+                                        lane.dragFinished()
+                                        chip.dragActivated = false
+                                        Qt.callLater(function() { chip.suppressClick = false })
+                                    }
+                                }
+                                onCanceled: {
+                                    if (chip.dragActivated)
+                                        lane.dragCanceled()
+                                    chip.dragActivated = false
+                                    chip.suppressClick = false
+                                }
+                                onClicked: if (!chip.suppressClick) {
                                     chip.forceActiveFocus()
                                     lane.eventSelected(chip.eventData.uid)
                                 }
-                                onDoubleClicked: lane.eventEditRequested(chip.eventData.uid)
+                                onDoubleClicked: if (!chip.suppressClick)
+                                    lane.eventEditRequested(chip.eventData.uid)
                             }
                             Keys.onReturnPressed: lane.eventEditRequested(chip.eventData.uid)
                             Keys.onEnterPressed: lane.eventEditRequested(chip.eventData.uid)
