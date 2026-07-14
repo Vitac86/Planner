@@ -19,10 +19,17 @@ AbstractButton {
     implicitWidth: 32
     implicitHeight: 32
     hoverEnabled: true
+    activeFocusOnTab: enabled
+
+    Accessible.role: Accessible.Button
+    Accessible.name: control.tip.length > 0
+                     ? control.tip
+                     : (control.iconName.length > 0 ? control.iconName : control.glyph)
+    Accessible.focusable: enabled
 
     HoverHandler { cursorShape: Qt.PointingHandCursor }
 
-    ToolTip.visible: hovered && tip.length > 0
+    ToolTip.visible: (hovered || visualFocus) && tip.length > 0
     ToolTip.text: tip
     ToolTip.delay: 500
 
@@ -31,6 +38,16 @@ AbstractButton {
         color: control.down ? Qt.darker(control.hoverBg, 1.06)
              : control.hovered ? control.hoverBg : "transparent"
         Behavior on color { ColorAnimation { duration: 90 } }
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: -3
+            radius: parent.radius + 3
+            color: "transparent"
+            border.color: Theme.focusRing
+            border.width: 2
+            visible: control.visualFocus
+        }
     }
 
     contentItem: Item {

@@ -10,7 +10,11 @@ import "../theme"
 ColumnLayout {
     id: empty
 
-    property string glyph: "🗒"
+    // iconName — линейная иконка AppIcon (единая иконографика);
+    // glyph оставлен для обратной совместимости, но не используется,
+    // если задан iconName.
+    property string iconName: "note"
+    property string glyph: ""
     property string text: "Здесь пока пусто"
     property string hint: ""
     property string actionText: ""
@@ -20,7 +24,26 @@ ColumnLayout {
 
     spacing: Theme.spacingXs
 
+    Rectangle {
+        visible: empty.glyph.length === 0
+        implicitWidth: 52
+        implicitHeight: 52
+        radius: height / 2
+        color: Theme.surfaceMuted
+        border.color: Theme.border
+        border.width: 1
+        Layout.alignment: Qt.AlignHCenter
+        Layout.bottomMargin: Theme.spacingXs
+
+        AppIcon {
+            anchors.centerIn: parent
+            name: empty.iconName
+            size: 24
+            color: Theme.textMuted
+        }
+    }
     Label {
+        visible: empty.glyph.length > 0
         text: empty.glyph
         font.pixelSize: 30
         Layout.alignment: Qt.AlignHCenter

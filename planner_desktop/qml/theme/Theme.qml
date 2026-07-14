@@ -97,6 +97,16 @@ QtObject {
     function priorityColor(p) { return priorityFg[clampPriority(p)] }
     function priorityBgColor(p) { return priorityBg[clampPriority(p)] }
 
+    // ---- русские названия месяцев (для заголовка месячной сетки) ----
+    readonly property var monthsNominative: [
+        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+    ]
+    function monthName(monthZeroBased) {
+        var m = Math.max(0, Math.min(11, monthZeroBased))
+        return monthsNominative[m]
+    }
+
     // Русское склонение существительного при числе:
     // plural(3, "задача", "задачи", "задач") -> "задачи".
     function plural(n, one, few, many) {

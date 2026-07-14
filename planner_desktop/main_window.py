@@ -24,6 +24,7 @@ from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
 from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
 from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
 from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
+from planner_desktop.viewmodels.ui_state import UiStateViewModel
 
 QML_DIR = Path(__file__).resolve().parent / "qml"
 
@@ -79,6 +80,7 @@ class MainWindow:
             manual_sync_service=self._build_manual_sync_service())
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
+        self.ui_state_viewmodel = UiStateViewModel()
 
         # Мутация задач на одной странице освежает остальные. Петли нет:
         # refresh() эмитит только *Changed-сигналы, а не tasksMutated.
@@ -111,6 +113,7 @@ class MainWindow:
         context.setContextProperty("settingsVm", self.settings_viewmodel)
         context.setContextProperty("dailyVm", self.daily_viewmodel)
         context.setContextProperty("historyVm", self.history_viewmodel)
+        context.setContextProperty("uiVm", self.ui_state_viewmodel)
 
     def _build_manual_sync_service(self):
         """ManualSyncService для кнопки «Синхронизировать сейчас».

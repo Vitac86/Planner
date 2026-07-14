@@ -13,8 +13,9 @@ ApplicationWindow {
     visible: true
     width: 1240
     height: 800
-    minimumWidth: 900
-    minimumHeight: 620
+    // Минимальный работоспособный размер задаёт Python (domain/layout.py).
+    minimumWidth: uiVm.minWindowWidth
+    minimumHeight: uiVm.minWindowHeight
     title: "Planner — экспериментальный десктоп (PySide6/QML)"
 
     Material.theme: Material.Light
@@ -25,178 +26,175 @@ ApplicationWindow {
 
     property int currentPage: 0
 
-    RowLayout {
-        anchors.fill: parent
-        spacing: 0
-
-        Sidebar {
-            Layout.fillHeight: true
-            currentIndex: root.currentPage
-            onPageSelected: index => root.currentPage = index
-        }
-
-        // Область контента с мягким вертикальным градиентом фона.
-        Item {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-
-            Rectangle {
-                anchors.fill: parent
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: Theme.background }
-                    GradientStop { position: 1.0; color: Theme.backgroundAlt }
-                }
-            }
-
-            StackLayout {
-                anchors.fill: parent
-                currentIndex: root.currentPage
-
-                TodayPage { id: todayPage; objectName: "todayPage" }
-                CalendarPage { id: calendarPage; objectName: "calendarPage" }
-                HistoryPage {}
-                SettingsPage {}
-            }
-        }
-    }
-
-    // ---- клавиатурные сокращения ----
-    // Не срабатывают, когда фокус в текстовом поле (кроме Ctrl-сочетаний):
-    // так «/» и Delete не мешают вводу.
+    // ---- маршрутизация сокращений ----
+    // Политика в Python (domain/keyboard.py через uiVm.allowShortcut):
+    // «голые» клавиши уступают текстовому вводу и открытым диалогам.
     function _typingNow() {
         var it = root.activeFocusItem
-        return it && (it instanceof TextInput || it instanceof TextEdit)
+        return !!(it && (it instanceof TextInput || it instanceof TextEdit))
+    }
+    readonly property bool anyDialogOpen:
+        todayPage.dialogsOpen || calendarPage.dialogsOpen || historyPage.dialogsOpen
+    function _allow(name) {
+        return uiVm.allowShortcut(name, root._typingNow(), root.anyDialogOpen)
     }
     function _newTaskOnCurrentPage() {
         if (root.currentPage === 1) calendarPage.newTask()
         else { root.currentPage = 0; todayPage.newTask() }
     }
+    function _newScheduledTaskOnCurrentPage() {
+        if (root.currentPage === 1) calendarPage.newScheduledTask()
+        else { root.currentPage = 0; todayPage.newScheduledTask() }
+    }
+    function _currentTaskPage() {
+        if (root.currentPage === 0) return todayPage
+        if (root.currentPage === 1) return calendarPage
+        if (root.currentPage === 2) return historyPage
+        return null
+    }
 
+    Item {
+        id: shortcutScope
+        anchors.fill: parent
+        focus: true
+
+        // «Голые» клавиши обрабатываются по цепочке фокуса: если Enter/Space/
+        // Delete съело текстовое поле или кнопка — сюда они не долетят,
+        // поэтому набор текста сокращения не ломают. Политика Python
+        // проверяется дополнительно (диалоги, зарезервированные клавиши).
+        Keys.onPressed: event => {
+            var page = root._currentTaskPage()
+            if (event.key === Qt.Key_Escape) {
+                if (page && root._allow("clear_selection")) {
+                    page.clearSelection()
+                    event.accepted = true
+                }
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (page && root._allow("open_selected")) {
+                    page.openSelected()
+                    event.accepted = true
+                }
+            } else if (event.key === Qt.Key_Space) {
+                if (page && root._allow("toggle_selected")) {
+                    page.toggleSelected()
+                    event.accepted = true
+                }
+            } else if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
+                if (page && root._allow("delete_selected")) {
+                    page.deleteSelected()
+                    event.accepted = true
+                }
+            }
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            Sidebar {
+                Layout.fillHeight: true
+                currentIndex: root.currentPage
+                onPageSelected: index => root.currentPage = index
+            }
+
+            // Область контента с мягким вертикальным градиентом фона.
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                Rectangle {
+                    anchors.fill: parent
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: Theme.background }
+                        GradientStop { position: 1.0; color: Theme.backgroundAlt }
+                    }
+                }
+
+                StackLayout {
+                    anchors.fill: parent
+                    currentIndex: root.currentPage
+
+                    TodayPage { id: todayPage; objectName: "todayPage" }
+                    CalendarPage { id: calendarPage; objectName: "calendarPage" }
+                    HistoryPage { id: historyPage; objectName: "historyPage" }
+                    SettingsPage {}
+                }
+            }
+        }
+    }
+
+    // ---- клавиатурные сокращения окна (см. docs/SHORTCUTS.md) ----
     Shortcut {
         sequences: [StandardKey.New, "Ctrl+N"]
+        enabled: root._allow("new_task")
         onActivated: root._newTaskOnCurrentPage()
     }
     Shortcut {
+        sequence: "Ctrl+Shift+N"
+        enabled: root._allow("new_scheduled_task")
+        onActivated: root._newScheduledTaskOnCurrentPage()
+    }
+    Shortcut {
         sequences: ["Ctrl+K", "Meta+K"]
+        enabled: root._allow("quick_add")
         onActivated: { root.currentPage = 0; todayPage.focusQuickAdd() }
     }
     Shortcut {
         sequence: "/"
-        enabled: {
-            var it = root.activeFocusItem
-            return !(it && (it instanceof TextInput || it instanceof TextEdit))
-        }
+        enabled: root._allow("quick_add_slash")
         onActivated: { root.currentPage = 0; todayPage.focusQuickAdd() }
     }
+    // Ctrl+R — перечитать ТОЛЬКО локальные модели; Google-синк не запускается.
     Shortcut {
-        sequences: ["Delete", "Backspace"]
-        enabled: {
-            var it = root.activeFocusItem
-            var typing = it && (it instanceof TextInput || it instanceof TextEdit)
-            return !typing && root.currentPage === 0 && todayPage.selectedUid !== ""
+        sequence: "Ctrl+R"
+        enabled: root._allow("refresh")
+        onActivated: {
+            todayVm.refresh()
+            calendarVm.refresh()
+            historyVm.refresh()
+            dailyVm.refresh()
+            settingsVm.refresh()
+            toast.show("Данные обновлены")
         }
-        onActivated: todayPage.deleteSelected()
     }
+    // Ctrl+F зарезервирован за поиском (фаза 3) — сознательно не привязан.
+
     // Навигация по дням недели на «Календаре» стрелками (вне текстовых полей).
     Shortcut {
         sequence: "Left"
-        enabled: root.currentPage === 1 && !root._typingNow()
+        enabled: root.currentPage === 1 && root._allow("calendar_prev_day")
         onActivated: calendarPage.selectPrevDay()
     }
     Shortcut {
         sequence: "Right"
-        enabled: root.currentPage === 1 && !root._typingNow()
+        enabled: root.currentPage === 1 && root._allow("calendar_next_day")
         onActivated: calendarPage.selectNextDay()
     }
 
-    // ---- всплывашка «Сохранено»/«Удалено» ----
-    Item {
+    // ---- всплывашки успеха/ошибки ----
+    Toast {
         id: toast
-
-        property string message: ""
-        property string iconName: "check"
-        property color iconColor: Theme.success
-
-        function show(text) {
-            message = text
-            if (text.indexOf("далена") >= 0 || text.indexOf("далён") >= 0) {
-                iconName = "trash"; iconColor = "#FF9B9B"
-            } else {
-                iconName = "check"; iconColor = "#7CE6A6"
-            }
-            toastTimer.restart()
-        }
-
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: toastTimer.running ? 30 : 18
-        width: toastBg.width
-        height: toastBg.height
-        opacity: toastTimer.running ? 1.0 : 0
-        visible: opacity > 0
-        z: 900
-
-        Behavior on opacity { NumberAnimation { duration: 180 } }
-        Behavior on anchors.bottomMargin { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-
-        Rectangle {
-            id: toastBg
-            radius: height / 2
-            color: Theme.scrim
-            implicitHeight: 40
-            implicitWidth: toastRow.implicitWidth + 34
-
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                shadowEnabled: true
-                shadowColor: Theme.shadowColor
-                blurMax: Theme.shadowBlurMax
-                shadowBlur: Theme.elevDialogBlur
-                shadowVerticalOffset: 8
-                shadowOpacity: 0.34
-                autoPaddingEnabled: true
-            }
-
-            RowLayout {
-                id: toastRow
-                anchors.centerIn: parent
-                spacing: Theme.spacingSm
-
-                AppIcon {
-                    name: toast.iconName
-                    color: toast.iconColor
-                    size: 17
-                }
-                Label {
-                    text: toast.message
-                    color: "#FFFFFF"
-                    font.pixelSize: 13
-                    font.family: Theme.fontFamily
-                    font.weight: Font.Medium
-                }
-            }
-        }
-
-        Timer {
-            id: toastTimer
-            interval: 2200
-        }
     }
 
     Connections {
         target: todayVm
         function onToastMessage(text) { toast.show(text) }
+        function onToastError(text) { toast.showError(text) }
     }
     Connections {
         target: calendarVm
         function onToastMessage(text) { toast.show(text) }
-    }
-    Connections {
-        target: dailyVm
-        function onToastMessage(text) { toast.show(text) }
+        function onToastError(text) { toast.showError(text) }
     }
     Connections {
         target: historyVm
+        function onToastMessage(text) { toast.show(text) }
+        function onToastError(text) { toast.showError(text) }
+    }
+    Connections {
+        target: dailyVm
         function onToastMessage(text) { toast.show(text) }
     }
     Connections {

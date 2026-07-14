@@ -7,7 +7,8 @@ import "../theme"
 // Быстрое добавление задачи. Компактная строка по умолчанию: название +
 // приоритет + «Детали». В компактном режиме название разбирается лёгким
 // парсером (todayVm.addQuick): «Отчёт завтра 15:00» → дата/время сами.
-// Раскрытые «Детали» дают явные поля (todayVm.addTaskDetailed).
+// Раскрытые «Детали» дают явные поля с нативными пикерами даты/времени
+// (todayVm.addTaskDetailed) — сырые строки дат пользователь не видит.
 // Enter создаёт задачу, Escape очищает/сворачивает. Вся валидация — в
 // Python: невалидный ввод даёт видимую ошибку и не «вешает» интерфейс.
 Panel {
@@ -15,6 +16,8 @@ Panel {
 
     property bool expanded: false
     property int priority: 0
+    // Компактная раскладка окна: кнопки без подписей, чтобы строка не ломалась.
+    property bool compact: false
 
     implicitHeight: layout.implicitHeight + 2 * Theme.spacingLg
 
@@ -22,31 +25,28 @@ Panel {
         titleField.forceActiveFocus()
         titleField.selectAll()
     }
-    function todayText() { return Qt.formatDate(new Date(), "yyyy-MM-dd") }
-    function tomorrowText() {
-        var d = new Date()
-        d.setDate(d.getDate() + 1)
-        return Qt.formatDate(d, "yyyy-MM-dd")
-    }
 
     function clearForm() {
         titleField.text = ""
         notesField.text = ""
-        dateField.text = ""
-        timeField.text = ""
-        durationField.text = ""
+        dateField.dateText = ""
+        timeField.timeText = ""
+        durationPicker.reset("")
         calendarCheck.checked = false
         allDayCheck.checked = false
         quickAdd.priority = 0
     }
 
     function submit() {
+        if (todayVm.busy)
+            return
         var ok
         if (quickAdd.expanded) {
             ok = todayVm.addTaskDetailed(
                 titleField.text, notesField.text, quickAdd.priority,
                 calendarCheck.checked, allDayCheck.checked,
-                dateField.text, timeField.text, durationField.text)
+                dateField.dateText, timeField.timeText,
+                allDayCheck.checked ? "" : durationPicker.durationText)
         } else {
             ok = todayVm.addQuick(titleField.text, quickAdd.priority)
         }
@@ -92,7 +92,9 @@ Panel {
 
             AppTextField {
                 id: titleField
-                placeholderText: "Новая задача…  напр. «Отчёт завтра 15:00»"
+                placeholderText: quickAdd.compact
+                    ? "Новая задача…"
+                    : "Новая задача…  напр. «Отчёт завтра 15:00»"
                 Layout.fillWidth: true
                 onAccepted: quickAdd.submit()
                 Keys.onEscapePressed: {
@@ -123,6 +125,7 @@ Panel {
                         color: quickAdd.priority > 0 ? Theme.priorityColor(quickAdd.priority) : Theme.textMuted
                     }
                     Label {
+                        visible: !quickAdd.compact
                         anchors.verticalCenter: parent.verticalCenter
                         text: quickAdd.priority > 0 ? Theme.priorityName(quickAdd.priority) : "Приоритет"
                         font.pixelSize: Theme.fontBody
@@ -144,16 +147,21 @@ Panel {
             }
 
             AppButton {
-                text: quickAdd.expanded ? "Свернуть" : "Детали"
+                text: quickAdd.compact ? "" : (quickAdd.expanded ? "Свернуть" : "Детали")
                 variant: "ghost"
-                iconName: quickAdd.expanded ? "chevron-down" : "note"
+                iconName: quickAdd.expanded ? "chevron-up" : "note"
                 onClicked: quickAdd.expanded = !quickAdd.expanded
+                ToolTip.visible: quickAdd.compact && hovered
+                ToolTip.text: quickAdd.expanded ? "Свернуть" : "Детали"
             }
             AppButton {
-                text: "Добавить"
+                text: quickAdd.compact ? "" : "Добавить"
                 variant: "primary"
                 iconName: "plus"
+                enabled: !todayVm.busy
                 onClicked: quickAdd.submit()
+                ToolTip.visible: quickAdd.compact && hovered
+                ToolTip.text: "Добавить"
             }
         }
 
@@ -183,6 +191,13 @@ Panel {
                     text: "Добавить в календарь"
                     font.pixelSize: Theme.fontBody
                     font.family: Theme.fontFamily
+                    onCheckedChanged: {
+                        // дата по умолчанию — сегодня (правило в Python)
+                        if (checked && dateField.dateText === "") {
+                            var res = todayVm.applyEditorPreset("today", "allday", "", "")
+                            if (res.ok) dateField.dateText = res.dateText
+                        }
+                    }
                 }
                 CheckBox {
                     id: allDayCheck
@@ -194,39 +209,27 @@ Panel {
                 Item { Layout.fillWidth: true }
             }
 
-            RowLayout {
+            Flow {
                 spacing: Theme.spacingSm
                 visible: calendarCheck.checked
                 Layout.fillWidth: true
 
-                AppTextField {
+                DatePickerField {
                     id: dateField
-                    placeholderText: "ГГГГ-ММ-ДД"
-                    Layout.preferredWidth: 150
+                    width: 230
                 }
-                AppButton {
-                    text: "Сегодня"
-                    variant: "secondary"
-                    onClicked: dateField.text = quickAdd.todayText()
-                }
-                AppButton {
-                    text: "Завтра"
-                    variant: "secondary"
-                    onClicked: dateField.text = quickAdd.tomorrowText()
-                }
-                AppTextField {
+                TimePickerField {
                     id: timeField
-                    placeholderText: "ЧЧ:ММ"
-                    enabled: !allDayCheck.checked
-                    Layout.preferredWidth: 120
+                    visible: !allDayCheck.checked
+                    onAccepted: quickAdd.submit()
                 }
-                AppTextField {
-                    id: durationField
-                    placeholderText: "Длит., мин"
-                    enabled: !allDayCheck.checked
-                    Layout.preferredWidth: 110
-                }
-                Item { Layout.fillWidth: true }
+            }
+
+            DurationPicker {
+                id: durationPicker
+                visible: calendarCheck.checked && !allDayCheck.checked
+                presets: todayVm.durationPresets
+                Layout.fillWidth: true
             }
         }
 

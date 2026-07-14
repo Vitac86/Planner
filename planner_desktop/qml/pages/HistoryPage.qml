@@ -12,12 +12,46 @@ import "../theme"
 Item {
     id: page
 
+    readonly property string layoutMode: uiVm.layoutModeFor(width)
+    readonly property bool compact: layoutMode === "compact"
+    property var focusReturnItem: null
+
+    readonly property bool dialogsOpen: editorDialog.visible
+                                        || confirmDeleteDialog.visible
+
+    function openSelected() {
+        if (historyVm.selectedUid !== "")
+            editorDialog.openForEdit(historyVm.selectedUid)
+    }
+    function toggleSelected() {
+        if (historyVm.selectedUid === "")
+            return
+        var uid = historyVm.selectedUid
+        if (historyVm.restoreTask(uid)) {
+            historyVm.clearSelection()
+            Qt.callLater(function() { historyList.forceActiveFocus() })
+        }
+    }
+    function deleteSelected() {
+        if (historyVm.selectedUid !== "")
+            confirmDeleteDialog.openFor(historyVm.selectedUid)
+    }
+    function clearSelection() { historyVm.clearSelection() }
+    function restoreFocus() {
+        var item = focusReturnItem
+        focusReturnItem = null
+        if (item && item.visible && item.enabled)
+            item.forceActiveFocus()
+        else
+            historyList.forceActiveFocus()
+    }
+
     onVisibleChanged: if (visible) historyVm.refresh()
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spacingXl
-        spacing: Theme.spacingLg
+        anchors.margins: page.compact ? Theme.spacingLg : Theme.spacingXl
+        spacing: page.compact ? Theme.spacingMd : Theme.spacingLg
 
         PageHeader {
             title: "История"
@@ -25,6 +59,7 @@ Item {
                       ? (historyVm.totalCount + " выполнено за выбранный период")
                       : "Журнал выполненных задач · только локально"
             Layout.fillWidth: true
+            stackActions: page.compact
 
             SegmentedControl {
                 id: rangeFilter
@@ -75,7 +110,7 @@ Item {
                             color: Theme.textPrimary
                         }
                         Label {
-                            visible: group.modelData.relLabel.length > 0
+                            visible: group.modelData.relLabel.length > 0 && !page.compact
                             text: group.modelData.dateLabel
                             font.pixelSize: Theme.fontCaption
                             font.family: Theme.fontFamily
@@ -96,14 +131,64 @@ Item {
                         delegate: Rectangle {
                             id: entry
                             required property var modelData
+                            readonly property bool selected:
+                                !modelData.isDaily
+                                && historyVm.selectedUid === modelData.uid
+                            readonly property bool keyboardFocusWithin:
+                                entry.activeFocus || editAction.activeFocus
+                                || restoreAction.activeFocus || deleteAction.activeFocus
                             Layout.fillWidth: true
                             implicitHeight: entryRow.implicitHeight + 2 * Theme.spacingMd
                             radius: Theme.radiusMedium
-                            color: entryHover.hovered ? Theme.surfaceHover : Theme.surface
-                            border.color: Theme.border
-                            border.width: 1
+                            color: selected ? Theme.accentSoft
+                                 : entryHover.hovered ? Theme.surfaceHover : Theme.surface
+                            border.color: (selected || activeFocus)
+                                          ? Theme.accent : Theme.border
+                            border.width: (selected || activeFocus) ? 1.6 : 1
+                            activeFocusOnTab: !modelData.isDaily
+
+                            Accessible.role: Accessible.ListItem
+                            Accessible.name: modelData.title
+                            Accessible.description: modelData.isDaily
+                                ? "Ежедневная запись истории, только чтение"
+                                : "Выполненная задача. Space возвращает в работу"
+                            Accessible.focusable: !modelData.isDaily
+                            Accessible.selected: selected
 
                             HoverHandler { id: entryHover }
+                            TapHandler {
+                                enabled: !entry.modelData.isDaily
+                                onSingleTapped: {
+                                    entry.forceActiveFocus()
+                                    historyVm.selectTask(entry.modelData.uid)
+                                }
+                                onDoubleTapped: {
+                                    page.focusReturnItem = entry
+                                    historyVm.selectTask(entry.modelData.uid)
+                                    editorDialog.openForEdit(entry.modelData.uid)
+                                }
+                            }
+                            Keys.onPressed: event => {
+                                if (entry.modelData.isDaily)
+                                    return
+                                historyVm.selectTask(entry.modelData.uid)
+                                if (event.key === Qt.Key_Return
+                                        || event.key === Qt.Key_Enter) {
+                                    page.focusReturnItem = entry
+                                    editorDialog.openForEdit(entry.modelData.uid)
+                                    event.accepted = true
+                                } else if (event.key === Qt.Key_Space) {
+                                    page.toggleSelected()
+                                    event.accepted = true
+                                } else if (event.key === Qt.Key_Delete) {
+                                    page.focusReturnItem = entry
+                                    confirmDeleteDialog.openFor(entry.modelData.uid)
+                                    event.accepted = true
+                                } else if (event.key === Qt.Key_Escape) {
+                                    page.clearSelection()
+                                    event.accepted = true
+                                }
+                            }
 
                             RowLayout {
                                 id: entryRow
@@ -170,13 +255,14 @@ Item {
 
                                 Badge {
                                     visible: entry.modelData.isDaily
-                                    text: "ежедневная"
+                                    text: page.compact ? "ежедн." : "ежедневная"
                                     fg: Theme.accent
                                     bg: Theme.accentSoft
                                     Layout.alignment: Qt.AlignVCenter
                                 }
                                 Badge {
                                     visible: entry.modelData.timeLabel.length > 0
+                                             && !page.compact
                                     text: entry.modelData.timeLabel
                                     fg: entry.modelData.isAllDay ? Theme.success : Theme.textSecondary
                                     bg: entry.modelData.isAllDay ? Theme.successSoft : Theme.surfacePressed
@@ -196,22 +282,47 @@ Item {
                                     spacing: 2
                                     Layout.alignment: Qt.AlignVCenter
                                     visible: !entry.modelData.isDaily
-                                    opacity: entryHover.hovered ? 1.0 : 0.0
+                                    opacity: (entryHover.hovered || entry.selected
+                                              || entry.keyboardFocusWithin) ? 1.0 : 0.0
                                     Behavior on opacity { NumberAnimation { duration: 130 } }
 
                                     IconButton {
+                                        id: editAction
                                         iconName: "edit"
                                         tip: "Подробнее"
                                         hoverGlyphColor: Theme.accent
                                         hoverBg: Theme.accentSoft
-                                        onClicked: editorDialog.openForEdit(entry.modelData.uid)
+                                        enabled: !historyVm.busy
+                                        onClicked: {
+                                            page.focusReturnItem = entry
+                                            historyVm.selectTask(entry.modelData.uid)
+                                            editorDialog.openForEdit(entry.modelData.uid)
+                                        }
                                     }
                                     IconButton {
+                                        id: restoreAction
                                         iconName: "refresh"
                                         tip: "Вернуть в работу"
                                         hoverGlyphColor: Theme.accent
                                         hoverBg: Theme.accentSoft
-                                        onClicked: historyVm.reopenTask(entry.modelData.uid)
+                                        enabled: !historyVm.busy
+                                        onClicked: {
+                                            historyVm.selectTask(entry.modelData.uid)
+                                            page.toggleSelected()
+                                        }
+                                    }
+                                    IconButton {
+                                        id: deleteAction
+                                        iconName: "trash"
+                                        tip: "Удалить"
+                                        hoverGlyphColor: Theme.danger
+                                        hoverBg: Theme.dangerSoft
+                                        enabled: !historyVm.busy
+                                        onClicked: {
+                                            page.focusReturnItem = entry
+                                            historyVm.selectTask(entry.modelData.uid)
+                                            confirmDeleteDialog.openFor(entry.modelData.uid)
+                                        }
                                     }
                                 }
                             }
@@ -224,7 +335,7 @@ Item {
                 anchors.centerIn: parent
                 width: parent.width - 2 * Theme.spacingXl
                 visible: historyVm.isEmpty
-                glyph: "🕘"
+                iconName: "history"
                 text: historyVm.rangeDays === 0
                       ? "Выполненных задач пока нет"
                       : "За этот период нет выполненных задач"
@@ -240,5 +351,19 @@ Item {
         id: editorDialog
         objectName: "historyEditorDialog"
         vm: historyVm
+        onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+        onClosed: {
+            if (!confirmDeleteDialog.visible)
+                page.restoreFocus()
+        }
+    }
+
+    ConfirmDialog {
+        id: confirmDeleteDialog
+        headerText: "Удалить задачу?"
+        message: "Задача будет помечена удалённой; если её событие уже есть "
+                 + "в календаре, удаление события встанет в очередь синка."
+        onConfirmed: uid => historyVm.deleteTask(uid)
+        onClosed: page.restoreFocus()
     }
 }

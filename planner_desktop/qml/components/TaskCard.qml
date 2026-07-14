@@ -21,16 +21,52 @@ Item {
     property bool completed: false
     property bool hasPendingSync: false
     property bool isLinked: false
+    property bool isScheduled: false
+    property bool isRecurring: false
+    // Пока идёт операция (vm.busy), действия карточки выключены —
+    // быстрый двойной клик не выполняет операцию дважды.
+    property bool actionsEnabled: true
 
     property bool hovered: hoverHandler.hovered
     property bool selected: false
+    readonly property bool keyboardFocusWithin: card.activeFocus
+        || check.activeFocus || snoozeButton.activeFocus
+        || editButton.activeFocus || deleteButton.activeFocus
 
     signal toggled(string uid)
     signal editRequested(string uid)
     signal deleteRequested(string uid)
     signal selectRequested(string uid)
+    signal snoozeRequested(string uid)
 
     implicitHeight: Math.max(content.implicitHeight + 24, 60)
+    activeFocusOnTab: actionsEnabled
+
+    Accessible.role: Accessible.ListItem
+    Accessible.name: title
+    Accessible.description: timeLabel.length > 0 ? timeLabel : "Без даты"
+    Accessible.focusable: actionsEnabled
+    Accessible.selected: selected
+
+    onActiveFocusChanged: {
+        if (activeFocus)
+            card.selectRequested(card.uid)
+    }
+
+    Keys.onPressed: event => {
+        if (!card.actionsEnabled)
+            return
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            card.editRequested(card.uid)
+            event.accepted = true
+        } else if (event.key === Qt.Key_Space) {
+            card.toggled(card.uid)
+            event.accepted = true
+        } else if (event.key === Qt.Key_Delete) {
+            card.deleteRequested(card.uid)
+            event.accepted = true
+        }
+    }
 
     Rectangle {
         id: bg
@@ -38,9 +74,9 @@ Item {
         radius: Theme.radiusMedium
         color: card.selected ? Theme.accentSoft
              : card.hovered ? Theme.surfaceHover : Theme.surface
-        border.color: card.selected ? Theme.accent
+        border.color: (card.selected || card.activeFocus) ? Theme.accent
                     : card.hovered ? Theme.borderStrong : Theme.border
-        border.width: card.selected ? 1.6 : 1
+        border.width: (card.selected || card.activeFocus) ? 1.6 : 1
 
         Behavior on color { ColorAnimation { duration: 110 } }
         Behavior on border.color { ColorAnimation { duration: 110 } }
@@ -63,8 +99,14 @@ Item {
     TapHandler {
         // Одиночный клик выделяет карточку (детали в инспекторе справа),
         // двойной — быстрый путь в редактор.
-        onSingleTapped: card.selectRequested(card.uid)
-        onDoubleTapped: card.editRequested(card.uid)
+        onSingleTapped: {
+            card.forceActiveFocus()
+            card.selectRequested(card.uid)
+        }
+        onDoubleTapped: {
+            if (card.actionsEnabled)
+                card.editRequested(card.uid)
+        }
     }
 
     RowLayout {
@@ -87,6 +129,25 @@ Item {
             border.color: card.completed ? Theme.success
                         : checkHover.hovered ? Theme.accent : Theme.borderStrong
             border.width: card.completed ? 0 : 1.6
+            activeFocusOnTab: card.actionsEnabled
+
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: card.completed
+                             ? "Снять отметку выполнения: " + card.title
+                             : "Отметить выполненной: " + card.title
+            Accessible.checked: card.completed
+            Accessible.checkable: true
+            Accessible.focusable: card.actionsEnabled
+
+            Keys.onPressed: event => {
+                if (card.actionsEnabled
+                        && (event.key === Qt.Key_Space
+                            || event.key === Qt.Key_Return
+                            || event.key === Qt.Key_Enter)) {
+                    card.toggled(card.uid)
+                    event.accepted = true
+                }
+            }
 
             Behavior on color { ColorAnimation { duration: 130 } }
             Behavior on border.color { ColorAnimation { duration: 130 } }
@@ -103,7 +164,23 @@ Item {
             }
 
             HoverHandler { id: checkHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler { onTapped: card.toggled(card.uid) }
+            TapHandler {
+                enabled: card.actionsEnabled
+                onTapped: {
+                    check.forceActiveFocus()
+                    card.toggled(card.uid)
+                }
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: -3
+                radius: parent.radius + 3
+                color: "transparent"
+                border.color: Theme.focusRing
+                border.width: 2
+                visible: check.activeFocus
+            }
         }
 
         // цветная полоса приоритета
@@ -161,14 +238,35 @@ Item {
             Layout.alignment: Qt.AlignVCenter
         }
 
-        Badge {
+        Rectangle {
             visible: card.hasPendingSync
-            text: "⟳ Синк"
-            fg: Theme.warningText
-            bg: Theme.warningSoft
             Layout.alignment: Qt.AlignVCenter
+            implicitHeight: 22
+            implicitWidth: syncRow.implicitWidth + 16
+            radius: height / 2
+            color: Theme.warningSoft
+            border.color: Theme.warningSoftBorder
+            border.width: 1
             ToolTip.visible: syncHover.hovered
             ToolTip.text: "Операция ждёт отправки в Google Calendar (синк вручную)"
+
+            Row {
+                id: syncRow
+                anchors.centerIn: parent
+                spacing: 4
+                AppIcon {
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: "refresh"; size: 12; color: Theme.warningText
+                }
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Синк"
+                    font.pixelSize: Theme.fontCaption - 1
+                    font.family: Theme.fontFamily
+                    font.weight: Font.DemiBold
+                    color: Theme.warningText
+                }
+            }
             HoverHandler { id: syncHover }
         }
 
@@ -193,21 +291,34 @@ Item {
         RowLayout {
             spacing: 2
             Layout.alignment: Qt.AlignVCenter
-            opacity: card.hovered ? 1.0 : 0.0
+            opacity: (card.hovered || card.keyboardFocusWithin) ? 1.0 : 0.0
             Behavior on opacity { NumberAnimation { duration: 130 } }
 
             IconButton {
+                id: snoozeButton
+                iconName: "snooze"
+                tip: "Перенести…"
+                hoverGlyphColor: Theme.accent
+                hoverBg: Theme.accentSoft
+                enabled: card.actionsEnabled
+                onClicked: card.snoozeRequested(card.uid)
+            }
+            IconButton {
+                id: editButton
                 iconName: "edit"
                 tip: "Редактировать"
                 hoverGlyphColor: Theme.accent
                 hoverBg: Theme.accentSoft
+                enabled: card.actionsEnabled
                 onClicked: card.editRequested(card.uid)
             }
             IconButton {
+                id: deleteButton
                 iconName: "trash"
                 tip: "Удалить"
                 hoverGlyphColor: Theme.danger
                 hoverBg: Theme.dangerSoft
+                enabled: card.actionsEnabled
                 onClicked: card.deleteRequested(card.uid)
             }
         }

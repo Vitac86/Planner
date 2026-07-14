@@ -10,24 +10,37 @@ ScrollView {
     contentWidth: availableWidth
     clip: true
 
-    // Двухколоночная раскладка на широком окне: список задач слева, правая
-    // сводка/инспектор справа. На узком окне правый столбец скрыт, контент
-    // центрируется.
-    property bool wide: availableWidth >= 980
+    // Режим раскладки считает Python (domain/layout.py): compact/normal/wide.
+    // wide — две колонки (список + правая сводка/инспектор); normal — одна
+    // колонка, инспектор выезжает панелью; compact — то же, плотнее.
+    readonly property string layoutMode: uiVm.layoutModeFor(availableWidth)
+    readonly property bool wide: layoutMode === "wide"
+    readonly property bool compact: layoutMode === "compact"
+    property var focusReturnItem: null
     property real bodyWidth: wide ? Math.min(availableWidth - 48, 1140)
-                                  : Math.min(availableWidth - 48, 780)
+                                  : Math.min(availableWidth - (compact ? 32 : 48), 780)
 
-    // ---- выбор задачи (для инспектора в правой сводке) ----
-    property string selectedUid: ""
-    property var selectedTask: {
-        if (selectedUid === "")
-            return null
-        var lists = [todayVm.todayTasks, todayVm.undatedTasks]
-        for (var l = 0; l < lists.length; l++)
-            for (var i = 0; i < lists[l].length; i++)
-                if (lists[l][i].uid === selectedUid)
-                    return lists[l][i]
-        return null  // выбранная задача исчезла (удалена/выполнена вне списка)
+    // ---- выбор задачи живёт в ViewModel (todayVm.selectedUid/selectedTask) ----
+    readonly property var selTask: todayVm.selectedTask
+    readonly property bool dialogsOpen: editorDialog.visible
+                                        || confirmDeleteDialog.visible
+                                        || dailyDialog.visible
+                                        || snoozeMenu.visible
+                                        || inspectorDrawer.visible
+
+    function restoreFocus() {
+        var item = focusReturnItem
+        focusReturnItem = null
+        if (item && item.visible && item.enabled)
+            item.forceActiveFocus()
+        else
+            quickAddItem.focusInput()
+    }
+
+    function selectTask(uid) {
+        todayVm.selectTask(uid)
+        if (!page.wide && todayVm.selectedUid !== "")
+            inspectorDrawer.open()
     }
 
     // Ближайшая невыполненная задача на сегодня (для карточки «Дальше»).
@@ -41,9 +54,22 @@ ScrollView {
     // ---- функции для клавиатурных сокращений (вызываются из Main.qml) ----
     function focusQuickAdd() { quickAddItem.focusInput() }
     function newTask() { editorDialog.openForCreate("") }
+    function newScheduledTask() { editorDialog.openForCreateScheduled() }
+    function openSelected() {
+        if (todayVm.selectedUid !== "")
+            editorDialog.openForEdit(todayVm.selectedUid)
+    }
+    function toggleSelected() {
+        if (todayVm.selectedUid !== "")
+            todayVm.toggleCompleted(todayVm.selectedUid)
+    }
     function deleteSelected() {
-        if (page.selectedUid !== "")
-            confirmDeleteDialog.openFor(page.selectedUid)
+        if (todayVm.selectedUid !== "")
+            confirmDeleteDialog.openFor(todayVm.selectedUid)
+    }
+    function clearSelection() {
+        inspectorDrawer.close()
+        todayVm.clearSelection()
     }
 
     // Ежедневный чек-лист — переиспользуется в основной колонке (узкое окно)
@@ -132,8 +158,8 @@ ScrollView {
         RowLayout {
             id: body
             anchors.top: parent.top
-            anchors.topMargin: 24
-            x: Math.max(24, (contentRoot.width - width) / 2)
+            anchors.topMargin: page.compact ? 16 : 24
+            x: Math.max(page.compact ? 16 : 24, (contentRoot.width - width) / 2)
             width: page.bodyWidth
             spacing: Theme.spacingXl
 
@@ -142,7 +168,7 @@ ScrollView {
                 id: mainCol
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignTop
-                spacing: Theme.spacingLg
+                spacing: page.compact ? Theme.spacingMd : Theme.spacingLg
 
                 PageHeader {
                     title: "Сегодня"
@@ -150,10 +176,16 @@ ScrollView {
                     Layout.fillWidth: true
 
                     AppButton {
-                        text: "Новая задача"
+                        id: newTaskButton
+                        text: page.compact ? "" : "Новая задача"
                         variant: "primary"
                         iconName: "plus"
-                        onClicked: editorDialog.openForCreate("")
+                        onClicked: {
+                            page.focusReturnItem = newTaskButton
+                            editorDialog.openForCreate("")
+                        }
+                        ToolTip.visible: page.compact && hovered
+                        ToolTip.text: "Новая задача (Ctrl+N)"
                     }
                 }
 
@@ -195,7 +227,12 @@ ScrollView {
 
                 // ---- Быстрое добавление ----
                 SectionHeader { title: "Быстрое добавление"; Layout.fillWidth: true }
-                QuickAdd { id: quickAddItem; objectName: "quickAdd"; Layout.fillWidth: true }
+                QuickAdd {
+                    id: quickAddItem
+                    objectName: "quickAdd"
+                    compact: page.compact
+                    Layout.fillWidth: true
+                }
 
                 // ---- Задачи на сегодня ----
                 SectionHeader {
@@ -210,6 +247,7 @@ ScrollView {
                     Repeater {
                         model: todayVm.todayTasks
                         delegate: TaskCard {
+                            id: todayCard
                             required property var modelData
                             Layout.fillWidth: true
                             uid: modelData.uid
@@ -221,22 +259,35 @@ ScrollView {
                             completed: modelData.completed
                             hasPendingSync: modelData.hasPendingSync
                             isLinked: modelData.isLinked
-                            selected: page.selectedUid === modelData.uid
-                            onSelectRequested: uid => page.selectedUid = uid
+                            isScheduled: modelData.isScheduled
+                            isRecurring: modelData.isRecurring
+                            actionsEnabled: !todayVm.busy
+                            selected: todayVm.selectedUid === modelData.uid
+                            onSelectRequested: uid => page.selectTask(uid)
                             onToggled: uid => todayVm.toggleCompleted(uid)
-                            onEditRequested: uid => editorDialog.openForEdit(uid)
-                            onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+                            onEditRequested: uid => {
+                                page.focusReturnItem = todayCard
+                                editorDialog.openForEdit(uid)
+                            }
+                            onDeleteRequested: uid => {
+                                page.focusReturnItem = todayCard
+                                confirmDeleteDialog.openFor(uid)
+                            }
+                            onSnoozeRequested: uid => {
+                                page.focusReturnItem = todayCard
+                                snoozeMenu.openFor(uid)
+                            }
                         }
                     }
                     EmptyState {
                         visible: todayVm.todayTasks.length === 0
-                        glyph: "☀️"
+                        iconName: "sun"
                         text: "На сегодня задач нет"
                         hint: "Начните день с одной задачи — впишите её выше или создайте кнопкой ниже"
                         actionText: "Создать первую задачу"
                         Layout.fillWidth: true
                         Layout.topMargin: Theme.spacingSm
-                        onActionClicked: editorDialog.openForCreate(quickAddItem.todayText())
+                        onActionClicked: editorDialog.openForCreate("")
                     }
                 }
 
@@ -253,6 +304,7 @@ ScrollView {
                     Repeater {
                         model: todayVm.undatedTasks
                         delegate: TaskCard {
+                            id: undatedCard
                             required property var modelData
                             Layout.fillWidth: true
                             uid: modelData.uid
@@ -264,16 +316,29 @@ ScrollView {
                             completed: modelData.completed
                             hasPendingSync: modelData.hasPendingSync
                             isLinked: modelData.isLinked
-                            selected: page.selectedUid === modelData.uid
-                            onSelectRequested: uid => page.selectedUid = uid
+                            isScheduled: modelData.isScheduled
+                            isRecurring: modelData.isRecurring
+                            actionsEnabled: !todayVm.busy
+                            selected: todayVm.selectedUid === modelData.uid
+                            onSelectRequested: uid => page.selectTask(uid)
                             onToggled: uid => todayVm.toggleCompleted(uid)
-                            onEditRequested: uid => editorDialog.openForEdit(uid)
-                            onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+                            onEditRequested: uid => {
+                                page.focusReturnItem = undatedCard
+                                editorDialog.openForEdit(uid)
+                            }
+                            onDeleteRequested: uid => {
+                                page.focusReturnItem = undatedCard
+                                confirmDeleteDialog.openFor(uid)
+                            }
+                            onSnoozeRequested: uid => {
+                                page.focusReturnItem = undatedCard
+                                snoozeMenu.openFor(uid)
+                            }
                         }
                     }
                     EmptyState {
                         visible: todayVm.undatedTasks.length === 0
-                        glyph: "📥"
+                        iconName: "inbox"
                         text: "Задач без даты нет"
                         hint: "Идеи без времени можно копить здесь — добавьте одну через «Детали» без даты"
                         Layout.fillWidth: true
@@ -291,7 +356,7 @@ ScrollView {
                 Item { implicitHeight: Theme.spacingSm }
             }
 
-            // ================= ПРАВАЯ СВОДКА / ИНСПЕКТОР =================
+            // ================= ПРАВАЯ СВОДКА / ИНСПЕКТОР (wide) =================
             ColumnLayout {
                 id: rail
                 visible: page.wide
@@ -302,19 +367,25 @@ ScrollView {
 
                 // ---- инспектор выбранной задачи ----
                 TaskInspector {
-                    visible: page.selectedTask !== null
-                    task: page.selectedTask
+                    visible: page.selTask !== null && page.selTask !== undefined
+                    task: page.selTask
+                    busy: todayVm.busy
+                    snoozeActions: page.selTask ? todayVm.snoozeActionsFor(page.selTask.uid) : []
+                    taskPresets: page.selTask ? todayVm.taskPresetsFor(page.selTask.uid) : []
                     Layout.fillWidth: true
                     onEditRequested: uid => editorDialog.openForEdit(uid)
                     onToggleRequested: uid => todayVm.toggleCompleted(uid)
                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
-                    onCloseRequested: page.selectedUid = ""
+                    onPostponeRequested: (uid, action) => todayVm.postponeTask(uid, action)
+                    onPresetRequested: (uid, presetId) => todayVm.applyTaskPreset(uid, presetId)
+                    onPickRequested: uid => editorDialog.openForEdit(uid)
+                    onCloseRequested: page.clearSelection()
                 }
 
                 // ---- сводка дня (когда ничего не выбрано) ----
                 ColumnLayout {
                     id: summary
-                    visible: page.selectedTask === null
+                    visible: !page.selTask
                     Layout.fillWidth: true
                     spacing: Theme.spacingLg
 
@@ -458,10 +529,65 @@ ScrollView {
         }
     }
 
+    // ---- инспектор-панель для normal/compact ----
+    Drawer {
+        id: inspectorDrawer
+        edge: Qt.RightEdge
+        width: page.compact ? Math.min(page.width - 40, 360) : 360
+        height: page.height
+        interactive: visible
+
+        onClosed: todayVm.clearSelection()
+
+        background: Rectangle {
+            color: Theme.surface
+            border.color: Theme.border
+            border.width: 1
+        }
+
+        TaskInspector {
+            anchors.fill: parent
+            anchors.margins: Theme.spacingSm
+            visible: page.selTask !== null && page.selTask !== undefined
+            task: page.selTask
+            busy: todayVm.busy
+            snoozeActions: page.selTask ? todayVm.snoozeActionsFor(page.selTask.uid) : []
+            taskPresets: page.selTask ? todayVm.taskPresetsFor(page.selTask.uid) : []
+            elevationOpacity: 0
+            borderWidth: 0
+            onEditRequested: uid => { inspectorDrawer.close(); editorDialog.openForEdit(uid) }
+            onToggleRequested: uid => todayVm.toggleCompleted(uid)
+            onDeleteRequested: uid => { inspectorDrawer.close(); confirmDeleteDialog.openFor(uid) }
+            onPostponeRequested: (uid, action) => todayVm.postponeTask(uid, action)
+            onPresetRequested: (uid, presetId) => todayVm.applyTaskPreset(uid, presetId)
+            onPickRequested: uid => {
+                inspectorDrawer.close()
+                editorDialog.openForEdit(uid)
+            }
+            onCloseRequested: inspectorDrawer.close()
+        }
+    }
+
+    SnoozeMenu {
+        id: snoozeMenu
+        vm: todayVm
+        onPickRequested: uid => editorDialog.openForEdit(uid)
+        onClosed: {
+            if (!editorDialog.visible)
+                page.restoreFocus()
+        }
+    }
+
     TaskEditorDialog {
         id: editorDialog
         objectName: "todayEditorDialog"
         vm: todayVm
+        onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+        // после закрытия диалога фокус возвращается к вызвавшему контролу
+        onClosed: {
+            if (!confirmDeleteDialog.visible)
+                page.restoreFocus()
+        }
     }
 
     DailyTasksDialog {
@@ -474,10 +600,7 @@ ScrollView {
         headerText: "Удалить задачу?"
         message: "Задача будет помечена удалённой; если её событие уже есть "
                  + "в календаре, удаление события встанет в очередь синка."
-        onConfirmed: uid => {
-            todayVm.deleteTask(uid)
-            if (page.selectedUid === uid)
-                page.selectedUid = ""
-        }
+        onConfirmed: uid => todayVm.deleteTask(uid)
+        onClosed: page.restoreFocus()
     }
 }
