@@ -117,6 +117,44 @@ class CalendarSyncStore:
         )
         self._connection.commit()
 
+    def snapshot_task_ops(self, task_uid: str) -> List[Dict[str, Any]]:
+        """Capture this task's queue rows for a short compensating transaction.
+
+        Calendar interactions update the task repository and this queue through
+        separate SQLite connections.  The snapshot lets the service restore the
+        exact queue state if the second write fails; it never performs network IO.
+        """
+        rows = self._connection.execute(
+            "SELECT * FROM desktop_pending_calendar_ops WHERE task_uid = ? "
+            "ORDER BY id",
+            (task_uid,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def restore_task_ops(
+        self, task_uid: str, snapshot: List[Dict[str, Any]]
+    ) -> None:
+        """Restore rows previously returned by :meth:`snapshot_task_ops`."""
+        with self._connection:
+            self._connection.execute(
+                "DELETE FROM desktop_pending_calendar_ops WHERE task_uid = ?",
+                (task_uid,),
+            )
+            for row in snapshot:
+                self._connection.execute(
+                    """
+                    INSERT INTO desktop_pending_calendar_ops (
+                        id, op, task_uid, payload_json, attempts, last_error,
+                        status, created_at, next_try_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"], row["op"], row["task_uid"],
+                        row["payload_json"], row["attempts"], row["last_error"],
+                        row["status"], row["created_at"], row["next_try_at"],
+                    ),
+                )
+
     def _enqueue(self, op: OpKind, task_uid: str,
                  payload: Optional[Dict[str, Any]]) -> None:
         if self._has_pending(task_uid, op):
