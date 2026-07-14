@@ -73,8 +73,9 @@ OAuth-токен нового десктопа изолирован (`<PlannerDe
 - удаление задачи — тумбстоун `deleted_at`, строка остаётся в БД;
 - схема (`storage/schema.py`) — простой sqlite3, без SQLModel и без
   импорта старых `models/`;
-- Phase 1 не добавляет миграцию или колонку: scheduling presets и временное
-  состояние UI остаются в domain/ViewModel, а не в БД.
+- Phase 1 и Phase 2.1 не добавляют миграцию или колонку: scheduling presets,
+  режим календаря и временное состояние UI остаются в domain/ViewModel,
+  а не в БД.
 
 ## Слои
 
@@ -82,7 +83,9 @@ OAuth-токен нового десктопа изолирован (`<PlannerDe
 Domain (planner_desktop/domain)
    ↓  чистые dataclass-ы и правила валидации; scheduling.py считает
       пресеты/snooze, layout.py определяет compact/normal/wide,
-      keyboard.py задаёт контекстную политику shortcuts; без Qt/Flet/SQLModel
+      keyboard.py задаёт контекстную политику shortcuts;
+      calendar_layout.py режет события по дням/видимому диапазону и
+      детерминированно раскладывает overlap-колонки; без Qt/Flet/SQLModel
 Repository (planner_desktop/repositories + planner_desktop/storage)
    ↓  SQLiteTaskRepository — по умолчанию (изолированный app_desktop.db);
       FakeTaskRepository — для тестов и демо-режима; общий контракт —
@@ -101,6 +104,9 @@ ViewModels (planner_desktop/viewmodels)
       TaskActionsViewModel: selected task, editor data/presets, snooze,
       complete/delete/restore, busy-guard, toast и tasksMutated; поэтому
       диалог редактирования и поведение действий едины на всех страницах.
+      CalendarViewModel добавляет режимы day/work_week/week, visible dates,
+      all-day/timed geometry, current-time data и period/event navigation;
+      overlap-математика в ViewModel/QML не дублируется.
       UiStateViewModel экспортирует layout mode, minimum window, human-date,
       time options и проверку shortcuts; task_rows.py —
       общие чистые преобразования Task -> словари для QML;
@@ -117,7 +123,9 @@ QML UI (planner_desktop/qml)
       qml/components (Panel, AppButton, IconButton, Badge, PriorityPill,
       SectionHeader, EmptyState, TaskCard, TaskEditorDialog, ConfirmDialog,
       QuickAdd, Sidebar, DatePickerField, TimePickerField, DurationPicker,
-      SegmentedControl, SchedulePresetBar, SnoozeMenu, Toast) — без
+      SegmentedControl, SchedulePresetBar, SnoozeMenu, Toast,
+      CalendarTimeGrid/DayColumn/EventBlock/AllDayLane/TimeRuler/
+      CurrentTimeIndicator/ViewModeSwitch) — без
       картинок-ассетов, единая векторная иконографика AppIcon;
       Main.qml применяет compact/normal/wide и minimum size из UiStateViewModel
 Sync (planner_desktop/sync)
@@ -236,7 +244,8 @@ Google-синка.
 | Phase 1 domain policy | `scheduling.py`, `layout.py`, `keyboard.py`: детерминированные пресеты/snooze, responsive thresholds и shortcut routing; чистый Python, покрыт focused tests |
 | Shared task actions / UI state | `TaskActionsViewModel` объединяет editor/actions/selection/busy/toasts для Today/Calendar/History; `UiStateViewModel` отдаёт QML layout и keyboard policy |
 | TodayPage | polished responsive UI: native Quick Add, Today/undated lists, selection, card/inspector actions, snooze, editor/delete confirmation, rail в wide и drawer в normal/compact |
-| CalendarPage | недельная полоса, ◀/Сегодня/▶ (+ стрелки ← / → по дням), агенда выбранного дня с фильтрами (все/активные/выполненные/ежедневные), чек-лист ежедневных, общий editor/actions/snooze и responsive inspector; почасовая сетка и DnD — roadmap Phase 2 |
+| Calendar layout engine | Phase 2.1: `domain/calendar_layout.py`, normalized top/height, clipping видимых часов/границ дня, minimum visual duration, all-day spans и deterministic interval coloring; Qt-free |
+| CalendarPage | Phase 2.1: День/Рабочая неделя/Неделя, grid 06:00–23:00, all-day lane, hour/half-hour rules, current-time line, scroll/initial auto-scroll, selected/today states, overlap blocks; agenda/filters/daily/editor/inspector сохранены. DnD, resize и undated panel отложены |
 | SettingsPage | режим, путь БД, счётчики очереди с разбивкой по типам (create/update/delete/dead-letter), время последнего локального изменения, курсор pull-а, панель «Диагностика» с копированием; статус подключения Google + кнопки «Подключить Google Calendar» и «Синхронизировать сейчас» (работа в фоновом потоке, прогресс/итог/ошибка на странице, время последнего успешного синка) |
 | HistoryPage | журнал выполненного по датам, фильтр 7/30/всё, restore/edit/delete через общий контракт действий; полностью локально |
 | HistoryService + Task.completed_at | готовы: миграция схемы v3 → v4 аддитивно добавляет tasks.completed_at и заполняет для уже выполненных задач их updated_at |
@@ -259,20 +268,22 @@ Google-синка.
 ## Тесты
 
 Чистая Python-логика тестируется без видимого окна. Каноническая
-верификация перед закрытием Phase 1:
+верификация перед закрытием Phase 2.1:
 
 ```
 python -m compileall . -q
 python -m pytest --collect-only -q
-python -m pytest -q tests/test_desktop_scheduling.py tests/test_desktop_task_editor_viewmodel.py tests/test_desktop_task_postpone.py tests/test_desktop_keyboard_actions.py tests/test_desktop_responsive_state.py
+python -m pytest -q tests/test_desktop_calendar_layout.py tests/test_desktop_calendar_overlap.py tests/test_desktop_calendar_grid_viewmodel.py tests/test_desktop_calendar_grid_keyboard.py
 python -m pytest -q
 ```
 
-Focused Phase 1 тесты проверяют scheduling/presets, переходы editor,
-Calendar-очередь при postpone/unschedule/delete, busy guard, shortcut routing,
-responsive state, refresh и repository reopen. Существующие desktop sync-тесты
+Focused Phase 2.1 тесты проверяют normalized geometry, clipping, midnight,
+minimum duration, touching/two-way/three-way/chained overlap, input-order
+stability, all-day spans, display modes, period navigation, current time,
+selection refresh, responsive state и keyboard routing. Существующие Phase 1
+и desktop sync-тесты
 не удаляются и входят в полный прогон. На Windows известен отдельный
 платформенный провал `tests/test_settings_paths.py::test_macos_data_dir`; он не
-исправляется в Phase 1. Фактический статус финального прогона фиксируется в
+исправляется в Phase 2.1. Фактический статус финального прогона фиксируется в
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md), а не объявляется архитектурной
 гарантией заранее.

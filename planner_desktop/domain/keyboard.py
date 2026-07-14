@@ -31,6 +31,11 @@ _WINDOW_SHORTCUTS: dict[str, bool] = {
     "clear_selection": True,    # Esc (через Keys, но политика общая)
     "calendar_prev_day": True,  # Left
     "calendar_next_day": True,  # Right
+    "calendar_prev_period": True,  # PageUp
+    "calendar_next_period": True,  # PageDown
+    "calendar_today": True,  # Home
+    "calendar_prev_event": True,  # Up
+    "calendar_next_event": True,  # Down
     "quick_add_slash": True,    # «/»
 }
 
