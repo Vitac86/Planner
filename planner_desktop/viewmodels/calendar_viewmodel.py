@@ -102,6 +102,7 @@ class CalendarViewModel(TaskActionsViewModel):
     gridChanged = Signal()
     editEventRequested = Signal(str)
     interactionChanged = Signal()
+    responsiveModeChanged = Signal()
 
     def __init__(self, repository: TaskRepository | None = None,
                  parent=None,
@@ -172,8 +173,35 @@ class CalendarViewModel(TaskActionsViewModel):
         if mode == self._responsive_mode:
             return
         self._responsive_mode = mode
+        self.responsiveModeChanged.emit()
         if mode == "compact" and self._display_mode != DISPLAY_DAY:
             self.setDisplayMode(DISPLAY_DAY)
+
+    @Property(str, notify=responsiveModeChanged)
+    def responsiveMode(self) -> str:
+        return self._responsive_mode
+
+    @Property(str, notify=responsiveModeChanged)
+    def undatedPanelMode(self) -> str:
+        return {
+            "wide": "persistent",
+            "normal": "drawer",
+            "compact": "bottom_sheet",
+        }.get(self._responsive_mode, "drawer")
+
+    @Property("QVariantList", notify=gridChanged)
+    def undatedTasks(self) -> List[Dict[str, Any]]:
+        pending = self._service.pending_task_uids()
+        tasks = [
+            task for task in self._repository.list_undated()
+            if not task.completed and not task.is_deleted
+        ]
+        tasks.sort(key=lambda task: (-task.priority, task.updated_at, task.uid))
+        return [task_to_row(task, pending) for task in tasks]
+
+    @Property(int, notify=gridChanged)
+    def undatedTaskCount(self) -> int:
+        return len(self.undatedTasks)
 
     @Property(str, notify=weekChanged)
     def periodTitle(self) -> str:
@@ -624,11 +652,16 @@ class CalendarViewModel(TaskActionsViewModel):
         if not self._dragging or self._interaction_busy:
             return
         try:
-            target_date = datetime.strptime(date_text, "%Y-%m-%d").date()
             zone = DropZoneKind(kind)
         except ValueError:
-            target_date = None
             zone = DropZoneKind.TIMED_GRID
+        try:
+            target_date = (
+                datetime.strptime(date_text, "%Y-%m-%d").date()
+                if date_text else None
+            )
+        except ValueError:
+            target_date = None
         minute = None
         if zone == DropZoneKind.TIMED_GRID:
             minute = (
@@ -662,9 +695,14 @@ class CalendarViewModel(TaskActionsViewModel):
     def commitDrop(self) -> bool:
         proposal = self._drag_proposal
         uid = self._dragged_uid
+        dedupe_key = (
+            f"{uid}|{proposal.proposed_start}|{proposal.proposed_end}|"
+            f"{proposal.proposed_all_day}"
+            if proposal is not None else uid
+        )
         if (
             not self._dragging or proposal is None or self._interaction_busy
-            or not self._begin("calendarDrop", uid, dedupe=True)
+            or not self._begin("calendarDrop", dedupe_key, dedupe=True)
         ):
             return False
         self._interaction_busy = True

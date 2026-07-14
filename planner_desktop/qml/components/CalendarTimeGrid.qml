@@ -35,6 +35,7 @@ Item {
     signal resizeTargetUpdated(string dateText, real y, real height, bool shift)
     signal resizeFinished()
     signal resizeCanceled()
+    signal interactionPointerObserved(real x, real y, bool shift)
 
     readonly property real rulerWidth: compact ? 50 : 56
     readonly property real hourHeight: compact ? 60 : 66
@@ -67,6 +68,7 @@ Item {
     }
 
     function updateInteractionPointer(x, y, shift) {
+        grid.pointerViewportY = y
         var contentX = timedFlick.contentX + x - grid.rulerWidth
         if (y <= allDayLane.height) {
             grid.dragTargetUpdated("all_day_lane", contentX, 0,
@@ -76,6 +78,34 @@ Item {
             grid.dragTargetUpdated("timed_grid", contentX, contentY,
                                    grid.columnsContentWidth,
                                    timedFlick.contentHeight, shift)
+        }
+        grid.interactionPointerObserved(x, y, shift)
+    }
+
+    property real pointerViewportY: -1
+    readonly property real autoScrollEdge: 52
+    readonly property int autoScrollDirection:
+        pointerViewportY >= 0 && pointerViewportY < allDayLane.height + autoScrollEdge
+        ? -1
+        : pointerViewportY > height - autoScrollEdge ? 1 : 0
+
+    Timer {
+        id: dragAutoScroll
+        objectName: "calendarDragAutoScroll"
+        interval: 32
+        repeat: true
+        running: (grid.dragging || grid.resizing)
+                 && grid.visible && grid.autoScrollDirection !== 0
+                 && grid.Window.window && grid.Window.window.active
+        onTriggered: {
+            var edgeY = grid.autoScrollDirection < 0
+                        ? allDayLane.height + grid.autoScrollEdge
+                        : grid.height - grid.autoScrollEdge
+            var distance = Math.abs(grid.pointerViewportY - edgeY)
+            var speed = Math.min(18, 4 + distance * 0.22)
+            var next = timedFlick.contentY + grid.autoScrollDirection * speed
+            timedFlick.contentY = Math.max(0, Math.min(
+                timedFlick.contentHeight - timedFlick.height, next))
         }
     }
 
@@ -191,8 +221,11 @@ Item {
                         onDragFinished: grid.dragFinished()
                         onDragCanceled: grid.dragCanceled()
                         onResizeStarted: (uid, edge) => grid.resizeStarted(uid, edge)
-                        onResizePointer: (dateText, y, height, shift) =>
+                        onResizePointer: (dateText, y, height, shift) => {
+                            grid.pointerViewportY = allDayLane.height + y
+                                                    - timedFlick.contentY
                             grid.resizeTargetUpdated(dateText, y, height, shift)
+                        }
                         onResizeFinished: grid.resizeFinished()
                         onResizeCanceled: grid.resizeCanceled()
                     }
@@ -235,4 +268,7 @@ Item {
         visible: grid.activeFocus
         z: 30
     }
+
+    onDraggingChanged: if (!dragging) pointerViewportY = -1
+    onResizingChanged: if (!resizing) pointerViewportY = -1
 }

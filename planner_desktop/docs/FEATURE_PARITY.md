@@ -80,16 +80,18 @@
 | All-day lane | implemented — однодневные и многодневные события, эксклюзивный end, детерминированный порядок, компактные chips и «ещё N» | Фаза 2.1 |
 | Пересекающиеся события | implemented — стабильные side-by-side колонки; касающиеся интервалы не считаются пересечением; цепочки образуют общий overlap-group | Фаза 2.1 |
 | Текущая временная линия | implemented — только на сегодняшнем дне и внутри видимого диапазона; обновляется без scroll-jump | Фаза 2.1 |
-| Drag-and-drop «Без даты» → слот | deferred — почасовая основа готова, мышиный перенос сознательно не входит в 2.1 | Фаза 2.2 |
-| Изменение длительности мышью | deferred — resize handles отсутствуют сознательно | Фаза 2.2 |
+| Drag-and-drop «Без даты» → слот | implemented — active undated task переносится в timed-slot или all-day lane; scheduled task можно вернуть в undated panel | Фаза 2.2 |
+| Изменение длительности мышью | implemented — нижний доступный resize handle, preview, минимум 15 минут, безопасный commit/rollback | Фаза 2.2 |
 | Контекстное меню чипа (Snooze +30 / вечером / завтра) | implemented в актуальной семантике — `SnoozeMenu` на карточках и действия инспектора: «Позже сегодня» / «Завтра» / «Следующая неделя» / «Выбрать дату и время» / «Без даты»; вычисления в `domain/scheduling.py`, запись через сервис/Calendar-очередь | Фаза 1 |
-| Панель «Без даты» рядом с сеткой | partial — задачи без даты видны на «Сегодня»; drag-панель календаря отложена | Фаза 2.2 |
+| Панель «Без даты» рядом с сеткой | implemented — persistent wide panel, normal drawer и compact bottom-sheet drawer; собственный scroll, priority и notes preview | Фаза 2.2 |
+| Перемещение событий мышью | implemented — timed между слотами/днями, timed ↔ all-day, all-day span сохраняется; invalid/recurring target получает явный отказ | Фаза 2.2 |
+| Auto-scroll во время drag | implemented по вертикали с ограниченной скоростью и остановкой на cancel/drop/focus loss; горизонтальная week auto-scroll отложена | Фаза 2.2 |
 | Автопрокрутка к текущему часу | implemented — один раз при открытии/переходе «Сегодня»; иначе к 08:00, без непрерывных прыжков | Фаза 2.1 |
 | Pull из Google при открытии страницы | deferred — в текущей сборке никакого startup/page-open sync нет; фаза 4 может добавить только opt-in background sync, выключенный по умолчанию | Фаза 4 |
 | Фильтр задач дня (все / активные / выполненные) | implemented — сегментированный фильтр над агендой + счётчики; сводка дня от фильтра не зависит | Фаза 1 |
 | Ежедневные задачи в календаре | implemented — режим «Ежедневные»: чек-лист на выбранный день (по маске дней недели), отметка ставится на выбранную дату, не только на сегодня | Фаза 1 |
 | Инспектор выбранной задачи | implemented — тот же TaskInspector, что на «Сегодня»: rail в wide и drawer в normal/compact; шесть scheduling-пресетов и действия edit/complete/delete/snooze согласованы | Фаза 1 |
-| Навигация с клавиатуры | implemented — ←/→ дни, PageUp/PageDown периоды, Home сегодня, ↑/↓ события, Enter edit, Space complete, Esc clear; текстовые поля и диалоги не перехватываются | Фаза 2.1 |
+| Навигация и редактирование с клавиатуры | implemented — навигация Phase 2.1 плюс Alt+↑/↓ move slot, Alt+Shift+←/→ move day, Alt+Shift+↑/↓ resize, Ctrl+Alt+A all-day, Ctrl+Alt+U unschedule, Esc cancel; текстовые поля и диалоги не перехватываются | Фаза 2.2 |
 
 ## Диалоги (ui/dialogs.py)
 

@@ -17,6 +17,7 @@ Item {
     readonly property bool dialogsOpen: editorDialog.visible
                                         || confirmDeleteDialog.visible
                                         || snoozeMenu.visible
+                                        || undatedDrawer.visible
     readonly property bool gridFocused: timeGrid.gridFocused
     property bool agendaExpanded: false
     property var focusReturnItem: null
@@ -88,6 +89,27 @@ Item {
     function resizeSelectedMinutes(delta) { calendarVm.resizeSelectedByMinutes(delta) }
     function convertSelectedToAllDay() { calendarVm.convertSelectedToAllDay() }
     function unscheduleSelected() { calendarVm.unscheduleSelected() }
+    function _inside(item, point) {
+        return item && item.visible && point.x >= 0 && point.y >= 0
+               && point.x <= item.width && point.y <= item.height
+    }
+    function routeGridPointerToUndated(x, y, shift) {
+        var target = page.wide ? undatedWide : undatedDrawerPanel
+        if (!target || !target.visible)
+            return
+        var point = timeGrid.mapToItem(target, x, y)
+        if (page._inside(target, point))
+            calendarVm.updateDragTarget("undated_panel", "", 0, 0, shift)
+    }
+    function routeUndatedPointer(panel, x, y, shift) {
+        var point = panel.mapToItem(timeGrid, x, y)
+        timeGrid.updateInteractionPointer(point.x, point.y, shift)
+    }
+    function selectUndatedTask(uid) {
+        if (undatedDrawer.visible)
+            undatedDrawer.close()
+        page.selectTask(uid)
+    }
     function selectPrevDay() { calendarVm.previousDay() }
     function selectNextDay() { calendarVm.nextDay() }
     function selectPrevPeriod() { calendarVm.previousPeriod() }
@@ -176,6 +198,20 @@ Item {
                 Layout.maximumWidth: page.compact ? 180 : 320
             }
             AppButton {
+                visible: !page.wide
+                text: page.compact ? "" : "Без даты (" + calendarVm.undatedTaskCount + ")"
+                iconName: "calendar"
+                variant: undatedDrawer.visible ? "secondary" : "ghost"
+                Accessible.name: "Открыть задачи без даты, "
+                                 + calendarVm.undatedTaskCount
+                onClicked: {
+                    inspectorDrawer.close()
+                    undatedDrawer.open()
+                }
+                ToolTip.visible: page.compact && hovered
+                ToolTip.text: "Без даты (" + calendarVm.undatedTaskCount + ")"
+            }
+            AppButton {
                 objectName: "calendarAgendaToggle"
                 text: page.compact ? "" : (page.agendaExpanded ? "Скрыть агенду" : "Агенда")
                 iconName: "note"
@@ -236,6 +272,8 @@ Item {
                             calendarVm.updateDragPointer(kind, x, y, width, height, shift)
                         onDragFinished: calendarVm.commitDrop()
                         onDragCanceled: calendarVm.cancelDrag()
+                        onInteractionPointerObserved: (x, y, shift) =>
+                            page.routeGridPointerToUndated(x, y, shift)
                         onResizeStarted: (uid, edge) => calendarVm.beginResize(uid, edge)
                         onResizeTargetUpdated: (dateText, y, height, shift) =>
                             calendarVm.updateResize(dateText, y, height, shift)
@@ -465,6 +503,25 @@ Item {
                 }
             }
 
+            UndatedTaskPanel {
+                id: undatedWide
+                objectName: "calendarUndatedWidePanel"
+                visible: page.wide
+                Layout.preferredWidth: 250
+                Layout.maximumWidth: 270
+                Layout.fillHeight: true
+                tasks: calendarVm.undatedTasks
+                selectedUid: calendarVm.selectedUid
+                actionsEnabled: !calendarVm.busy
+                persistent: true
+                onTaskSelected: uid => page.selectUndatedTask(uid)
+                onDragStarted: (uid, sourceKind) => calendarVm.beginDrag(uid, sourceKind)
+                onDragPointer: (uid, x, y, shift) =>
+                    page.routeUndatedPointer(undatedWide, x, y, shift)
+                onDragFinished: calendarVm.commitDrop()
+                onDragCanceled: calendarVm.cancelDrag()
+            }
+
             // Wide layout keeps the inspector as a stable side rail.
             ColumnLayout {
                 visible: page.wide
@@ -541,6 +598,36 @@ Item {
                 }
                 Item { visible: !page.selTask; Layout.fillHeight: true }
             }
+        }
+    }
+
+    Drawer {
+        id: undatedDrawer
+        edge: page.compact ? Qt.BottomEdge : Qt.LeftEdge
+        width: page.compact ? page.width : Math.min(320, page.width - 40)
+        height: page.compact ? Math.min(430, page.height * 0.58) : page.height
+        interactive: visible
+        background: Rectangle {
+            color: Theme.surface
+            border.color: Theme.border
+            border.width: 1
+        }
+        UndatedTaskPanel {
+            id: undatedDrawerPanel
+            anchors.fill: parent
+            anchors.margins: Theme.spacingSm
+            tasks: calendarVm.undatedTasks
+            selectedUid: calendarVm.selectedUid
+            actionsEnabled: !calendarVm.busy
+            onTaskSelected: uid => page.selectUndatedTask(uid)
+            onDragStarted: (uid, sourceKind) => calendarVm.beginDrag(uid, sourceKind)
+            onDragPointer: (uid, x, y, shift) =>
+                page.routeUndatedPointer(undatedDrawerPanel, x, y, shift)
+            onDragFinished: {
+                if (calendarVm.commitDrop())
+                    undatedDrawer.close()
+            }
+            onDragCanceled: calendarVm.cancelDrag()
         }
     }
 

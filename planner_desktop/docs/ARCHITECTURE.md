@@ -73,7 +73,7 @@ OAuth-токен нового десктопа изолирован (`<PlannerDe
 - удаление задачи — тумбстоун `deleted_at`, строка остаётся в БД;
 - схема (`storage/schema.py`) — простой sqlite3, без SQLModel и без
   импорта старых `models/`;
-- Phase 1 и Phase 2.1 не добавляют миграцию или колонку: scheduling presets,
+- Phase 1, Phase 2.1 и Phase 2.2 не добавляют миграцию или колонку: scheduling presets,
   режим календаря и временное состояние UI остаются в domain/ViewModel,
   а не в БД.
 
@@ -85,14 +85,18 @@ Domain (planner_desktop/domain)
       пресеты/snooze, layout.py определяет compact/normal/wide,
       keyboard.py задаёт контекстную политику shortcuts;
       calendar_layout.py режет события по дням/видимому диапазону и
-      детерминированно раскладывает overlap-колонки; без Qt/Flet/SQLModel
+      детерминированно раскладывает overlap-колонки;
+      calendar_interactions.py рассчитывает snap/target/move/resize/conversion
+      proposals и structured rejection; без Qt/Flet/SQLModel
 Repository (planner_desktop/repositories + planner_desktop/storage)
    ↓  SQLiteTaskRepository — по умолчанию (изолированный app_desktop.db);
       FakeTaskRepository — для тестов и демо-режима; общий контракт —
       Protocol TaskRepository; CalendarSyncStore — очередь Calendar-операций
       и состояние синка в той же БД
 Use cases (planner_desktop/usecases)
-   ↓  DesktopTaskService: CRUD + schedule/unschedule/postpone/restore задач
+   ↓  DesktopTaskService: CRUD + schedule/unschedule/postpone/restore задач,
+      explicit move/resize/timed↔all-day operations и компенсирующий rollback
+      repository + queue при ошибке
       с постановкой Calendar-операций в очередь; postpone переиспользует
       существующие schedule/unschedule правила, не вызывает Google API;
       DailyTaskService: ежедневные задачи (локально);
@@ -105,7 +109,8 @@ ViewModels (planner_desktop/viewmodels)
       complete/delete/restore, busy-guard, toast и tasksMutated; поэтому
       диалог редактирования и поведение действий едины на всех страницах.
       CalendarViewModel добавляет режимы day/work_week/week, visible dates,
-      all-day/timed geometry, current-time data и period/event navigation;
+      all-day/timed geometry, current-time data, period/event navigation,
+      drag/resize proposal state и responsive undated-panel data;
       overlap-математика в ViewModel/QML не дублируется.
       UiStateViewModel экспортирует layout mode, minimum window, human-date,
       time options и проверку shortcuts; task_rows.py —
@@ -125,7 +130,8 @@ QML UI (planner_desktop/qml)
       QuickAdd, Sidebar, DatePickerField, TimePickerField, DurationPicker,
       SegmentedControl, SchedulePresetBar, SnoozeMenu, Toast,
       CalendarTimeGrid/DayColumn/EventBlock/AllDayLane/TimeRuler/
-      CurrentTimeIndicator/ViewModeSwitch) — без
+      CurrentTimeIndicator/ViewModeSwitch/CalendarDropPreview/
+      CalendarResizeHandle/UndatedTaskPanel/UndatedTaskDragCard) — без
       картинок-ассетов, единая векторная иконографика AppIcon;
       Main.qml применяет compact/normal/wide и minimum size из UiStateViewModel
 Sync (planner_desktop/sync)
@@ -245,13 +251,14 @@ Google-синка.
 | Shared task actions / UI state | `TaskActionsViewModel` объединяет editor/actions/selection/busy/toasts для Today/Calendar/History; `UiStateViewModel` отдаёт QML layout и keyboard policy |
 | TodayPage | polished responsive UI: native Quick Add, Today/undated lists, selection, card/inspector actions, snooze, editor/delete confirmation, rail в wide и drawer в normal/compact |
 | Calendar layout engine | Phase 2.1: `domain/calendar_layout.py`, normalized top/height, clipping видимых часов/границ дня, minimum visual duration, all-day spans и deterministic interval coloring; Qt-free |
-| CalendarPage | Phase 2.1: День/Рабочая неделя/Неделя, grid 06:00–23:00, all-day lane, hour/half-hour rules, current-time line, scroll/initial auto-scroll, selected/today states, overlap blocks; agenda/filters/daily/editor/inspector сохранены. DnD, resize и undated panel отложены |
+| Calendar interaction engine | Phase 2.2: `domain/calendar_interactions.py`, deterministic 15/5-minute snapping, clamping, timed/all-day/undated conversion, resize proposals и structured rejection; Qt-free |
+| CalendarPage | Phase 2.2: возможности Phase 2.1 плюс safe DnD/resize, translucent valid/invalid preview, timed ↔ all-day, responsive undated panel, bounded focus-aware vertical auto-scroll и keyboard alternatives; authoritative geometry обновляется только после service commit |
 | SettingsPage | режим, путь БД, счётчики очереди с разбивкой по типам (create/update/delete/dead-letter), время последнего локального изменения, курсор pull-а, панель «Диагностика» с копированием; статус подключения Google + кнопки «Подключить Google Calendar» и «Синхронизировать сейчас» (работа в фоновом потоке, прогресс/итог/ошибка на странице, время последнего успешного синка) |
 | HistoryPage | журнал выполненного по датам, фильтр 7/30/всё, restore/edit/delete через общий контракт действий; полностью локально |
 | HistoryService + Task.completed_at | готовы: миграция схемы v3 → v4 аддитивно добавляет tasks.completed_at и заполняет для уже выполненных задач их updated_at |
 | DailyTaskService / ежедневные задачи | готовы (локально, в Calendar не уходят); отметки хранят момент выполнения — «История» показывает их по датам |
 | TaskEditorDialog (создание/правка) | готов: режимы «Без даты»/«Весь день»/«Со временем», native date/time/duration controls, scheduling presets, приоритет/completed, inline validation, busy guard и отдельное delete-действие |
-| DesktopTaskService (usecases/) | готов: create/update/delete/restore, schedule/unschedule/postpone; Calendar-операции идут только через store, прямого Google-вызова из UI нет |
+| DesktopTaskService (usecases/) | готов: create/update/delete/restore, schedule/unschedule/postpone и Phase 2.2 move/resize/conversion; linked change enqueue update, undated schedule enqueue create, linked unschedule enqueue delete; recurring instance rejected before mutation; прямого Google-вызова из UI нет |
 | Unschedule (запланирована -> без даты) | реализован для непушенных и привязанных одиночных задач; для экземпляров повторяющихся серий — запрещён с ошибкой |
 | Очередь Calendar-операций (calendar_sync_store.py) | готова, с ретраями, dead-letter и счётчиками для UI |
 | Маппер Task ↔ CalendarEvent | готов, покрыт тестами |
@@ -268,22 +275,22 @@ Google-синка.
 ## Тесты
 
 Чистая Python-логика тестируется без видимого окна. Каноническая
-верификация перед закрытием Phase 2.1:
+верификация перед закрытием Phase 2.2:
 
 ```
 python -m compileall . -q
 python -m pytest --collect-only -q
+python -m pytest -q tests/test_desktop_calendar_interactions.py tests/test_desktop_calendar_drag_service.py tests/test_desktop_calendar_resize_service.py tests/test_desktop_calendar_interaction_viewmodel.py tests/test_desktop_undated_calendar_panel.py tests/test_desktop_calendar_interaction_keyboard.py
 python -m pytest -q tests/test_desktop_calendar_layout.py tests/test_desktop_calendar_overlap.py tests/test_desktop_calendar_grid_viewmodel.py tests/test_desktop_calendar_grid_keyboard.py
 python -m pytest -q
 ```
 
-Focused Phase 2.1 тесты проверяют normalized geometry, clipping, midnight,
-minimum duration, touching/two-way/three-way/chained overlap, input-order
-stability, all-day spans, display modes, period navigation, current time,
-selection refresh, responsive state и keyboard routing. Существующие Phase 1
-и desktop sync-тесты
+Focused Phase 2.2 тесты добавляют snapping/clamping, move/resize/conversion,
+queue semantics, rollback, recurring refusal, interaction state, responsive
+undated panel и keyboard isolation к Phase 2.1 geometry/overlap/grid набору.
+Существующие Phase 1 и desktop sync-тесты
 не удаляются и входят в полный прогон. На Windows известен отдельный
 платформенный провал `tests/test_settings_paths.py::test_macos_data_dir`; он не
-исправляется в Phase 2.1. Фактический статус финального прогона фиксируется в
+исправляется в Phase 2.2. Фактический статус финального прогона фиксируется в
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md), а не объявляется архитектурной
 гарантией заранее.
