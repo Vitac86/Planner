@@ -38,6 +38,7 @@ from planner_desktop.usecases.manual_sync_service import (
     ManualSyncService,
 )
 from planner_desktop.usecases.task_service import DesktopTaskService
+from planner_desktop.usecases.tag_service import TagService
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +87,14 @@ class SettingsViewModel(QObject):
     syncStateChanged = Signal()
     tasksMutated = Signal()  # pull мог создать/изменить задачи — освежить страницы
     toastMessage = Signal(str)
+    tagStateChanged = Signal()
 
     def __init__(self, service: DesktopTaskService,
                  daily_service: DailyTaskService | None = None,
                  parent: QObject | None = None,
                  *,
                  manual_sync_service: ManualSyncService | None = None,
+                 tag_service: TagService | None = None,
                  connection_checker: Callable[[], Any] | None = None,
                  connector: Callable[[], Any] | None = None,
                  executor: Any | None = None) -> None:
@@ -99,12 +102,15 @@ class SettingsViewModel(QObject):
         self._service = service
         self._daily = daily_service
         self._sync_service = manual_sync_service
+        self._tags = tag_service or getattr(service, "tag_service", None)
         self._connection_checker = connection_checker or _default_connection_checker
         self._connector = connector or _default_connector
         self._executor = executor  # лениво: QtBackgroundExecutor при первом действии
         self._busy_kind = ""       # "" | "connect" | "sync"
         self._live_error = ""      # ошибка текущей сессии (поверх сохранённой)
         self._live_error_set = False
+        self._tag_busy = False
+        self._tag_error = ""
 
     # ---- общие сведения ---------------------------------------------------------
 
@@ -285,6 +291,89 @@ class SettingsViewModel(QObject):
     def refresh(self) -> None:
         self.stateChanged.emit()
         self.syncStateChanged.emit()
+        self.tagStateChanged.emit()
+
+    # ---- локальные теги --------------------------------------------------------
+
+    @Property(str, constant=True)
+    def tagNote(self) -> str:
+        return (
+            "Теги хранятся только в Planner Desktop и не отправляются "
+            "в Google Calendar."
+        )
+
+    @Property("QVariantList", notify=tagStateChanged)
+    def tags(self):
+        if self._tags is None:
+            return []
+        return [
+            {"id": item.tag.id, "name": item.tag.name,
+             "taskCount": item.task_count}
+            for item in self._tags.list_with_counts()
+        ]
+
+    @Property(int, notify=tagStateChanged)
+    def tagCount(self) -> int:
+        return len(self.tags)
+
+    @Property(bool, notify=tagStateChanged)
+    def tagBusy(self) -> bool:
+        return self._tag_busy
+
+    @Property(str, notify=tagStateChanged)
+    def tagError(self) -> str:
+        return self._tag_error
+
+    @Slot(str, result=bool)
+    def createTag(self, name: str) -> bool:
+        return self._tag_action(
+            lambda: self._tags.create(name) if self._tags is not None else None,
+            "Тег создан",
+        )
+
+    @Slot(int, str, result=bool)
+    def renameTag(self, tag_id: int, name: str) -> bool:
+        return self._tag_action(
+            lambda: self._tags.rename(tag_id, name) if self._tags is not None else None,
+            "Тег переименован",
+        )
+
+    @Slot(int, result=bool)
+    def deleteTag(self, tag_id: int) -> bool:
+        return self._tag_action(
+            lambda: self._tags.delete(tag_id) if self._tags is not None else None,
+            "Тег удалён; задачи сохранены",
+        )
+
+    @Slot()
+    def clearTagError(self) -> None:
+        if self._tag_error:
+            self._tag_error = ""
+            self.tagStateChanged.emit()
+
+    def _tag_action(self, operation, success_message: str) -> bool:
+        if self._tag_busy:
+            return False
+        if self._tags is None:
+            self._tag_error = "Сервис тегов недоступен."
+            self.tagStateChanged.emit()
+            return False
+        self._tag_busy = True
+        self.tagStateChanged.emit()
+        try:
+            operation()
+        except Exception as exc:
+            self._tag_error = str(exc)
+            return False
+        finally:
+            self._tag_busy = False
+            self.tagStateChanged.emit()
+        self._tag_error = ""
+        self.tagStateChanged.emit()
+        self.stateChanged.emit()
+        self.tasksMutated.emit()
+        self.toastMessage.emit(success_message)
+        return True
 
     # ---- внутреннее -------------------------------------------------------------------
 

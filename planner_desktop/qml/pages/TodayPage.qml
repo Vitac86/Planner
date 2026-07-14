@@ -24,6 +24,7 @@ ScrollView {
     readonly property var selTask: todayVm.selectedTask
     readonly property bool dialogsOpen: editorDialog.visible
                                         || confirmDeleteDialog.visible
+                                        || confirmBulkDeleteDialog.visible
                                         || dailyDialog.visible
                                         || snoozeMenu.visible
                                         || inspectorDrawer.visible
@@ -37,10 +38,12 @@ ScrollView {
             quickAddItem.focusInput()
     }
 
-    function selectTask(uid) {
-        todayVm.selectTask(uid)
-        if (!page.wide && todayVm.selectedUid !== "")
+    function selectTask(uid, ctrl, shift) {
+        todayVm.selectTaskWithModifiers(uid, !!ctrl, !!shift)
+        if (!page.wide && todayVm.selectedCount === 1 && !ctrl && !shift)
             inspectorDrawer.open()
+        else if (todayVm.selectedCount > 1)
+            inspectorDrawer.close()
     }
 
     // Ближайшая невыполненная задача на сегодня (для карточки «Дальше»).
@@ -64,8 +67,14 @@ ScrollView {
             todayVm.toggleCompleted(todayVm.selectedUid)
     }
     function deleteSelected() {
-        if (todayVm.selectedUid !== "")
+        if (todayVm.selectedCount > 1)
+            confirmBulkDeleteDialog.openFor("bulk")
+        else if (todayVm.selectedUid !== "")
             confirmDeleteDialog.openFor(todayVm.selectedUid)
+    }
+    function duplicateSelected() {
+        if (todayVm.selectedCount === 1)
+            todayVm.duplicateTask(todayVm.selectedUids[0])
     }
     function clearSelection() {
         inspectorDrawer.close()
@@ -234,6 +243,15 @@ ScrollView {
                     Layout.fillWidth: true
                 }
 
+                BulkActionToolbar {
+                    objectName: "todayBulkToolbar"
+                    visible: todayVm.selectedCount > 1
+                    vm: todayVm
+                    compact: page.compact
+                    Layout.fillWidth: true
+                    onDeleteRequested: confirmBulkDeleteDialog.openFor("bulk")
+                }
+
                 // ---- Задачи на сегодня ----
                 SectionHeader {
                     title: "Задачи на сегодня"
@@ -261,10 +279,17 @@ ScrollView {
                             isLinked: modelData.isLinked
                             isScheduled: modelData.isScheduled
                             isRecurring: modelData.isRecurring
+                            tags: modelData.tags || []
+                            tagOverflow: modelData.tagOverflow || 0
                             actionsEnabled: !todayVm.busy
-                            selected: todayVm.selectedUid === modelData.uid
-                            onSelectRequested: uid => page.selectTask(uid)
+                            selected: todayVm.isTaskSelected(modelData.uid)
+                            onSelectionRequested: (uid, ctrl, shift) => page.selectTask(uid, ctrl, shift)
                             onToggled: uid => todayVm.toggleCompleted(uid)
+                            onDuplicateRequested: uid => todayVm.duplicateTask(uid)
+                            onTagClicked: name => {
+                                searchVm.toggleTagFilter(name)
+                                searchVm.openSearch()
+                            }
                             onEditRequested: uid => {
                                 page.focusReturnItem = todayCard
                                 editorDialog.openForEdit(uid)
@@ -318,10 +343,17 @@ ScrollView {
                             isLinked: modelData.isLinked
                             isScheduled: modelData.isScheduled
                             isRecurring: modelData.isRecurring
+                            tags: modelData.tags || []
+                            tagOverflow: modelData.tagOverflow || 0
                             actionsEnabled: !todayVm.busy
-                            selected: todayVm.selectedUid === modelData.uid
-                            onSelectRequested: uid => page.selectTask(uid)
+                            selected: todayVm.isTaskSelected(modelData.uid)
+                            onSelectionRequested: (uid, ctrl, shift) => page.selectTask(uid, ctrl, shift)
                             onToggled: uid => todayVm.toggleCompleted(uid)
+                            onDuplicateRequested: uid => todayVm.duplicateTask(uid)
+                            onTagClicked: name => {
+                                searchVm.toggleTagFilter(name)
+                                searchVm.openSearch()
+                            }
                             onEditRequested: uid => {
                                 page.focusReturnItem = undatedCard
                                 editorDialog.openForEdit(uid)
@@ -367,7 +399,8 @@ ScrollView {
 
                 // ---- инспектор выбранной задачи ----
                 TaskInspector {
-                    visible: page.selTask !== null && page.selTask !== undefined
+                    visible: todayVm.selectedCount === 1
+                             && page.selTask !== null && page.selTask !== undefined
                     task: page.selTask
                     busy: todayVm.busy
                     snoozeActions: page.selTask ? todayVm.snoozeActionsFor(page.selTask.uid) : []
@@ -376,6 +409,7 @@ ScrollView {
                     onEditRequested: uid => editorDialog.openForEdit(uid)
                     onToggleRequested: uid => todayVm.toggleCompleted(uid)
                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+                    onDuplicateRequested: uid => todayVm.duplicateTask(uid)
                     onPostponeRequested: (uid, action) => todayVm.postponeTask(uid, action)
                     onPresetRequested: (uid, presetId) => todayVm.applyTaskPreset(uid, presetId)
                     onPickRequested: uid => editorDialog.openForEdit(uid)
@@ -385,7 +419,7 @@ ScrollView {
                 // ---- сводка дня (когда ничего не выбрано) ----
                 ColumnLayout {
                     id: summary
-                    visible: !page.selTask
+                    visible: todayVm.selectedCount === 0 && !page.selTask
                     Layout.fillWidth: true
                     spacing: Theme.spacingLg
 
@@ -558,6 +592,7 @@ ScrollView {
             onEditRequested: uid => { inspectorDrawer.close(); editorDialog.openForEdit(uid) }
             onToggleRequested: uid => todayVm.toggleCompleted(uid)
             onDeleteRequested: uid => { inspectorDrawer.close(); confirmDeleteDialog.openFor(uid) }
+            onDuplicateRequested: uid => todayVm.duplicateTask(uid)
             onPostponeRequested: (uid, action) => todayVm.postponeTask(uid, action)
             onPresetRequested: (uid, presetId) => todayVm.applyTaskPreset(uid, presetId)
             onPickRequested: uid => {
@@ -601,6 +636,13 @@ ScrollView {
         message: "Задача будет помечена удалённой; если её событие уже есть "
                  + "в календаре, удаление события встанет в очередь синка."
         onConfirmed: uid => todayVm.deleteTask(uid)
+        onClosed: page.restoreFocus()
+    }
+    ConfirmDialog {
+        id: confirmBulkDeleteDialog
+        headerText: "Удалить выбранные задачи?"
+        message: "Будут удалены только выбранные видимые задачи. Связанные события попадут в очередь следующего ручного синка."
+        onConfirmed: todayVm.bulkDelete()
         onClosed: page.restoreFocus()
     }
 }

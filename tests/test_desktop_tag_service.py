@@ -15,6 +15,8 @@ from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
 from planner_desktop.storage.tag_repository import SQLiteTagRepository
 from planner_desktop.usecases.tag_service import TagService
 from planner_desktop.usecases.task_service import DesktopTaskService
+from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
+from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
 
 
 def _memory_service():
@@ -77,3 +79,53 @@ def test_tag_only_edits_enqueue_no_calendar_operation(tmp_path):
     tag_repo.close()
     queue.close()
     tasks.close()
+
+
+def test_editor_creates_and_reopens_task_with_selected_tags(tmp_path):
+    db_path = tmp_path / "desktop.db"
+    tasks = SQLiteTaskRepository(db_path)
+    queue = CalendarSyncStore(db_path)
+    tag_repo = SQLiteTagRepository(db_path)
+    tags = TagService(tag_repo, tasks)
+    service = DesktopTaskService(tasks, calendar_queue=queue, tag_service=tags)
+    vm = TodayViewModel(service=service)
+    tag = tags.create("Клиент")
+
+    assert vm.saveEditorWithTags(
+        "", "Позвонить", "", 1, False, False, "", "", "", False,
+        [tag.id],
+    )
+    task = tasks.list_all()[0]
+    assert task.tags == ("Клиент",)
+    assert vm.editorDataFor(task.uid)["tagIds"] == [tag.id]
+    assert queue.list_due_ops() == []
+    tag_repo.close(); queue.close(); tasks.close()
+
+
+def test_settings_tag_management_refreshes_counts_and_assignments(tmp_path):
+    db_path = tmp_path / "desktop.db"
+    tasks = SQLiteTaskRepository(db_path)
+    tag_repo = SQLiteTagRepository(db_path)
+    tags = TagService(tag_repo, tasks)
+    service = DesktopTaskService(tasks, tag_service=tags)
+    task = tasks.add(Task(title="Задача"))
+    vm = SettingsViewModel(
+        service,
+        tag_service=tags,
+        connection_checker=lambda: None,
+    )
+    mutations = []
+    vm.tasksMutated.connect(lambda: mutations.append(True))
+
+    assert vm.createTag("Работа")
+    tag_id = vm.tags[0]["id"]
+    tags.set_task_tags(task.uid, [tag_id])
+    vm.refresh()
+    assert vm.tags[0]["taskCount"] == 1
+    assert vm.renameTag(tag_id, "Проект")
+    assert tasks.get_by_uid(task.uid).tags == ("Проект",)
+    assert vm.deleteTag(tag_id)
+    assert tasks.get_by_uid(task.uid).title == "Задача"
+    assert tasks.get_by_uid(task.uid).tags == ()
+    assert mutations
+    tag_repo.close(); tasks.close()

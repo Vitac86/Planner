@@ -101,6 +101,141 @@ ScrollView {
             iconName: "note"
         }
 
+        Panel {
+            id: tagManagement
+            objectName: "settingsTagManagement"
+            Layout.fillWidth: true
+            implicitHeight: tagColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: tagColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    AppIcon { name: "flag"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: "Локальные теги"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                        }
+                        Label {
+                            text: settingsVm.tagNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                    Badge { text: String(settingsVm.tagCount) }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    AppTextField {
+                        id: createTagField
+                        objectName: "settingsCreateTagField"
+                        Layout.fillWidth: true
+                        placeholderText: "Новый тег"
+                        Accessible.name: "Название нового локального тега"
+                        onAccepted: {
+                            if (settingsVm.createTag(text)) text = ""
+                        }
+                    }
+                    AppButton {
+                        text: page.compact ? "" : "Создать"
+                        iconName: "plus"
+                        variant: "secondary"
+                        enabled: !settingsVm.tagBusy && createTagField.text.trim().length > 0
+                        Accessible.name: "Создать локальный тег"
+                        onClicked: if (settingsVm.createTag(createTagField.text))
+                                       createTagField.text = ""
+                    }
+                }
+
+                Label {
+                    visible: settingsVm.tagError.length > 0
+                    text: settingsVm.tagError
+                    font.pixelSize: Theme.fontCaption
+                    font.family: Theme.fontFamily
+                    color: Theme.danger
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    Accessible.role: Accessible.AlertMessage
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    visible: settingsVm.tagCount > 0
+                    Repeater {
+                        model: settingsVm.tags
+                        delegate: Rectangle {
+                            id: tagRow
+                            required property var modelData
+                            Layout.fillWidth: true
+                            implicitHeight: rowContent.implicitHeight + 2 * Theme.spacingSm
+                            radius: Theme.radiusSmall
+                            color: Theme.surfaceMuted
+                            border.color: Theme.border
+                            border.width: 1
+
+                            RowLayout {
+                                id: rowContent
+                                anchors.fill: parent
+                                anchors.margins: Theme.spacingSm
+                                spacing: Theme.spacingSm
+                                AppTextField {
+                                    id: tagNameField
+                                    Layout.fillWidth: true
+                                    text: tagRow.modelData.name
+                                    Accessible.name: "Название тега «" + tagRow.modelData.name + "»"
+                                }
+                                Badge {
+                                    text: tagRow.modelData.taskCount + " "
+                                          + Theme.plural(tagRow.modelData.taskCount,
+                                                         "задача", "задачи", "задач")
+                                }
+                                AppButton {
+                                    text: page.compact ? "" : "Переименовать"
+                                    iconName: "edit"
+                                    variant: "ghost"
+                                    Accessible.name: "Переименовать тег «" + tagRow.modelData.name + "»"
+                                    onClicked: settingsVm.renameTag(
+                                        tagRow.modelData.id, tagNameField.text)
+                                }
+                                IconButton {
+                                    iconName: "trash"
+                                    tip: "Удалить тег «" + tagRow.modelData.name + "»"
+                                    Accessible.name: tip
+                                    onClicked: tagDeleteDialog.openFor(String(tagRow.modelData.id))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Label {
+                    visible: settingsVm.tagCount === 0
+                    text: "Тегов пока нет. Создайте первый тег для группировки задач."
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+            }
+        }
+
         // ---- Статус очереди Calendar-синхронизации ----
         Panel {
             Layout.fillWidth: true
@@ -562,5 +697,12 @@ ScrollView {
         }
 
         Item { implicitHeight: Theme.spacingXl }
+    }
+
+    ConfirmDialog {
+        id: tagDeleteDialog
+        headerText: "Удалить тег?"
+        message: "Тег будет убран у всех задач, но сами задачи останутся. Это локальное изменение не отправляется в Google Calendar."
+        onConfirmed: uid => settingsVm.deleteTag(parseInt(uid))
     }
 }

@@ -55,6 +55,8 @@ class SearchViewModel(TaskActionsViewModel):
         self._matches = self._search.search(
             self._query, self._filters, now=self._now()
         )
+        if self._selection.set_visible(match.task.uid for match in self._matches):
+            self.taskSelectionChanged.emit()
         visible = {match.task.uid for match in self._matches}
         if selected and selected not in visible:
             self._selected_uid = ""

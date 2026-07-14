@@ -8,10 +8,12 @@ Panel {
     id: panel
     property var tasks: []
     property string selectedUid: ""
+    property var selectedUids: []
     property bool actionsEnabled: true
     property bool persistent: false
 
     signal taskSelected(string uid)
+    signal taskSelectionRequested(string uid, bool ctrl, bool shift)
     signal dragStarted(string uid, string sourceKind)
     signal dragPointer(string uid, real x, real y, bool shift)
     signal dragFinished()
@@ -61,8 +63,11 @@ Panel {
                 width: undatedList.width
                 task: modelData
                 selected: panel.selectedUid === modelData.uid
+                          || panel.selectedUids.indexOf(modelData.uid) >= 0
                 actionsEnabled: panel.actionsEnabled
                 onSelectedRequested: uid => panel.taskSelected(uid)
+                onSelectionRequested: (uid, ctrl, shift) =>
+                    panel.taskSelectionRequested(uid, ctrl, shift)
                 onDragStarted: (uid, sourceKind) => panel.dragStarted(uid, sourceKind)
                 onDragMoved: (x, y, shift) => {
                     var point = taskCard.mapToItem(panel, x, y)

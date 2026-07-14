@@ -1056,6 +1056,7 @@ class CalendarViewModel(TaskActionsViewModel):
             self._selected_uid = ""
             self.selectedTaskChanged.emit()
         self._emit_data_changed()
+        self._prune_selection()
         self.selectedTaskChanged.emit()
 
     # ---- internals --------------------------------------------------------------

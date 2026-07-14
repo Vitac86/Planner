@@ -23,6 +23,8 @@ Item {
     property bool isLinked: false
     property bool isScheduled: false
     property bool isRecurring: false
+    property var tags: []
+    property int tagOverflow: 0
     // Пока идёт операция (vm.busy), действия карточки выключены —
     // быстрый двойной клик не выполняет операцию дважды.
     property bool actionsEnabled: true
@@ -31,13 +33,16 @@ Item {
     property bool selected: false
     readonly property bool keyboardFocusWithin: card.activeFocus
         || check.activeFocus || snoozeButton.activeFocus
-        || editButton.activeFocus || deleteButton.activeFocus
+        || duplicateButton.activeFocus || editButton.activeFocus || deleteButton.activeFocus
 
     signal toggled(string uid)
     signal editRequested(string uid)
     signal deleteRequested(string uid)
     signal selectRequested(string uid)
+    signal selectionRequested(string uid, bool ctrl, bool shift)
     signal snoozeRequested(string uid)
+    signal duplicateRequested(string uid)
+    signal tagClicked(string name)
 
     implicitHeight: Math.max(content.implicitHeight + 24, 60)
     activeFocusOnTab: actionsEnabled
@@ -96,14 +101,22 @@ Item {
     }
 
     HoverHandler { id: hoverHandler }
-    TapHandler {
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton
+        propagateComposedEvents: true
         // Одиночный клик выделяет карточку (детали в инспекторе справа),
         // двойной — быстрый путь в редактор.
-        onSingleTapped: {
+        onClicked: mouse => {
             card.forceActiveFocus()
             card.selectRequested(card.uid)
+            card.selectionRequested(
+                card.uid,
+                (mouse.modifiers & Qt.ControlModifier) !== 0,
+                (mouse.modifiers & Qt.ShiftModifier) !== 0
+            )
         }
-        onDoubleTapped: {
+        onDoubleClicked: {
             if (card.actionsEnabled)
                 card.editRequested(card.uid)
         }
@@ -229,6 +242,28 @@ Item {
                     Layout.fillWidth: true
                 }
             }
+
+            Flow {
+                Layout.fillWidth: true
+                spacing: Theme.spacingXs
+                visible: card.tags && card.tags.length > 0
+
+                Repeater {
+                    model: card.tags || []
+                    delegate: TagChip {
+                        required property var modelData
+                        name: String(modelData)
+                        compact: true
+                        onClicked: name => card.tagClicked(name)
+                    }
+                }
+                TagChip {
+                    visible: card.tagOverflow > 0
+                    name: "+" + card.tagOverflow
+                    compact: true
+                    Accessible.name: "Ещё тегов: " + card.tagOverflow
+                }
+            }
         }
 
         Badge {
@@ -302,6 +337,15 @@ Item {
                 hoverBg: Theme.accentSoft
                 enabled: card.actionsEnabled
                 onClicked: card.snoozeRequested(card.uid)
+            }
+            IconButton {
+                id: duplicateButton
+                iconName: "plus"
+                tip: "Дублировать"
+                hoverGlyphColor: Theme.accent
+                hoverBg: Theme.accentSoft
+                enabled: card.actionsEnabled
+                onClicked: card.duplicateRequested(card.uid)
             }
             IconButton {
                 id: editButton

@@ -16,6 +16,7 @@ Item {
     readonly property var selTask: calendarVm.selectedTask
     readonly property bool dialogsOpen: editorDialog.visible
                                         || confirmDeleteDialog.visible
+                                        || confirmBulkDeleteDialog.visible
                                         || snoozeMenu.visible
                                         || undatedDrawer.visible
     readonly property bool gridFocused: timeGrid.gridFocused
@@ -44,10 +45,12 @@ Item {
             timeGrid.forceActiveFocus()
     }
 
-    function selectTask(uid) {
-        calendarVm.selectEvent(uid)
-        if (!page.wide && calendarVm.selectedUid !== "")
+    function selectTask(uid, ctrl, shift) {
+        calendarVm.selectTaskWithModifiers(uid, !!ctrl, !!shift)
+        if (!page.wide && calendarVm.selectedCount === 1 && !ctrl && !shift)
             inspectorDrawer.open()
+        else if (calendarVm.selectedCount > 1)
+            inspectorDrawer.close()
     }
 
     function editEvent(uid) {
@@ -69,8 +72,14 @@ Item {
             calendarVm.toggleCompleted(calendarVm.selectedUid)
     }
     function deleteSelected() {
-        if (calendarVm.selectedUid !== "")
+        if (calendarVm.selectedCount > 1)
+            confirmBulkDeleteDialog.openFor("bulk")
+        else if (calendarVm.selectedUid !== "")
             confirmDeleteDialog.openFor(calendarVm.selectedUid)
+    }
+    function duplicateSelected() {
+        if (calendarVm.selectedCount === 1)
+            calendarVm.duplicateTask(calendarVm.selectedUids[0])
     }
     function clearSelection() {
         inspectorDrawer.close()
@@ -105,10 +114,10 @@ Item {
         var point = panel.mapToItem(timeGrid, x, y)
         timeGrid.updateInteractionPointer(point.x, point.y, shift)
     }
-    function selectUndatedTask(uid) {
+    function selectUndatedTask(uid, ctrl, shift) {
         if (undatedDrawer.visible)
             undatedDrawer.close()
-        page.selectTask(uid)
+        page.selectTask(uid, ctrl, shift)
     }
     function selectPrevDay() { calendarVm.previousDay() }
     function selectNextDay() { calendarVm.nextDay() }
@@ -363,6 +372,15 @@ Item {
                             }
                         }
 
+                        BulkActionToolbar {
+                            objectName: "calendarBulkToolbar"
+                            visible: calendarVm.selectedCount > 1
+                            vm: calendarVm
+                            compact: page.compact
+                            Layout.fillWidth: true
+                            onDeleteRequested: confirmBulkDeleteDialog.openFor("bulk")
+                        }
+
                         Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
@@ -394,10 +412,17 @@ Item {
                                     isLinked: modelData.isLinked
                                     isScheduled: modelData.isScheduled
                                     isRecurring: modelData.isRecurring
+                                    tags: modelData.tags || []
+                                    tagOverflow: modelData.tagOverflow || 0
                                     actionsEnabled: !calendarVm.busy
-                                    selected: calendarVm.selectedUid === modelData.uid
-                                    onSelectRequested: uid => page.selectTask(uid)
+                                    selected: calendarVm.isTaskSelected(modelData.uid)
+                                    onSelectionRequested: (uid, ctrl, shift) => page.selectTask(uid, ctrl, shift)
                                     onToggled: uid => calendarVm.toggleCompleted(uid)
+                                    onDuplicateRequested: uid => calendarVm.duplicateTask(uid)
+                                    onTagClicked: name => {
+                                        searchVm.toggleTagFilter(name)
+                                        searchVm.openSearch()
+                                    }
                                     onEditRequested: uid => page.editEvent(uid)
                                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
                                     onSnoozeRequested: uid => snoozeMenu.openFor(uid)
@@ -512,9 +537,11 @@ Item {
                 Layout.fillHeight: true
                 tasks: calendarVm.undatedTasks
                 selectedUid: calendarVm.selectedUid
+                selectedUids: calendarVm.selectedUids
                 actionsEnabled: !calendarVm.busy
                 persistent: true
-                onTaskSelected: uid => page.selectUndatedTask(uid)
+                onTaskSelectionRequested: (uid, ctrl, shift) =>
+                    page.selectUndatedTask(uid, ctrl, shift)
                 onDragStarted: (uid, sourceKind) => calendarVm.beginDrag(uid, sourceKind)
                 onDragPointer: (uid, x, y, shift) =>
                     page.routeUndatedPointer(undatedWide, x, y, shift)
@@ -532,7 +559,8 @@ Item {
                 spacing: Theme.spacingMd
 
                 TaskInspector {
-                    visible: page.selTask !== null && page.selTask !== undefined
+                    visible: calendarVm.selectedCount === 1
+                             && page.selTask !== null && page.selTask !== undefined
                     task: page.selTask
                     busy: calendarVm.busy
                     snoozeActions: page.selTask
@@ -544,6 +572,7 @@ Item {
                     onEditRequested: uid => page.editEvent(uid)
                     onToggleRequested: uid => calendarVm.toggleCompleted(uid)
                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+                    onDuplicateRequested: uid => calendarVm.duplicateTask(uid)
                     onPostponeRequested: (uid, action) => calendarVm.postponeTask(uid, action)
                     onPresetRequested: (uid, presetId) => calendarVm.applyTaskPreset(uid, presetId)
                     onPickRequested: uid => page.editEvent(uid)
@@ -551,7 +580,7 @@ Item {
                 }
 
                 Panel {
-                    visible: !page.selTask
+                    visible: calendarVm.selectedCount === 0 && !page.selTask
                     Layout.fillWidth: true
                     implicitHeight: summaryColumn.implicitHeight + 2 * Theme.spacingLg
 
@@ -618,8 +647,10 @@ Item {
             anchors.margins: Theme.spacingSm
             tasks: calendarVm.undatedTasks
             selectedUid: calendarVm.selectedUid
+            selectedUids: calendarVm.selectedUids
             actionsEnabled: !calendarVm.busy
-            onTaskSelected: uid => page.selectUndatedTask(uid)
+            onTaskSelectionRequested: (uid, ctrl, shift) =>
+                page.selectUndatedTask(uid, ctrl, shift)
             onDragStarted: (uid, sourceKind) => calendarVm.beginDrag(uid, sourceKind)
             onDragPointer: (uid, x, y, shift) =>
                 page.routeUndatedPointer(undatedDrawerPanel, x, y, shift)
@@ -665,6 +696,7 @@ Item {
                 inspectorDrawer.close()
                 confirmDeleteDialog.openFor(uid)
             }
+            onDuplicateRequested: uid => calendarVm.duplicateTask(uid)
             onPostponeRequested: (uid, action) => calendarVm.postponeTask(uid, action)
             onPresetRequested: (uid, presetId) => calendarVm.applyTaskPreset(uid, presetId)
             onPickRequested: uid => page.editEvent(uid)
@@ -696,6 +728,13 @@ Item {
         message: "Задача будет помечена удалённой; связанное событие будет "
                  + "удалено только при следующей ручной синхронизации."
         onConfirmed: uid => calendarVm.deleteTask(uid)
+        onClosed: page.restoreFocus()
+    }
+    ConfirmDialog {
+        id: confirmBulkDeleteDialog
+        headerText: "Удалить выбранные задачи?"
+        message: "Будут удалены только выбранные задачи из текущей агенды и панели без даты. Связанные события попадут в очередь ручного синка."
+        onConfirmed: calendarVm.bulkDelete()
         onClosed: page.restoreFocus()
     }
 }

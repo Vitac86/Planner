@@ -35,6 +35,7 @@ ApplicationWindow {
     }
     readonly property bool anyDialogOpen:
         todayPage.dialogsOpen || calendarPage.dialogsOpen || historyPage.dialogsOpen
+        || globalSearch.blocksWindow
     function _allow(name) {
         return uiVm.allowShortcut(name, root._typingNow(), root.anyDialogOpen)
     }
@@ -51,6 +52,10 @@ ApplicationWindow {
         if (root.currentPage === 1) return calendarPage
         if (root.currentPage === 2) return historyPage
         return null
+    }
+    function _duplicateSelectedOnCurrentPage() {
+        var page = root._currentTaskPage()
+        if (page) page.duplicateSelected()
     }
 
     Item {
@@ -159,7 +164,18 @@ ApplicationWindow {
             toast.show("Данные обновлены")
         }
     }
-    // Ctrl+F зарезервирован за поиском (фаза 3) — сознательно не привязан.
+    Shortcut {
+        sequences: ["Ctrl+F", "Meta+F"]
+        // Ctrl+F while already open must refocus the field, so it bypasses the
+        // overlay's dialog guard while retaining the typing-safe Ctrl policy.
+        enabled: uiVm.allowShortcut("search", root._typingNow(), false)
+        onActivated: searchVm.openSearch()
+    }
+    Shortcut {
+        sequence: "Ctrl+D"
+        enabled: !globalSearch.visible && root._allow("duplicate_selected")
+        onActivated: root._duplicateSelectedOnCurrentPage()
+    }
 
     // Навигация по дням недели на «Календаре» стрелками (вне текстовых полей).
     Shortcut {
@@ -270,5 +286,15 @@ ApplicationWindow {
     Connections {
         target: settingsVm
         function onToastMessage(text) { toast.show(text) }
+    }
+    Connections {
+        target: searchVm
+        function onToastMessage(text) { toast.show(text) }
+        function onToastError(text) { toast.showError(text) }
+    }
+
+    GlobalSearch {
+        id: globalSearch
+        vm: searchVm
     }
 }

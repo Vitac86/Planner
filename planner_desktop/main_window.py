@@ -87,7 +87,8 @@ class MainWindow:
             service=self.service, daily_service=self.daily_service)
         self.settings_viewmodel = SettingsViewModel(
             self.service, daily_service=self.daily_service,
-            manual_sync_service=self._build_manual_sync_service())
+            manual_sync_service=self._build_manual_sync_service(),
+            tag_service=self.tag_service)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
         self.search_viewmodel = SearchViewModel(self.service)

@@ -85,6 +85,16 @@ class TagService:
 
     def set_task_tags(self, task_uid: str, tag_ids: Iterable[int]) -> List[Tag]:
         task = self._live_task(task_uid)
+        tags = self.resolve_tag_ids(tag_ids)
+        unique = tuple(tag.id for tag in tags if tag.id is not None)
+        self.repository.set_for_task(task_uid, unique, utc_now())
+        if task is not None:
+            task.tags = tuple(tag.name for tag in tags)
+        return self.tags_for_task(task_uid)
+
+    def resolve_tag_ids(self, tag_ids: Iterable[int]) -> List[Tag]:
+        """Validate a picker/bulk payload before any task mutation."""
+
         unique = tuple(dict.fromkeys(int(item) for item in tag_ids))
         if len(unique) > MAX_TAGS_PER_TASK:
             raise TagLimitError(
@@ -96,10 +106,7 @@ class TagService:
             if tag is None:
                 raise KeyError(f"Тег {tag_id} не найден.")
             tags.append(tag)
-        self.repository.set_for_task(task_uid, unique, utc_now())
-        if task is not None:
-            task.tags = tuple(tag.name for tag in tags)
-        return self.tags_for_task(task_uid)
+        return tags
 
     def add_tag(self, task_uid: str, tag_id: int) -> bool:
         current = self.tags_for_task(task_uid)

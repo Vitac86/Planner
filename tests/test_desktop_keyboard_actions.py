@@ -23,8 +23,9 @@ BARE = ["open_selected", "toggle_selected", "delete_selected",
         "calendar_prev_event", "calendar_next_event",
         "calendar_move_slot", "calendar_move_day", "calendar_resize",
         "calendar_to_all_day", "calendar_unschedule",
-        "quick_add_slash"]
-CTRL = ["new_task", "new_scheduled_task", "quick_add", "refresh"]
+        "quick_add_slash", "select_all", "duplicate_selected"]
+CTRL = ["new_task", "new_scheduled_task", "quick_add", "refresh",
+        "search"]
 
 
 # ---- политика ---------------------------------------------------------------------
@@ -49,9 +50,9 @@ def test_unknown_shortcut_is_refused():
     assert allow_shortcut("nonsense", typing=False, dialog_open=False) is False
 
 
-def test_search_is_reserved_for_phase_3():
-    assert "search" in RESERVED_SHORTCUTS
-    assert allow_shortcut("search", typing=False, dialog_open=False) is False
+def test_search_is_active_in_phase_3_1():
+    assert RESERVED_SHORTCUTS == ()
+    assert allow_shortcut("search", typing=False, dialog_open=False) is True
 
 
 def test_known_shortcuts_cover_documented_set():
@@ -66,7 +67,7 @@ def test_ui_state_viewmodel_mirrors_policy():
     assert ui.allowShortcut("toggle_selected", True, False) is False
     assert ui.allowShortcut("new_task", True, False) is True
     assert ui.allowShortcut("new_task", True, True) is False
-    assert ui.allowShortcut("search", False, False) is False
+    assert ui.allowShortcut("search", False, False) is True
 
 
 # ---- выбор задачи в ViewModel (цель Enter/Space/Delete) ----------------------------------

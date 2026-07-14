@@ -73,9 +73,14 @@ OAuth-токен нового десктопа изолирован (`<PlannerDe
 - удаление задачи — тумбстоун `deleted_at`, строка остаётся в БД;
 - схема (`storage/schema.py`) — простой sqlite3, без SQLModel и без
   импорта старых `models/`;
-- Phase 1, Phase 2.1 и Phase 2.2 не добавляют миграцию или колонку: scheduling presets,
-  режим календаря и временное состояние UI остаются в domain/ViewModel,
-  а не в БД.
+- schema v5 аддитивно и идемпотентно добавляет локальные `tags` и
+  `task_tags`: FK `task_uid`/`tag_id`, cascade удаляет только связи,
+  индексы ускоряют обе стороны association; задачи не удаляются вместе с тегом;
+- `tags.normalized_name` уникален и вычисляется Python NFKC+casefold;
+  отображаемый регистр сохраняется, имя trim-ится и ограничено 32 символами,
+  на задачу разрешено не более 10 тегов;
+- scheduling presets, Calendar layout и временное selection state остаются
+  в domain/ViewModel, а не в БД.
 
 ## Слои
 
@@ -84,6 +89,8 @@ Domain (planner_desktop/domain)
    ↓  чистые dataclass-ы и правила валидации; scheduling.py считает
       пресеты/snooze, layout.py определяет compact/normal/wide,
       keyboard.py задаёт контекстную политику shortcuts;
+      tags.py задаёт Unicode validation/limits, task_search.py — чистые
+      query/filter/ranking rules;
       calendar_layout.py режет события по дням/видимому диапазону и
       детерминированно раскладывает overlap-колонки;
       calendar_interactions.py рассчитывает snap/target/move/resize/conversion
@@ -91,7 +98,8 @@ Domain (planner_desktop/domain)
 Repository (planner_desktop/repositories + planner_desktop/storage)
    ↓  SQLiteTaskRepository — по умолчанию (изолированный app_desktop.db);
       FakeTaskRepository — для тестов и демо-режима; общий контракт —
-      Protocol TaskRepository; CalendarSyncStore — очередь Calendar-операций
+      Protocol TaskRepository; TagRepository/SQLiteTagRepository — локальные
+      теги и associations; CalendarSyncStore — очередь Calendar-операций
       и состояние синка в той же БД
 Use cases (planner_desktop/usecases)
    ↓  DesktopTaskService: CRUD + schedule/unschedule/postpone/restore задач,
@@ -99,14 +107,19 @@ Use cases (planner_desktop/usecases)
       repository + queue при ошибке
       с постановкой Calendar-операций в очередь; postpone переиспользует
       существующие schedule/unschedule правила, не вызывает Google API;
+      TagService: local-only CRUD/assignment без Calendar queue;
+      SearchService: Python casefold search поверх repository results;
+      BulkTaskService: детерминированная пачка и structured item results;
+      duplicate_task: независимая копия без Google/recurrence metadata;
       DailyTaskService: ежедневные задачи (локально);
       HistoryService: журнал выполненного (разовые по Task.completed_at +
       отметки ежедневных), группировка по датам, фильтр диапазона
 ViewModels (planner_desktop/viewmodels)
    ↓  QObject-обёртки: свойства, сигналы, слоты для QML; CRUD — через сервис.
       TodayViewModel, CalendarViewModel и HistoryViewModel наследуют общий
-      TaskActionsViewModel: selected task, editor data/presets, snooze,
-      complete/delete/restore, busy-guard, toast и tasksMutated; поэтому
+      TaskActionsViewModel: selected task, editor data/presets/tags, snooze,
+      duplicate, multi-selection/bulk, complete/delete/restore, busy-guard,
+      toast и tasksMutated; поэтому
       диалог редактирования и поведение действий едины на всех страницах.
       CalendarViewModel добавляет режимы day/work_week/week, visible dates,
       all-day/timed geometry, current-time data, period/event navigation,
@@ -115,8 +128,9 @@ ViewModels (planner_desktop/viewmodels)
       UiStateViewModel экспортирует layout mode, minimum window, human-date,
       time options и проверку shortcuts; task_rows.py —
       общие чистые преобразования Task -> словари для QML;
-      SettingsViewModel — статус локального состояния (без сети): разбивка
-      очереди по типам операций, последнее локальное изменение, диагностика.
+      SearchViewModel — overlay state, filters, result navigation и selection;
+      SettingsViewModel — статус локального состояния (без сети), управление
+      tags/counts, разбивка очереди, последнее локальное изменение, диагностика.
       Сигнал tasksMutated («я изменил задачи») соединяется в MainWindow
       с refresh() остальных ViewModel-ей; refresh() эмитит только
       *Changed-сигналы, поэтому петля исключена; для ежедневных задач
@@ -128,7 +142,8 @@ QML UI (planner_desktop/qml)
       qml/components (Panel, AppButton, IconButton, Badge, PriorityPill,
       SectionHeader, EmptyState, TaskCard, TaskEditorDialog, ConfirmDialog,
       QuickAdd, Sidebar, DatePickerField, TimePickerField, DurationPicker,
-      SegmentedControl, SchedulePresetBar, SnoozeMenu, Toast,
+      SegmentedControl, SchedulePresetBar, SnoozeMenu, Toast, GlobalSearch,
+      SearchFilterBar/SearchResultRow, TagChip/TagPicker, BulkActionToolbar,
       CalendarTimeGrid/DayColumn/EventBlock/AllDayLane/TimeRuler/
       CurrentTimeIndicator/ViewModeSwitch/CalendarDropPreview/
       CalendarResizeHandle/UndatedTaskPanel/UndatedTaskDragCard) — без
@@ -151,6 +166,36 @@ Sync (planner_desktop/sync)
 Пользовательская карта клавиш и контекстные ограничения вынесены в
 [`SHORTCUTS.md`](SHORTCUTS.md); `Ctrl+R` там явно отделён от ручного
 Google-синка.
+
+## Phase 3.1: поиск, теги, duplicate и bulk consistency
+
+Поиск полностью выполняется в Python: NFKC+casefold для query/title/notes/tags,
+substring words и простые quoted phrases. Фильтры status (`active`, `completed`,
+`all`), scope (`today`, `this_week`, `scheduled`, `undated`, `all_day`), priority
+и tags применяются до ranking. Порядок: exact title, title prefix, all terms in
+title, title+tags, notes; затем completion, scheduled time, newest `updated_at`,
+uid. Empty query с фильтрами валиден. SQLite `lower()` и FTS5 не используются.
+
+Теги — только Planner Desktop metadata. Они не попадают в Calendar description,
+не меняют Calendar mapper и не ставят create/update/delete. Rename сохраняет
+association rows; delete каскадно удаляет лишь `task_tags`. Любая mutation идёт
+через `TagService`/ViewModel и общий `tasksMutated`, поэтому Today, Calendar,
+History, Search и Settings counts обновляются без QML page-to-page coupling.
+
+Duplicate создаётся сервисом, а не QML-копированием. У копии новый uid, active
+state и отсутствуют event id, etag, recurring id/original start и sync metadata.
+Undated-копия локальна; scheduled-копия проходит обычный create path и получает
+ровно одну Calendar create operation. Recurring instance становится независимой
+ordinary task; tombstone отклоняется.
+
+`TaskSelection` хранится только в памяти и ограничивается текущими видимыми
+rows. Bulk выполняет элементы в стабильном порядке. Внутри одного item mutation
+repository+queue компенсируется при исключении; batch не откатывает уже успешные
+независимые items, а продолжает и возвращает `BulkActionResult` с
+affected/skipped/failed и каждым `BulkActionItemResult`. Unsafe schedule changes
+recurring instances пропускаются без mutation. Tag-only bulk не затрагивает
+Calendar queue; schedule/unschedule/delete переиспользуют существующую sync
+семантику. Один busy guard предотвращает повторный быстрый запуск.
 
 ## Ядро Calendar-синхронизации (фейковый шлюз)
 
@@ -275,22 +320,21 @@ Google-синка.
 ## Тесты
 
 Чистая Python-логика тестируется без видимого окна. Каноническая
-верификация перед закрытием Phase 2.2:
+верификация Phase 3.1:
 
 ```
 python -m compileall . -q
 python -m pytest --collect-only -q
-python -m pytest -q tests/test_desktop_calendar_interactions.py tests/test_desktop_calendar_drag_service.py tests/test_desktop_calendar_resize_service.py tests/test_desktop_calendar_interaction_viewmodel.py tests/test_desktop_undated_calendar_panel.py tests/test_desktop_calendar_interaction_keyboard.py
-python -m pytest -q tests/test_desktop_calendar_layout.py tests/test_desktop_calendar_overlap.py tests/test_desktop_calendar_grid_viewmodel.py tests/test_desktop_calendar_grid_keyboard.py
+python -m pytest -q tests/test_desktop_tags.py tests/test_desktop_tag_repository.py tests/test_desktop_tag_service.py tests/test_desktop_task_search.py tests/test_desktop_search_viewmodel.py tests/test_desktop_task_duplicate.py tests/test_desktop_task_selection.py tests/test_desktop_bulk_actions.py tests/test_desktop_search_keyboard.py
 python -m pytest -q
 ```
 
-Focused Phase 2.2 тесты добавляют snapping/clamping, move/resize/conversion,
-queue semantics, rollback, recurring refusal, interaction state, responsive
-undated panel и keyboard isolation к Phase 2.1 geometry/overlap/grid набору.
-Существующие Phase 1 и desktop sync-тесты
-не удаляются и входят в полный прогон. На Windows известен отдельный
+Focused Phase 3.1 тесты покрывают schema/tags/persistence/no-queue, Unicode
+search/ranking/filters, duplicate stripping, visible selection, все bulk actions,
+busy guard, partial failure и per-item rollback. Все Calendar Phase 2 и desktop
+sync regression файлы дополнительно запускаются отдельными срезами; существующие
+Phase 1/2/sync тесты не удаляются и входят в полный прогон. На Windows известен отдельный
 платформенный провал `tests/test_settings_paths.py::test_macos_data_dir`; он не
-исправляется в Phase 2.2. Фактический статус финального прогона фиксируется в
+исправляется в Phase 3.1. Фактический статус финального прогона фиксируется в
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md), а не объявляется архитектурной
 гарантией заранее.

@@ -59,7 +59,7 @@ class TaskActionsViewModel(QObject):
     tasksMutated = Signal()
     busyChanged = Signal()
     selectedTaskChanged = Signal()
-    selectionChanged = Signal()
+    taskSelectionChanged = Signal()
 
     #: Окно подавления повторного идентичного действия (секунды).
     DUPLICATE_WINDOW_S = 0.3
@@ -128,26 +128,26 @@ class TaskActionsViewModel(QObject):
     def selectedUid(self) -> str:
         return self._selected_uid
 
-    @Property("QVariantList", notify=selectionChanged)
+    @Property("QVariantList", notify=taskSelectionChanged)
     def selectedUids(self) -> List[str]:
         self._sync_visible_selection()
         return list(self._selection.selected)
 
-    @Property(int, notify=selectionChanged)
+    @Property(int, notify=taskSelectionChanged)
     def selectedCount(self) -> int:
         self._sync_visible_selection()
         return self._selection.count
 
-    @Property(bool, notify=selectionChanged)
+    @Property(bool, notify=taskSelectionChanged)
     def hasMultiSelection(self) -> bool:
         return self.selectedCount > 1
 
-    @Property(str, notify=selectionChanged)
+    @Property(str, notify=taskSelectionChanged)
     def selectionStatus(self) -> str:
         count = self.selectedCount
         return "Нет выбранных задач" if count == 0 else f"Выбрано задач: {count}"
 
-    @Property("QVariantList", notify=tasksMutated)
+    @Property("QVariantList", notify=selectedTaskChanged)
     def availableTags(self) -> List[Dict[str, Any]]:
         tag_service = getattr(self._service, "tag_service", None)
         if tag_service is None:
@@ -179,12 +179,16 @@ class TaskActionsViewModel(QObject):
     def _prune_selection(self) -> None:
         before = self._selection.selected
         changed = self._sync_visible_selection()
-        visible = set(self._selection.visible)
-        if self._selected_uid and self._selected_uid not in visible:
+        # The multi-selection is scoped to the current visible collection,
+        # but the inspector's single current task may remain valid after a
+        # move changes its date/filter bucket (for example Calendar drag).
+        # Clear that current task only when it actually disappeared. Search
+        # has a stricter result-selection policy in its own recompute hook.
+        if self._selected_uid and self._selected_live_task() is None:
             self._selected_uid = ""
             self.selectedTaskChanged.emit()
         if changed or before != self._selection.selected:
-            self.selectionChanged.emit()
+            self.taskSelectionChanged.emit()
 
     @Slot(str)
     def selectTask(self, uid: str) -> None:
@@ -194,7 +198,7 @@ class TaskActionsViewModel(QObject):
             self._selected_uid = uid
             self.selectedTaskChanged.emit()
         if selection_changed:
-            self.selectionChanged.emit()
+            self.taskSelectionChanged.emit()
 
     @Slot(str, bool, bool)
     def selectTaskWithModifiers(self, uid: str, ctrl: bool, shift: bool) -> None:
@@ -206,7 +210,7 @@ class TaskActionsViewModel(QObject):
         if new_current != self._selected_uid:
             self._selected_uid = new_current
             self.selectedTaskChanged.emit()
-        self.selectionChanged.emit()
+        self.taskSelectionChanged.emit()
 
     @Slot(str, result=bool)
     def isTaskSelected(self, uid: str) -> bool:
@@ -221,7 +225,7 @@ class TaskActionsViewModel(QObject):
             if not self._selected_uid and selected:
                 self._selected_uid = selected[0]
                 self.selectedTaskChanged.emit()
-            self.selectionChanged.emit()
+            self.taskSelectionChanged.emit()
 
     @Slot()
     def clearSelection(self) -> None:
@@ -230,7 +234,7 @@ class TaskActionsViewModel(QObject):
             self._selected_uid = ""
             self.selectedTaskChanged.emit()
         if selection_changed:
-            self.selectionChanged.emit()
+            self.taskSelectionChanged.emit()
 
     # ---- общий контракт редактора ------------------------------------------------------
 
@@ -240,17 +244,57 @@ class TaskActionsViewModel(QObject):
 
     @Slot(str, result="QVariantMap")
     def editorDataFor(self, uid: str) -> Dict[str, Any]:
-        return editor_payload(self._service.get_task(uid))
+        data = editor_payload(self._service.get_task(uid))
+        tag_service = getattr(self._service, "tag_service", None)
+        tags = tag_service.tags_for_task(uid) if uid and tag_service is not None else []
+        data["tagIds"] = [tag.id for tag in tags]
+        data["tags"] = [{"id": tag.id, "name": tag.name} for tag in tags]
+        return data
 
     @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
     def saveEditor(self, uid: str, title: str, notes: str, priority: int,
                    scheduled: bool, is_all_day: bool, date_text: str,
                    time_text: str, duration_text: str,
                    completed: bool) -> bool:
+        return self._save_editor(
+            uid, title, notes, priority, scheduled, is_all_day, date_text,
+            time_text, duration_text, completed, None,
+        )
+
+    @Slot(str, str, str, int, bool, bool, str, str, str, bool,
+          "QVariantList", result=bool)
+    def saveEditorWithTags(
+        self, uid: str, title: str, notes: str, priority: int,
+        scheduled: bool, is_all_day: bool, date_text: str,
+        time_text: str, duration_text: str, completed: bool, tag_ids,
+    ) -> bool:
+        return self._save_editor(
+            uid, title, notes, priority, scheduled, is_all_day, date_text,
+            time_text, duration_text, completed, list(tag_ids),
+        )
+
+    def _save_editor(
+        self, uid: str, title: str, notes: str, priority: int,
+        scheduled: bool, is_all_day: bool, date_text: str,
+        time_text: str, duration_text: str, completed: bool,
+        tag_ids: Optional[List[int]],
+    ) -> bool:
         """Сохранение TaskEditorDialog (создание при пустом uid).
 
         Ошибки валидации не закрывают диалог: False + editorError.
         """
+        tag_service = getattr(self._service, "tag_service", None)
+        if tag_ids is not None:
+            if tag_service is None and tag_ids:
+                self._set_editor_error("Сервис тегов недоступен.")
+                return False
+            try:
+                if tag_service is not None:
+                    tag_service.resolve_tag_ids(tag_ids)
+            except Exception as exc:
+                self._set_editor_error(str(exc))
+                return False
+
         dedupe_key = "\x1f".join((
             uid,
             title,
@@ -262,6 +306,7 @@ class TaskActionsViewModel(QObject):
             time_text,
             duration_text,
             str(completed),
+            ",".join(str(item) for item in (tag_ids or [])),
         ))
         if not self._begin("saveEditor", dedupe_key, dedupe=True):
             return False
@@ -282,8 +327,45 @@ class TaskActionsViewModel(QObject):
             self._set_editor_error(" ".join(result.errors))
             return False
 
+        if tag_ids is not None and tag_service is not None:
+            try:
+                tag_service.set_task_tags(result.task.uid, tag_ids)
+            except Exception as exc:
+                self._set_editor_error(f"Не удалось сохранить теги: {exc}")
+                return False
+
         self._set_editor_error("")
         self._notify_mutation("Сохранено")
+        return True
+
+    @Slot(str, result="QVariantMap")
+    def createTag(self, name: str) -> Dict[str, Any]:
+        tag_service = getattr(self._service, "tag_service", None)
+        if tag_service is None:
+            return {"ok": False, "error": "Сервис тегов недоступен."}
+        try:
+            tag = tag_service.create(name)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        self.tasksMutated.emit()
+        return {"ok": True, "id": tag.id, "name": tag.name, "error": ""}
+
+    @Slot(str, "QVariantList", result=bool)
+    def setTaskTags(self, uid: str, tag_ids) -> bool:
+        tag_service = getattr(self._service, "tag_service", None)
+        if tag_service is None:
+            self.toastError.emit("Сервис тегов недоступен.")
+            return False
+        if not self._begin("setTags", uid, dedupe=True):
+            return False
+        try:
+            tag_service.set_task_tags(uid, list(tag_ids))
+        except Exception as exc:
+            self.toastError.emit(str(exc))
+            return False
+        finally:
+            self._end()
+        self._notify_mutation("Теги обновлены")
         return True
 
     @Slot()

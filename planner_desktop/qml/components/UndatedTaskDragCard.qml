@@ -13,12 +13,14 @@ Rectangle {
     property bool suppressClick: false
 
     signal selectedRequested(string uid)
+    signal selectionRequested(string uid, bool ctrl, bool shift)
     signal dragStarted(string uid, string sourceKind)
     signal dragMoved(real x, real y, bool shift)
     signal dragFinished()
     signal dragCanceled()
 
-    implicitHeight: task.notes && task.notes.length > 0 ? 82 : 62
+    implicitHeight: (task.notes && task.notes.length > 0)
+                    || (task.tags && task.tags.length > 0) ? 86 : 62
     radius: Theme.radiusMedium
     color: selected ? Theme.accentSoft : cardHover.hovered ? Theme.surfaceHover : Theme.surface
     border.color: selected ? Theme.accent : Theme.border
@@ -65,6 +67,17 @@ Rectangle {
                 font.pixelSize: Theme.fontCaption - 1
                 font.family: Theme.fontFamily
                 color: Theme.priorityColor(card.task.priority || 0)
+            }
+            Label {
+                visible: card.task.tags && card.task.tags.length > 0
+                text: card.task.tags.join(" · ")
+                      + ((card.task.tagOverflow || 0) > 0
+                         ? " · +" + card.task.tagOverflow : "")
+                font.pixelSize: Theme.fontCaption - 1
+                font.family: Theme.fontFamily
+                color: Theme.accent
+                elide: Text.ElideRight
+                Layout.fillWidth: true
             }
         }
         AppIcon {
@@ -117,9 +130,16 @@ Rectangle {
             card.dragActivated = false
             card.suppressClick = false
         }
-        onClicked: if (!card.suppressClick) {
-            card.forceActiveFocus()
-            card.selectedRequested(card.task.uid)
+        onClicked: mouse => {
+            if (!card.suppressClick) {
+                card.forceActiveFocus()
+                card.selectedRequested(card.task.uid)
+                card.selectionRequested(
+                    card.task.uid,
+                    (mouse.modifiers & Qt.ControlModifier) !== 0,
+                    (mouse.modifiers & Qt.ShiftModifier) !== 0
+                )
+            }
         }
     }
 

@@ -23,6 +23,7 @@ Panel {
     signal editRequested(string uid)
     signal toggleRequested(string uid)
     signal deleteRequested(string uid)
+    signal duplicateRequested(string uid)
     signal postponeRequested(string uid, string action)
     signal presetRequested(string uid, string presetId)
     signal pickRequested(string uid)
@@ -136,6 +137,26 @@ Panel {
                 text: inspector._completed ? "Выполнено" : "Не выполнено"
                 fg: inspector._completed ? Theme.success : Theme.textSecondary
                 bg: inspector._completed ? Theme.successSoft : Theme.surfacePressed
+            }
+        }
+
+        Flow {
+            Layout.fillWidth: true
+            spacing: Theme.spacingXs
+            visible: !!(inspector.task && inspector.task.tags
+                        && inspector.task.tags.length > 0)
+            Repeater {
+                model: inspector.task && inspector.task.tags ? inspector.task.tags : []
+                delegate: TagChip {
+                    required property var modelData
+                    name: String(modelData)
+                    compact: true
+                }
+            }
+            TagChip {
+                visible: !!(inspector.task && inspector.task.tagOverflow > 0)
+                name: "+" + (inspector.task ? inspector.task.tagOverflow : 0)
+                compact: true
             }
         }
 
@@ -369,6 +390,14 @@ Panel {
                 iconName: "edit"
                 enabled: !inspector.busy
                 onClicked: inspector.editRequested(inspector._uid)
+            }
+            AppButton {
+                text: "Дублировать"
+                variant: "secondary"
+                iconName: "plus"
+                enabled: !inspector.busy
+                Accessible.name: "Дублировать выбранную задачу"
+                onClicked: inspector.duplicateRequested(inspector._uid)
             }
             AppButton {
                 text: "Удалить"

@@ -18,6 +18,7 @@ Item {
 
     readonly property bool dialogsOpen: editorDialog.visible
                                         || confirmDeleteDialog.visible
+                                        || confirmBulkDeleteDialog.visible
 
     function openSelected() {
         if (historyVm.selectedUid !== "")
@@ -33,8 +34,14 @@ Item {
         }
     }
     function deleteSelected() {
-        if (historyVm.selectedUid !== "")
+        if (historyVm.selectedCount > 1)
+            confirmBulkDeleteDialog.openFor("bulk")
+        else if (historyVm.selectedUid !== "")
             confirmDeleteDialog.openFor(historyVm.selectedUid)
+    }
+    function duplicateSelected() {
+        if (historyVm.selectedCount === 1)
+            historyVm.duplicateTask(historyVm.selectedUids[0])
     }
     function clearSelection() { historyVm.clearSelection() }
     function restoreFocus() {
@@ -71,6 +78,15 @@ Item {
                 ]
                 onSelected: value => historyVm.setRange(parseInt(value))
             }
+        }
+
+        BulkActionToolbar {
+            objectName: "historyBulkToolbar"
+            visible: historyVm.selectedCount > 1
+            vm: historyVm
+            compact: page.compact
+            Layout.fillWidth: true
+            onDeleteRequested: confirmBulkDeleteDialog.openFor("bulk")
         }
 
         // ---- Журнал ----
@@ -133,9 +149,10 @@ Item {
                             required property var modelData
                             readonly property bool selected:
                                 !modelData.isDaily
-                                && historyVm.selectedUid === modelData.uid
+                                && historyVm.isTaskSelected(modelData.uid)
                             readonly property bool keyboardFocusWithin:
                                 entry.activeFocus || editAction.activeFocus
+                                || duplicateAction.activeFocus
                                 || restoreAction.activeFocus || deleteAction.activeFocus
                             Layout.fillWidth: true
                             implicitHeight: entryRow.implicitHeight + 2 * Theme.spacingMd
@@ -156,13 +173,20 @@ Item {
                             Accessible.selected: selected
 
                             HoverHandler { id: entryHover }
-                            TapHandler {
+                            MouseArea {
+                                anchors.fill: parent
                                 enabled: !entry.modelData.isDaily
-                                onSingleTapped: {
+                                acceptedButtons: Qt.LeftButton
+                                propagateComposedEvents: true
+                                onClicked: mouse => {
                                     entry.forceActiveFocus()
-                                    historyVm.selectTask(entry.modelData.uid)
+                                    historyVm.selectTaskWithModifiers(
+                                        entry.modelData.uid,
+                                        (mouse.modifiers & Qt.ControlModifier) !== 0,
+                                        (mouse.modifiers & Qt.ShiftModifier) !== 0
+                                    )
                                 }
-                                onDoubleTapped: {
+                                onDoubleClicked: {
                                     page.focusReturnItem = entry
                                     historyVm.selectTask(entry.modelData.uid)
                                     editorDialog.openForEdit(entry.modelData.uid)
@@ -171,7 +195,14 @@ Item {
                             Keys.onPressed: event => {
                                 if (entry.modelData.isDaily)
                                     return
-                                historyVm.selectTask(entry.modelData.uid)
+                                if (event.key === Qt.Key_Delete) {
+                                    page.focusReturnItem = entry
+                                    page.deleteSelected()
+                                    event.accepted = true
+                                    return
+                                }
+                                if (!historyVm.isTaskSelected(entry.modelData.uid))
+                                    historyVm.selectTask(entry.modelData.uid)
                                 if (event.key === Qt.Key_Return
                                         || event.key === Qt.Key_Enter) {
                                     page.focusReturnItem = entry
@@ -179,10 +210,6 @@ Item {
                                     event.accepted = true
                                 } else if (event.key === Qt.Key_Space) {
                                     page.toggleSelected()
-                                    event.accepted = true
-                                } else if (event.key === Qt.Key_Delete) {
-                                    page.focusReturnItem = entry
-                                    confirmDeleteDialog.openFor(entry.modelData.uid)
                                     event.accepted = true
                                 } else if (event.key === Qt.Key_Escape) {
                                     page.clearSelection()
@@ -251,6 +278,29 @@ Item {
                                             Layout.fillWidth: true
                                         }
                                     }
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.spacingXs
+                                        visible: entry.modelData.tags
+                                                 && entry.modelData.tags.length > 0
+                                        Repeater {
+                                            model: entry.modelData.tags || []
+                                            delegate: TagChip {
+                                                required property var modelData
+                                                name: String(modelData)
+                                                compact: true
+                                                onClicked: name => {
+                                                    searchVm.toggleTagFilter(name)
+                                                    searchVm.openSearch()
+                                                }
+                                            }
+                                        }
+                                        TagChip {
+                                            visible: entry.modelData.tagOverflow > 0
+                                            name: "+" + entry.modelData.tagOverflow
+                                            compact: true
+                                        }
+                                    }
                                 }
 
                                 Badge {
@@ -298,6 +348,15 @@ Item {
                                             historyVm.selectTask(entry.modelData.uid)
                                             editorDialog.openForEdit(entry.modelData.uid)
                                         }
+                                    }
+                                    IconButton {
+                                        id: duplicateAction
+                                        iconName: "plus"
+                                        tip: "Дублировать"
+                                        hoverGlyphColor: Theme.accent
+                                        hoverBg: Theme.accentSoft
+                                        enabled: !historyVm.busy
+                                        onClicked: historyVm.duplicateTask(entry.modelData.uid)
                                     }
                                     IconButton {
                                         id: restoreAction
@@ -364,6 +423,13 @@ Item {
         message: "Задача будет помечена удалённой; если её событие уже есть "
                  + "в календаре, удаление события встанет в очередь синка."
         onConfirmed: uid => historyVm.deleteTask(uid)
+        onClosed: page.restoreFocus()
+    }
+    ConfirmDialog {
+        id: confirmBulkDeleteDialog
+        headerText: "Удалить выбранные задачи?"
+        message: "Удаление затронет только выбранные разовые задачи. Ежедневные строки истории никогда не входят в выбор."
+        onConfirmed: historyVm.bulkDelete()
         onClosed: page.restoreFocus()
     }
 }

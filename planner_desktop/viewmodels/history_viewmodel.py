@@ -118,12 +118,19 @@ class HistoryViewModel(TaskActionsViewModel):
         today = date.today()
         result: List[Dict[str, Any]] = []
         for group in self._groups():
+            rows = []
+            for entry in group.entries:
+                row = _entry_to_row(entry)
+                task = None if entry.is_daily else self._service.get_task(entry.uid)
+                row["tags"] = list(task.tags[:3]) if task is not None else []
+                row["tagOverflow"] = max(0, len(task.tags) - 3) if task is not None else 0
+                rows.append(row)
             result.append({
                 "dateISO": group.day.isoformat(),
                 "dateLabel": _date_label(group.day),
                 "relLabel": _relative_label(group.day, today),
                 "count": group.count,
-                "entries": [_entry_to_row(e) for e in group.entries],
+                "entries": rows,
             })
         return result
 

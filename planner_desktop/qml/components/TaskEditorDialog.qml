@@ -95,6 +95,7 @@ Dialog {
         timeField.timeText = data.timeText || ""
         durationPicker.reset(data.durationText || "")
         completedCheck.checked = !!data.completed
+        tagPicker.reset(data.tagIds || [])
         vm.clearEditorError()
         Qt.callLater(function() {
             if (formScroll.contentItem)
@@ -185,7 +186,7 @@ Dialog {
     function submit() {
         if (vm.busy)
             return
-        var ok = vm.saveEditor(
+        var ok = vm.saveEditorWithTags(
             taskUid,
             titleField.text,
             notesArea.text,
@@ -195,7 +196,8 @@ Dialog {
             dialog.schedMode !== "none" ? dateField.dateText : "",
             dialog.schedMode === "timed" ? timeField.timeText : "",
             dialog.schedMode === "timed" ? durationPicker.durationText : "",
-            completedCheck.checked
+            completedCheck.checked,
+            tagPicker.selectedIds
         )
         if (ok)
             dialog.close()
@@ -376,6 +378,16 @@ Dialog {
             Layout.fillWidth: true
         }
 
+        TagPicker {
+            id: tagPicker
+            Layout.fillWidth: true
+            availableTags: dialog.vm ? dialog.vm.availableTags : []
+            onCreateRequested: name => {
+                var result = dialog.vm.createTag(name)
+                handleCreated(result)
+            }
+        }
+
         Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
 
         // ---- приоритет и «выполнено» ----
@@ -529,6 +541,18 @@ Dialog {
                     var uid = dialog.taskUid
                     dialog.close()
                     dialog.deleteRequested(uid)
+                }
+            }
+            AppButton {
+                visible: dialog.isEdit
+                text: "Дублировать"
+                variant: "secondary"
+                iconName: "plus"
+                enabled: dialog.vm ? !dialog.vm.busy : true
+                Accessible.name: "Дублировать редактируемую задачу"
+                onClicked: {
+                    if (dialog.vm.duplicateTask(dialog.taskUid))
+                        dialog.close()
                 }
             }
             Item { Layout.fillWidth: true }
