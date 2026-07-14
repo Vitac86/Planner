@@ -31,6 +31,17 @@ from PySide6.QtCore import Property, QObject, Signal, Slot
 from planner_desktop.domain import scheduling
 from planner_desktop.domain.task import Task
 from planner_desktop.usecases.task_service import DesktopTaskService
+from planner_desktop.usecases.bulk_task_service import (
+    ACTION_ADD_TAG,
+    ACTION_COMPLETE,
+    ACTION_DELETE,
+    ACTION_POSTPONE_TOMORROW,
+    ACTION_PRIORITY,
+    ACTION_REMOVE_TAG,
+    ACTION_RESTORE,
+    ACTION_UNSCHEDULE,
+    BulkTaskService,
+)
 from planner_desktop.viewmodels.task_rows import (
     editor_payload,
     save_editor,
@@ -70,6 +81,7 @@ class TaskActionsViewModel(QObject):
         self._last_op: tuple[str, str, float] = ("", "", float("-inf"))
         self._clock = clock or _time.monotonic
         self._now = now_provider or datetime.now
+        self._bulk = BulkTaskService(service, getattr(service, "tag_service", None))
 
     # ---- хук подкласса -----------------------------------------------------------
 
@@ -134,6 +146,16 @@ class TaskActionsViewModel(QObject):
     def selectionStatus(self) -> str:
         count = self.selectedCount
         return "Нет выбранных задач" if count == 0 else f"Выбрано задач: {count}"
+
+    @Property("QVariantList", notify=tasksMutated)
+    def availableTags(self) -> List[Dict[str, Any]]:
+        tag_service = getattr(self._service, "tag_service", None)
+        if tag_service is None:
+            return []
+        return [
+            {"id": tag.id, "name": tag.name}
+            for tag in tag_service.list_tags()
+        ]
 
     @Property("QVariant", notify=selectedTaskChanged)
     def selectedTask(self) -> Optional[Dict[str, Any]]:
@@ -492,6 +514,80 @@ class TaskActionsViewModel(QObject):
         self._notify_mutation("Копия задачи создана")
         self.selectTask(result.task.uid)
         return True
+
+    def _bulk_result_map(self, result) -> Dict[str, Any]:
+        return {
+            "affected": result.affected_count,
+            "skipped": result.skipped_count,
+            "failed": result.failed_count,
+            "summary": result.summary,
+            "busyRejected": result.busy_rejected,
+            "items": [
+                {"uid": item.uid, "status": item.status, "message": item.message}
+                for item in result.items
+            ],
+        }
+
+    def _run_bulk(self, action: str, value=None) -> Dict[str, Any]:
+        self._sync_visible_selection()
+        uids = self._selection.selected
+        if not uids:
+            return {
+                "affected": 0, "skipped": 0, "failed": 0,
+                "summary": "Нет выбранных задач.", "busyRejected": False,
+                "items": [],
+            }
+        if not self._begin(f"bulk:{action}"):
+            return {
+                "affected": 0, "skipped": 0, "failed": 0,
+                "summary": "Другая операция уже выполняется.",
+                "busyRejected": True, "items": [],
+            }
+        try:
+            # The tag service can be attached after a VM is built in tests/demo.
+            self._bulk.tag_service = getattr(self._service, "tag_service", None)
+            result = self._bulk.execute(action, uids, value, now=self._now())
+        finally:
+            self._end()
+        if result.affected_count:
+            self._notify_mutation(result.summary)
+        elif result.failed_count or result.busy_rejected:
+            self.toastError.emit(result.summary)
+        elif result.skipped_count:
+            self.toastMessage.emit(result.summary)
+        return self._bulk_result_map(result)
+
+    @Slot(result="QVariantMap")
+    def bulkComplete(self) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_COMPLETE)
+
+    @Slot(result="QVariantMap")
+    def bulkRestore(self) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_RESTORE)
+
+    @Slot(int, result="QVariantMap")
+    def bulkSetPriority(self, priority: int) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_PRIORITY, priority)
+
+    @Slot(int, result="QVariantMap")
+    def bulkAddTag(self, tag_id: int) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_ADD_TAG, tag_id)
+
+    @Slot(int, result="QVariantMap")
+    def bulkRemoveTag(self, tag_id: int) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_REMOVE_TAG, tag_id)
+
+    @Slot(result="QVariantMap")
+    def bulkPostponeTomorrow(self) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_POSTPONE_TOMORROW)
+
+    @Slot(result="QVariantMap")
+    def bulkUnschedule(self) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_UNSCHEDULE)
+
+    @Slot(result="QVariantMap")
+    def bulkDelete(self) -> Dict[str, Any]:
+        return self._run_bulk(ACTION_DELETE)
 
     @Slot()
     def refresh(self) -> None:

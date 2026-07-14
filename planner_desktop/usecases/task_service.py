@@ -129,12 +129,24 @@ class DesktopTaskService:
 
     def delete_task(self, task_id: int) -> bool:
         """Тумбстоун в репозитории + delete/отмена операций в очереди."""
-        deleted = self.repository.delete(task_id)
-        if deleted and self._queue is not None:
-            tombstone = self.repository.get(task_id)
-            if tombstone is not None:
-                record_local_delete(self._queue, tombstone)
-        return deleted
+        task = self.repository.get(task_id)
+        if task is None or task.is_deleted:
+            return False
+        original = deepcopy(task)
+        queue_snapshot = self._queue_snapshot(task.uid)
+        try:
+            deleted = self.repository.delete(task_id)
+            if deleted and self._queue is not None:
+                tombstone = self.repository.get(task_id)
+                if tombstone is not None:
+                    record_local_delete(self._queue, tombstone)
+            return deleted
+        except Exception:
+            try:
+                self._restore_repository_task(original)
+            finally:
+                self._restore_queue_snapshot(task.uid, queue_snapshot)
+            raise
 
     def delete_task_by_uid(self, uid: str) -> bool:
         task = self.repository.get_by_uid(uid)
@@ -176,6 +188,31 @@ class DesktopTaskService:
         except Exception as exc:
             return TaskOperationResult(errors=[f"Не удалось дублировать задачу: {exc}"])
         return TaskOperationResult(task=created)
+
+    def set_priority(self, uid: str, priority: int) -> TaskOperationResult:
+        """Update the local-only priority without a Calendar operation."""
+
+        task = self.get_task(uid)
+        if task is None:
+            return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
+        priority = int(priority)
+        if priority not in (0, 1, 2, 3):
+            return TaskOperationResult(errors=["Приоритет должен быть от 0 до 3."])
+        if task.priority == priority:
+            return TaskOperationResult(task=task)
+        original = deepcopy(task)
+        try:
+            task.priority = priority
+            return TaskOperationResult(task=self.repository.update(task))
+        except Exception as exc:
+            try:
+                self._restore_repository_task(original)
+            except Exception as rollback_exc:
+                return TaskOperationResult(errors=[
+                    f"Не удалось изменить приоритет: {exc} "
+                    f"(ошибка отката: {rollback_exc})"
+                ])
+            return TaskOperationResult(errors=[f"Не удалось изменить приоритет: {exc}"])
 
     # ---- форма редактора (создание и правка) ------------------------------------
 
