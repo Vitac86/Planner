@@ -19,6 +19,8 @@ from planner_desktop.viewmodels.ui_state import UiStateViewModel
 
 BARE = ["open_selected", "toggle_selected", "delete_selected",
         "clear_selection", "calendar_prev_day", "calendar_next_day",
+        "calendar_prev_period", "calendar_next_period", "calendar_today",
+        "calendar_prev_event", "calendar_next_event",
         "quick_add_slash"]
 CTRL = ["new_task", "new_scheduled_task", "quick_add", "refresh"]
 

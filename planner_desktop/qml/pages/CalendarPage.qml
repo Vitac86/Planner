@@ -5,51 +5,63 @@ import QtQuick.Layouts
 import "../components"
 import "../theme"
 
-// Календарь: недельная полоса + агенда выбранного дня с фильтрами
-// (все / активные / выполненные / ежедневные), сводкой дня и инспектором
-// выбранной задачи (тот же TaskInspector, что на «Сегодня»). Почасовая сетка
-// и drag-and-drop — следующая фаза (см. FEATURE_PARITY.md).
+// Phase 2.1 Calendar: hourly day/work-week/week grid plus the preserved agenda,
+// daily checklist, shared editor/actions, day summary, and inspector.
 Item {
     id: page
 
-    // Режим раскладки считает Python (domain/layout.py).
     readonly property string layoutMode: uiVm.layoutModeFor(width)
     readonly property bool wide: layoutMode === "wide"
     readonly property bool compact: layoutMode === "compact"
-    property var focusReturnItem: null
-
-    // ---- выбор задачи живёт в ViewModel ----
     readonly property var selTask: calendarVm.selectedTask
     readonly property bool dialogsOpen: editorDialog.visible
                                         || confirmDeleteDialog.visible
                                         || snoozeMenu.visible
-                                        || inspectorDrawer.visible
+    readonly property bool gridFocused: timeGrid.gridFocused
+    property bool agendaExpanded: false
+    property var focusReturnItem: null
+    property string selectedGridDate: ""
+    property int selectedGridMinute: -1
+
+    onLayoutModeChanged: calendarVm.setResponsiveMode(layoutMode)
+    Component.onCompleted: calendarVm.setResponsiveMode(layoutMode)
+    onVisibleChanged: if (visible) timeGrid.ensureInitialScroll(false)
+
+    Timer {
+        interval: 60000
+        repeat: true
+        running: page.visible
+        onTriggered: calendarVm.refreshCurrentTime()
+    }
 
     function restoreFocus() {
         var item = focusReturnItem
         focusReturnItem = null
         if (item && item.visible && item.enabled)
             item.forceActiveFocus()
-        else if (dayList.visible)
-            dayList.forceActiveFocus()
         else
-            page.forceActiveFocus()
+            timeGrid.forceActiveFocus()
     }
 
     function selectTask(uid) {
-        calendarVm.selectTask(uid)
+        calendarVm.selectEvent(uid)
         if (!page.wide && calendarVm.selectedUid !== "")
             inspectorDrawer.open()
     }
 
-    // Для клавиатурного Ctrl+N / Ctrl+Shift+N: задача на выбранный день.
+    function editEvent(uid) {
+        if (inspectorDrawer.visible)
+            inspectorDrawer.close()
+        editorDialog.openForEdit(uid)
+    }
+
     function newTask() { editorDialog.openForCreate(calendarVm.selectedDateText) }
     function newScheduledTask() {
         editorDialog.openForCreateScheduled(calendarVm.selectedDateText)
     }
     function openSelected() {
         if (calendarVm.selectedUid !== "")
-            editorDialog.openForEdit(calendarVm.selectedUid)
+            editEvent(calendarVm.selectedUid)
     }
     function toggleSelected() {
         if (calendarVm.selectedUid !== "")
@@ -63,451 +75,370 @@ Item {
         inspectorDrawer.close()
         calendarVm.clearSelection()
     }
-
-    // Клавиатурная навигация по дням (Main.qml зовёт при стрелках влево/вправо).
-    function selectPrevDay() {
-        if (calendarVm.selectedIndex > 0)
-            calendarVm.selectDay(calendarVm.selectedIndex - 1)
-        else { calendarVm.previousWeek(); calendarVm.selectDay(6) }
+    function selectPrevDay() { calendarVm.previousDay() }
+    function selectNextDay() { calendarVm.nextDay() }
+    function selectPrevPeriod() { calendarVm.previousPeriod() }
+    function selectNextPeriod() { calendarVm.nextPeriod() }
+    function selectPrevEvent() { calendarVm.selectPreviousEvent() }
+    function selectNextEvent() { calendarVm.selectNextEvent() }
+    function goToToday() {
+        calendarVm.goToToday()
+        timeGrid.ensureInitialScroll(true)
     }
-    function selectNextDay() {
-        if (calendarVm.selectedIndex < 6)
-            calendarVm.selectDay(calendarVm.selectedIndex + 1)
-        else { calendarVm.nextWeek(); calendarVm.selectDay(0) }
+
+    Connections {
+        target: calendarVm
+        function onEditEventRequested(uid) { page.editEvent(uid) }
     }
 
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: page.compact ? Theme.spacingLg : Theme.spacingXl
-        spacing: page.compact ? Theme.spacingMd : Theme.spacingLg
+        spacing: page.compact ? Theme.spacingSm : Theme.spacingMd
 
-        // ---- Шапка: заголовок недели + навигация ----
         PageHeader {
             title: "Календарь"
-            subtitle: calendarVm.weekTitle
+            subtitle: calendarVm.periodTitle
+            stackActions: page.compact
             Layout.fillWidth: true
 
             AppButton {
+                text: ""
                 variant: "secondary"
                 iconName: "chevron-left"
-                onClicked: calendarVm.previousWeek()
+                Accessible.name: "Предыдущий период"
+                onClicked: calendarVm.previousPeriod()
                 ToolTip.visible: hovered
-                ToolTip.text: "Предыдущая неделя"
-                ToolTip.delay: 500
+                ToolTip.text: "Предыдущий период · Page Up"
             }
             AppButton {
                 text: "Сегодня"
                 variant: calendarVm.isCurrentWeek ? "ghost" : "secondary"
-                onClicked: calendarVm.goToToday()
+                Accessible.name: "Перейти к сегодняшнему дню"
+                onClicked: page.goToToday()
             }
             AppButton {
+                text: ""
                 variant: "secondary"
                 iconName: "chevron-right"
-                onClicked: calendarVm.nextWeek()
+                Accessible.name: "Следующий период"
+                onClicked: calendarVm.nextPeriod()
                 ToolTip.visible: hovered
-                ToolTip.text: "Следующая неделя"
-                ToolTip.delay: 500
+                ToolTip.text: "Следующий период · Page Down"
             }
             AppButton {
                 text: page.compact ? "" : "Задача"
                 variant: "primary"
                 iconName: "plus"
+                Accessible.name: "Создать задачу на выбранный день"
                 onClicked: page.newTask()
                 ToolTip.visible: page.compact && hovered
                 ToolTip.text: "Задача на выбранный день"
             }
         }
 
-        // ---- Недельная полоса (в компактном режиме прокручивается) ----
-        Flickable {
-            id: weekStrip
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: weekRow.implicitHeight
-            contentWidth: weekRow.width
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-            flickableDirection: Flickable.HorizontalFlick
+            Layout.minimumWidth: 0
+            spacing: Theme.spacingSm
 
-            RowLayout {
-                id: weekRow
-                width: Math.max(page.compact ? 7 * 104 + 6 * Theme.spacingSm : 0,
-                                weekStrip.width)
-                spacing: Theme.spacingSm
-
-                Repeater {
-                    model: calendarVm.weekDays
-                    delegate: Panel {
-                        id: dayCell
-                        required property var modelData
-                        required property int index
-
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 96
-                        implicitHeight: 96
-                        radius: Theme.radiusMedium
-                        color: modelData.isSelected ? Theme.accentSoft
-                             : dayMouse.containsMouse ? Theme.surfaceHover : Theme.surface
-                        borderColor: modelData.isToday ? Theme.accent
-                                   : modelData.isSelected ? Theme.accentSoftBorder : Theme.border
-                        borderWidth: modelData.isToday ? 2 : 1
-                        elevationOpacity: modelData.isSelected ? 0.16 : Theme.elevCardOpacity
-                        elevationY: modelData.isSelected ? 8 : Theme.elevCardY
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: Theme.spacingMd
-                            spacing: 2
-
-                            Label {
-                                text: dayCell.modelData.label.toUpperCase()
-                                font.pixelSize: Theme.fontCaption
-                                font.family: Theme.fontFamily
-                                font.weight: Font.DemiBold
-                                font.letterSpacing: 0.5
-                                color: dayCell.modelData.isSelected ? Theme.accent : Theme.textMuted
-                            }
-                            Label {
-                                text: dayCell.modelData.dateText
-                                font.pixelSize: 17
-                                font.family: Theme.fontFamily
-                                font.weight: Font.DemiBold
-                                color: dayCell.modelData.isToday ? Theme.accent : Theme.textPrimary
-                            }
-                            Item { Layout.fillHeight: true }
-                            Badge {
-                                visible: dayCell.modelData.taskCount > 0
-                                text: String(dayCell.modelData.taskCount)
-                                fg: dayCell.modelData.isSelected ? Theme.accent : Theme.textSecondary
-                                bg: dayCell.modelData.isSelected ? Theme.surface : Theme.surfacePressed
-                            }
-                            Label {
-                                visible: dayCell.modelData.taskCount === 0
-                                text: "—"
-                                font.pixelSize: Theme.fontCaption
-                                font.family: Theme.fontFamily
-                                color: Theme.textMuted
-                                opacity: 0.6
-                            }
-                        }
-
-                        MouseArea {
-                            id: dayMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: calendarVm.selectDay(dayCell.index)
-                        }
-                    }
-                }
+            CalendarViewModeSwitch {
+                options: calendarVm.displayModeOptions
+                current: calendarVm.displayMode
+                compact: page.compact
+                onSelected: value => calendarVm.setDisplayMode(value)
+            }
+            Item { Layout.fillWidth: true }
+            Badge {
+                visible: page.selectedGridMinute >= 0 && !page.compact
+                text: "Выбрано " + String(Math.floor(page.selectedGridMinute / 60)).padStart(2, "0")
+                      + ":" + String(page.selectedGridMinute % 60).padStart(2, "0")
+                fg: Theme.textSecondary
+                bg: Theme.surfacePressed
+            }
+            AppButton {
+                objectName: "calendarAgendaToggle"
+                text: page.compact ? "" : (page.agendaExpanded ? "Скрыть агенду" : "Агенда")
+                iconName: "note"
+                variant: page.agendaExpanded ? "secondary" : "ghost"
+                Accessible.name: page.agendaExpanded ? "Скрыть агенду" : "Показать агенду"
+                onClicked: page.agendaExpanded = !page.agendaExpanded
+                ToolTip.visible: page.compact && hovered
+                ToolTip.text: page.agendaExpanded ? "Скрыть агенду" : "Агенда и ежедневные"
             }
         }
 
-        // ---- Заголовок выбранного дня: дата + счётчики + фильтры ----
-        Panel {
-            Layout.fillWidth: true
-            implicitHeight: headerCol.implicitHeight + 2 * Theme.spacingLg
-
-            ColumnLayout {
-                id: headerCol
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Theme.spacingLg
-                spacing: Theme.spacingMd
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.spacingSm
-
-                    ColumnLayout {
-                        spacing: 2
-                        Layout.fillWidth: true
-                        Label {
-                            text: calendarVm.selectedDayTitle
-                            font.pixelSize: Theme.fontSubtitle
-                            font.family: Theme.fontFamily
-                            font.weight: Font.DemiBold
-                            color: Theme.textPrimary
-                        }
-                        RowLayout {
-                            spacing: Theme.spacingSm
-                            Label {
-                                text: calendarVm.selectedTaskTotal + " "
-                                      + Theme.plural(calendarVm.selectedTaskTotal, "задача", "задачи", "задач")
-                                font.pixelSize: Theme.fontCaption
-                                font.family: Theme.fontFamily
-                                color: Theme.textMuted
-                            }
-                            Label { text: "·"; color: Theme.textMuted; font.pixelSize: Theme.fontCaption }
-                            Label {
-                                text: calendarVm.selectedCompletedCount + " выполнено"
-                                font.pixelSize: Theme.fontCaption
-                                font.family: Theme.fontFamily
-                                color: Theme.success
-                            }
-                            Label { text: "·"; color: Theme.textMuted; font.pixelSize: Theme.fontCaption }
-                            Label {
-                                text: calendarVm.selectedDailyCount + " ежедневных"
-                                font.pixelSize: Theme.fontCaption
-                                font.family: Theme.fontFamily
-                                color: Theme.accent
-                            }
-                        }
-                    }
-                    AppButton {
-                        text: "Задача"
-                        variant: "ghost"
-                        iconName: "plus"
-                        visible: !page.compact
-                        onClicked: page.newTask()
-                    }
-                }
-
-                SegmentedControl {
-                    Layout.fillWidth: false
-                    current: calendarVm.filterMode
-                    options: page.compact
-                        ? [
-                            { label: "Все", value: "all" },
-                            { label: "Активные", value: "active" },
-                            { label: "Готовые", value: "completed" },
-                            { label: "Ежедн.", value: "daily" }
-                        ]
-                        : [
-                            { label: "Все", value: "all", count: calendarVm.selectedTaskTotal },
-                            { label: "Активные", value: "active", count: calendarVm.selectedActiveCount },
-                            { label: "Выполненные", value: "completed", count: calendarVm.selectedCompletedCount },
-                            { label: "Ежедневные", value: "daily", count: calendarVm.selectedDailyCount }
-                        ]
-                    onSelected: value => {
-                        calendarVm.setFilter(value)
-                        page.clearSelection()
-                    }
-                }
-            }
-        }
-
-        // ---- Агенда выбранного дня + правый инспектор/сводка ----
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: 0
             spacing: Theme.spacingLg
 
-            Panel {
+            ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumWidth: 0
+                Layout.minimumHeight: 0
+                spacing: Theme.spacingSm
 
-                // === агенда задач (фильтры all/active/completed) ===
-                ListView {
-                    id: dayList
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingLg
+                Panel {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.minimumHeight: page.compact ? 300 : 360
                     clip: true
-                    spacing: Theme.spacingSm
-                    visible: calendarVm.filterMode !== "daily"
-                                && calendarVm.selectedDayTasks.length > 0
-                    model: calendarVm.selectedDayTasks
-                    boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar {}
+                    elevationOpacity: 0.08
 
-                    delegate: Item {
-                        id: agendaRow
-                        required property var modelData
-                        width: dayList.width
-                        implicitHeight: Math.max(agendaCard.implicitHeight, 56)
-
-                        // В компактном режиме временная колонка прячется —
-                        // время остаётся в бейдже карточки.
-                        readonly property int gutter: page.compact ? 0 : 66
-                        readonly property string startText: modelData.isAllDay
-                            ? "весь день"
-                            : (modelData.timeLabel ? modelData.timeLabel.split("–")[0] : "")
-
-                        Rectangle {
-                            visible: !page.compact
-                            x: 47
-                            width: 2
-                            y: 0
-                            height: agendaRow.height + dayList.spacing
-                            color: Theme.border
-                            opacity: 0.7
-                        }
-                        Rectangle {
-                            visible: !page.compact
-                            x: 43
-                            y: 8
-                            width: 10
-                            height: 10
-                            radius: 5
-                            color: agendaRow.modelData.completed ? Theme.success
-                                 : agendaRow.modelData.isAllDay ? Theme.accentSoftBorder : Theme.accent
-                            border.color: Theme.surface
-                            border.width: 2
-                        }
-                        Label {
-                            visible: !page.compact
-                            width: 40
-                            x: 0
-                            y: 4
-                            text: agendaRow.startText
-                            horizontalAlignment: Text.AlignRight
-                            wrapMode: Text.WordWrap
-                            font.pixelSize: Theme.fontCaption
-                            font.family: Theme.fontFamily
-                            font.weight: Font.DemiBold
-                            color: Theme.textSecondary
-                        }
-
-                        TaskCard {
-                            id: agendaCard
-                            x: agendaRow.gutter
-                            width: agendaRow.width - agendaRow.gutter
-                            uid: agendaRow.modelData.uid
-                            title: agendaRow.modelData.title
-                            notes: agendaRow.modelData.notes
-                            timeLabel: agendaRow.modelData.timeLabel
-                            isAllDay: agendaRow.modelData.isAllDay
-                            priority: agendaRow.modelData.priority
-                            completed: agendaRow.modelData.completed
-                            hasPendingSync: agendaRow.modelData.hasPendingSync
-                            isLinked: agendaRow.modelData.isLinked
-                            isScheduled: agendaRow.modelData.isScheduled
-                            isRecurring: agendaRow.modelData.isRecurring
-                            actionsEnabled: !calendarVm.busy
-                            selected: calendarVm.selectedUid === agendaRow.modelData.uid
-                            onSelectRequested: uid => page.selectTask(uid)
-                            onToggled: uid => calendarVm.toggleCompleted(uid)
-                            onEditRequested: uid => {
-                                page.focusReturnItem = agendaCard
-                                editorDialog.openForEdit(uid)
-                            }
-                            onDeleteRequested: uid => {
-                                page.focusReturnItem = agendaCard
-                                confirmDeleteDialog.openFor(uid)
-                            }
-                            onSnoozeRequested: uid => {
-                                page.focusReturnItem = agendaCard
-                                snoozeMenu.openFor(uid)
-                            }
+                    CalendarTimeGrid {
+                        id: timeGrid
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        days: calendarVm.gridDays
+                        currentTimeData: calendarVm.currentTimeIndicator
+                        selectedUid: calendarVm.selectedUid
+                        visibleStartHour: calendarVm.visibleStartHour
+                        visibleEndHour: calendarVm.visibleEndHour
+                        initialScrollMinute: calendarVm.initialScrollMinute
+                        compact: page.compact
+                        actionsEnabled: !calendarVm.busy
+                        onDaySelected: index => calendarVm.selectDay(index)
+                        onEventSelected: uid => page.selectTask(uid)
+                        onEventEditRequested: uid => page.editEvent(uid)
+                        onEmptyTimeSelected: (dateText, minute) => {
+                            page.selectedGridDate = dateText
+                            page.selectedGridMinute = minute
                         }
                     }
                 }
 
-                // === ежедневный чек-лист выбранного дня (фильтр daily) ===
-                ListView {
-                    id: dailyList
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingLg
-                    clip: true
-                    spacing: Theme.spacingSm
-                    visible: calendarVm.filterMode === "daily"
-                                && calendarVm.selectedDayDailyTasks.length > 0
-                    model: calendarVm.selectedDayDailyTasks
-                    boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar {}
+                // Existing agenda/checklist survives as a collapsible lower section.
+                Panel {
+                    id: agendaPanel
+                    objectName: "calendarAgendaPanel"
+                    visible: page.agendaExpanded
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: page.compact ? 245 : 275
+                    Layout.minimumHeight: page.compact ? 220 : 250
+                    elevationOpacity: 0.07
 
-                    delegate: Rectangle {
-                        required property var modelData
-                        width: dailyList.width
-                        implicitHeight: 52
-                        radius: Theme.radiusMedium
-                        color: modelData.done ? Theme.successSoft
-                             : dailyHover.hovered ? Theme.surfaceHover : Theme.surface
-                        border.color: modelData.done ? Theme.successSoftBorder : Theme.border
-                        border.width: 1
-                        Behavior on color { ColorAnimation { duration: 120 } }
-
-                        HoverHandler { id: dailyHover }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMd
+                        spacing: Theme.spacingSm
 
                         RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: Theme.spacingLg
-                            anchors.rightMargin: Theme.spacingLg
-                            spacing: Theme.spacingMd
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            spacing: Theme.spacingSm
 
-                            Rectangle {
-                                Layout.alignment: Qt.AlignVCenter
-                                implicitWidth: 22
-                                implicitHeight: 22
-                                radius: 7
-                                color: modelData.done ? Theme.success : "transparent"
-                                border.color: modelData.done ? Theme.success : Theme.borderStrong
-                                border.width: modelData.done ? 0 : 1.6
-                                AppIcon {
-                                    anchors.centerIn: parent
-                                    name: "check"; size: 15; strokeWidth: 2.4
-                                    color: Theme.textOnAccent
-                                    visible: modelData.done
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                spacing: 1
+                                Label {
+                                    text: calendarVm.selectedDayTitle
+                                    font.pixelSize: Theme.fontSubtitle
+                                    font.family: Theme.fontFamily
+                                    font.weight: Font.DemiBold
+                                    color: Theme.textPrimary
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                                Label {
+                                    text: calendarVm.selectedTaskTotal + " задач · "
+                                          + calendarVm.selectedCompletedCount + " выполнено · "
+                                          + calendarVm.selectedDailyCount + " ежедневных"
+                                    font.pixelSize: Theme.fontCaption
+                                    font.family: Theme.fontFamily
+                                    color: Theme.textMuted
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
                                 }
                             }
-                            Label {
-                                text: (modelData.timeLabel && modelData.timeLabel.length > 0
-                                       ? modelData.timeLabel + " · " : "") + modelData.title
-                                font.pixelSize: Theme.fontBody
-                                font.family: Theme.fontFamily
-                                font.strikeout: modelData.done
-                                color: modelData.done ? Theme.success : Theme.textPrimary
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                            Badge {
-                                text: "ежедневная"
-                                fg: Theme.accent
-                                bg: Theme.accentSoft
-                                Layout.alignment: Qt.AlignVCenter
+                            AppButton {
+                                text: ""
+                                iconName: "plus"
+                                variant: "ghost"
+                                Accessible.name: "Создать задачу на выбранный день"
+                                onClicked: page.newTask()
                             }
                         }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: calendarVm.toggleDailyCompleted(modelData.uid)
+
+                        Flickable {
+                            Layout.fillWidth: true
+                            implicitHeight: 38
+                            contentWidth: agendaFilters.implicitWidth
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            flickableDirection: Flickable.HorizontalFlick
+
+                            SegmentedControl {
+                                id: agendaFilters
+                                current: calendarVm.filterMode
+                                options: page.compact
+                                    ? [
+                                        { label: "Все", value: "all" },
+                                        { label: "Актив.", value: "active" },
+                                        { label: "Готовые", value: "completed" },
+                                        { label: "Ежедн.", value: "daily" }
+                                      ]
+                                    : [
+                                        { label: "Все", value: "all", count: calendarVm.selectedTaskTotal },
+                                        { label: "Активные", value: "active", count: calendarVm.selectedActiveCount },
+                                        { label: "Выполненные", value: "completed", count: calendarVm.selectedCompletedCount },
+                                        { label: "Ежедневные", value: "daily", count: calendarVm.selectedDailyCount }
+                                      ]
+                                onSelected: value => calendarVm.setFilter(value)
+                            }
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            Layout.minimumHeight: 80
+
+                            ListView {
+                                id: dayList
+                                anchors.fill: parent
+                                clip: true
+                                spacing: Theme.spacingSm
+                                visible: calendarVm.filterMode !== "daily"
+                                         && calendarVm.selectedDayTasks.length > 0
+                                model: calendarVm.selectedDayTasks
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: ScrollBar {}
+
+                                delegate: TaskCard {
+                                    id: agendaCard
+                                    required property var modelData
+                                    width: dayList.width
+                                    uid: modelData.uid
+                                    title: modelData.title
+                                    notes: modelData.notes
+                                    timeLabel: modelData.timeLabel
+                                    isAllDay: modelData.isAllDay
+                                    priority: modelData.priority
+                                    completed: modelData.completed
+                                    hasPendingSync: modelData.hasPendingSync
+                                    isLinked: modelData.isLinked
+                                    isScheduled: modelData.isScheduled
+                                    isRecurring: modelData.isRecurring
+                                    actionsEnabled: !calendarVm.busy
+                                    selected: calendarVm.selectedUid === modelData.uid
+                                    onSelectRequested: uid => page.selectTask(uid)
+                                    onToggled: uid => calendarVm.toggleCompleted(uid)
+                                    onEditRequested: uid => page.editEvent(uid)
+                                    onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
+                                    onSnoozeRequested: uid => snoozeMenu.openFor(uid)
+                                }
+                            }
+
+                            ListView {
+                                id: dailyList
+                                anchors.fill: parent
+                                clip: true
+                                spacing: Theme.spacingSm
+                                visible: calendarVm.filterMode === "daily"
+                                         && calendarVm.selectedDayDailyTasks.length > 0
+                                model: calendarVm.selectedDayDailyTasks
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: ScrollBar {}
+
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    width: dailyList.width
+                                    implicitHeight: 48
+                                    radius: Theme.radiusSmall
+                                    color: modelData.done ? Theme.successSoft : Theme.surfaceMuted
+                                    border.color: modelData.done
+                                                  ? Theme.successSoftBorder : Theme.border
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: Theme.spacingMd
+                                        anchors.rightMargin: Theme.spacingMd
+                                        spacing: Theme.spacingSm
+                                        Rectangle {
+                                            implicitWidth: 22
+                                            implicitHeight: 22
+                                            radius: 7
+                                            color: modelData.done ? Theme.success : "transparent"
+                                            border.color: modelData.done ? Theme.success : Theme.borderStrong
+                                            AppIcon {
+                                                anchors.centerIn: parent
+                                                visible: modelData.done
+                                                name: "check"
+                                                size: 14
+                                                color: Theme.textOnAccent
+                                            }
+                                        }
+                                        Label {
+                                            text: (modelData.timeLabel ? modelData.timeLabel + " · " : "")
+                                                  + modelData.title
+                                            font.pixelSize: Theme.fontBody
+                                            font.family: Theme.fontFamily
+                                            font.strikeout: modelData.done
+                                            color: modelData.done ? Theme.success : Theme.textPrimary
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                        Badge { text: "ежедневная"; fg: Theme.accent; bg: Theme.accentSoft }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: calendarVm.toggleDailyCompleted(modelData.uid)
+                                    }
+                                    Accessible.role: Accessible.CheckBox
+                                    Accessible.name: modelData.title
+                                    Accessible.checked: modelData.done
+                                }
+                            }
+
+                            EmptyState {
+                                anchors.centerIn: parent
+                                width: parent.width - Theme.spacingXl
+                                visible: calendarVm.filterMode === "daily"
+                                         && calendarVm.selectedDayDailyTasks.length === 0
+                                iconName: "refresh"
+                                text: "На этот день ежедневных нет"
+                                hint: "Маска дней недели не включает выбранную дату"
+                            }
+                            EmptyState {
+                                anchors.centerIn: parent
+                                width: parent.width - Theme.spacingXl
+                                visible: calendarVm.filterMode !== "daily"
+                                         && calendarVm.selectedDayTasks.length === 0
+                                         && calendarVm.selectedTaskTotal === 0
+                                iconName: "calendar"
+                                text: "На этот день задач нет"
+                                hint: "Почасовая сетка остаётся доступной для навигации"
+                                actionText: "Создать задачу"
+                                onActionClicked: page.newTask()
+                            }
+                            EmptyState {
+                                anchors.centerIn: parent
+                                width: parent.width - Theme.spacingXl
+                                visible: calendarVm.filterMode !== "daily"
+                                         && calendarVm.selectedDayTasks.length === 0
+                                         && calendarVm.selectedTaskTotal > 0
+                                iconName: "search"
+                                text: "Нет задач в этом фильтре"
+                                hint: "Выберите другой фильтр"
+                            }
                         }
                     }
-                }
-
-                // === пустые состояния ===
-                EmptyState {
-                    anchors.centerIn: parent
-                    width: parent.width - 2 * Theme.spacingXl
-                    visible: calendarVm.filterMode === "daily"
-                             && calendarVm.selectedDayDailyTasks.length === 0
-                    iconName: "refresh"
-                    text: "На этот день ежедневных нет"
-                    hint: "Ежедневные задачи настраиваются на «Сегодня» и появляются здесь по маске дней недели"
-                }
-                EmptyState {
-                    anchors.centerIn: parent
-                    width: parent.width - 2 * Theme.spacingXl
-                    visible: calendarVm.filterMode !== "daily"
-                             && calendarVm.selectedDayTasks.length === 0
-                             && calendarVm.selectedTaskTotal === 0
-                    iconName: "calendar"
-                    text: "На этот день задач нет"
-                    hint: "Запланируйте что-нибудь на " + calendarVm.selectedDayTitle
-                    actionText: "Создать задачу на этот день"
-                    onActionClicked: page.newTask()
-                }
-                EmptyState {
-                    anchors.centerIn: parent
-                    width: parent.width - 2 * Theme.spacingXl
-                    visible: calendarVm.filterMode !== "daily"
-                             && calendarVm.selectedDayTasks.length === 0
-                             && calendarVm.selectedTaskTotal > 0
-                    iconName: "search"
-                    text: "Нет задач в этом фильтре"
-                    hint: "Переключите фильтр выше, чтобы увидеть остальные задачи дня"
                 }
             }
 
-            // ---- правый столбец: инспектор задачи / сводка дня (wide) ----
+            // Wide layout keeps the inspector as a stable side rail.
             ColumnLayout {
-                id: rail
                 visible: page.wide
                 Layout.preferredWidth: 320
                 Layout.maximumWidth: 320
                 Layout.fillHeight: true
-                Layout.alignment: Qt.AlignTop
-                spacing: Theme.spacingLg
+                Layout.minimumHeight: 0
+                spacing: Theme.spacingMd
 
                 TaskInspector {
                     visible: page.selTask !== null && page.selTask !== undefined
@@ -519,29 +450,27 @@ Item {
                                  ? calendarVm.taskPresetsFor(page.selTask.uid) : []
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    onEditRequested: uid => editorDialog.openForEdit(uid)
+                    onEditRequested: uid => page.editEvent(uid)
                     onToggleRequested: uid => calendarVm.toggleCompleted(uid)
                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
                     onPostponeRequested: (uid, action) => calendarVm.postponeTask(uid, action)
                     onPresetRequested: (uid, presetId) => calendarVm.applyTaskPreset(uid, presetId)
-                    onPickRequested: uid => editorDialog.openForEdit(uid)
+                    onPickRequested: uid => page.editEvent(uid)
                     onCloseRequested: page.clearSelection()
                 }
 
-                // сводка дня, когда ничего не выбрано
                 Panel {
                     visible: !page.selTask
                     Layout.fillWidth: true
-                    implicitHeight: summaryCol.implicitHeight + 2 * Theme.spacingLg
+                    implicitHeight: summaryColumn.implicitHeight + 2 * Theme.spacingLg
 
                     ColumnLayout {
-                        id: summaryCol
+                        id: summaryColumn
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.margins: Theme.spacingLg
                         spacing: Theme.spacingMd
-
                         Label {
                             text: "Сводка дня"
                             font.pixelSize: Theme.fontSubtitle
@@ -549,36 +478,25 @@ Item {
                             font.weight: Font.DemiBold
                             color: Theme.textPrimary
                         }
-                        component SummaryRow: RowLayout {
-                            property string label: ""
-                            property int value: 0
-                            property color tint: Theme.textSecondary
-                            Layout.fillWidth: true
-                            spacing: Theme.spacingSm
-                            Label {
-                                text: parent.label
-                                font.pixelSize: Theme.fontBody
-                                font.family: Theme.fontFamily
-                                color: Theme.textSecondary
-                                Layout.fillWidth: true
-                            }
-                            Label {
-                                text: String(parent.value)
-                                font.pixelSize: Theme.fontBody
-                                font.family: Theme.fontFamily
-                                font.weight: Font.DemiBold
-                                color: parent.tint
-                            }
-                        }
-                        SummaryRow { label: "Всего задач"; value: calendarVm.selectedTaskTotal; tint: Theme.textPrimary }
-                        SummaryRow { label: "Активные"; value: calendarVm.selectedActiveCount; tint: Theme.accent }
-                        SummaryRow { label: "Выполнено"; value: calendarVm.selectedCompletedCount; tint: Theme.success }
-                        SummaryRow { label: "Ежедневные"; value: calendarVm.selectedDailyCount; tint: Theme.textSecondary }
-
-                        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
-
                         Label {
-                            text: "Выберите задачу, чтобы увидеть подробности"
+                            text: calendarVm.selectedDayTitle
+                            font.pixelSize: Theme.fontBody
+                            font.family: Theme.fontFamily
+                            color: Theme.textSecondary
+                        }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+                        Label {
+                            text: "Всего " + calendarVm.selectedTaskTotal
+                                  + " · активных " + calendarVm.selectedActiveCount
+                                  + " · выполнено " + calendarVm.selectedCompletedCount
+                            font.pixelSize: Theme.fontBody
+                            font.family: Theme.fontFamily
+                            color: Theme.textSecondary
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: "Выберите событие в сетке, чтобы открыть инспектор"
                             font.pixelSize: Theme.fontCaption
                             font.family: Theme.fontFamily
                             color: Theme.textMuted
@@ -587,13 +505,11 @@ Item {
                         }
                     }
                 }
-
                 Item { visible: !page.selTask; Layout.fillHeight: true }
             }
         }
     }
 
-    // ---- инспектор-панель для normal/compact ----
     Drawer {
         id: inspectorDrawer
         edge: Qt.RightEdge
@@ -601,14 +517,15 @@ Item {
         height: page.height
         interactive: visible
 
-        onClosed: calendarVm.clearSelection()
-
+        onClosed: {
+            if (!editorDialog.visible && !confirmDeleteDialog.visible)
+                calendarVm.clearSelection()
+        }
         background: Rectangle {
             color: Theme.surface
             border.color: Theme.border
             border.width: 1
         }
-
         TaskInspector {
             anchors.fill: parent
             anchors.margins: Theme.spacingSm
@@ -621,27 +538,27 @@ Item {
                          ? calendarVm.taskPresetsFor(page.selTask.uid) : []
             elevationOpacity: 0
             borderWidth: 0
-            onEditRequested: uid => { inspectorDrawer.close(); editorDialog.openForEdit(uid) }
+            onEditRequested: uid => page.editEvent(uid)
             onToggleRequested: uid => calendarVm.toggleCompleted(uid)
-            onDeleteRequested: uid => { inspectorDrawer.close(); confirmDeleteDialog.openFor(uid) }
+            onDeleteRequested: uid => {
+                inspectorDrawer.close()
+                confirmDeleteDialog.openFor(uid)
+            }
             onPostponeRequested: (uid, action) => calendarVm.postponeTask(uid, action)
             onPresetRequested: (uid, presetId) => calendarVm.applyTaskPreset(uid, presetId)
-            onPickRequested: uid => {
+            onPickRequested: uid => page.editEvent(uid)
+            onCloseRequested: {
                 inspectorDrawer.close()
-                editorDialog.openForEdit(uid)
+                calendarVm.clearSelection()
             }
-            onCloseRequested: inspectorDrawer.close()
         }
     }
 
     SnoozeMenu {
         id: snoozeMenu
         vm: calendarVm
-        onPickRequested: uid => editorDialog.openForEdit(uid)
-        onClosed: {
-            if (!editorDialog.visible)
-                page.restoreFocus()
-        }
+        onPickRequested: uid => page.editEvent(uid)
+        onClosed: if (!editorDialog.visible) page.restoreFocus()
     }
 
     TaskEditorDialog {
@@ -649,17 +566,14 @@ Item {
         objectName: "calendarEditorDialog"
         vm: calendarVm
         onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
-        onClosed: {
-            if (!confirmDeleteDialog.visible)
-                page.restoreFocus()
-        }
+        onClosed: if (!confirmDeleteDialog.visible) page.restoreFocus()
     }
 
     ConfirmDialog {
         id: confirmDeleteDialog
         headerText: "Удалить задачу?"
-        message: "Задача будет помечена удалённой; если её событие уже есть "
-                 + "в календаре, удаление события встанет в очередь синка."
+        message: "Задача будет помечена удалённой; связанное событие будет "
+                 + "удалено только при следующей ручной синхронизации."
         onConfirmed: uid => calendarVm.deleteTask(uid)
         onClosed: page.restoreFocus()
     }

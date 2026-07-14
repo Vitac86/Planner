@@ -170,6 +170,34 @@ ApplicationWindow {
         enabled: root.currentPage === 1 && root._allow("calendar_next_day")
         onActivated: calendarPage.selectNextDay()
     }
+    Shortcut {
+        sequence: "PgUp"
+        enabled: root.currentPage === 1 && root._allow("calendar_prev_period")
+        onActivated: calendarPage.selectPrevPeriod()
+    }
+    Shortcut {
+        sequence: "PgDown"
+        enabled: root.currentPage === 1 && root._allow("calendar_next_period")
+        onActivated: calendarPage.selectNextPeriod()
+    }
+    Shortcut {
+        sequence: "Home"
+        enabled: root.currentPage === 1 && calendarPage.gridFocused
+                 && root._allow("calendar_today")
+        onActivated: calendarPage.goToToday()
+    }
+    Shortcut {
+        sequence: "Up"
+        enabled: root.currentPage === 1 && calendarPage.gridFocused
+                 && root._allow("calendar_prev_event")
+        onActivated: calendarPage.selectPrevEvent()
+    }
+    Shortcut {
+        sequence: "Down"
+        enabled: root.currentPage === 1 && calendarPage.gridFocused
+                 && root._allow("calendar_next_event")
+        onActivated: calendarPage.selectNextEvent()
+    }
 
     // ---- всплывашки успеха/ошибки ----
     Toast {

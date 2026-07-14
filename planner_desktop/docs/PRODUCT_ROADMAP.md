@@ -207,70 +207,110 @@
 
 ---
 
-## Фаза 2 — Полноценный календарный UI (план)
+## Фаза 2 — Полноценный календарный UI (частично)
 
-### Цель для пользователя
+### Фаза 2.1 — Почасовая основа (готово)
 
-Календарь, в котором день и неделя видны почасово, а перенос задачи —
-это перетаскивание мышью, а не открытие диалога.
+#### Результат для пользователя
 
-### Фичи
+Calendar показывает реальные события в почасовой сетке в трёх режимах:
+«День», «Рабочая неделя» (Пн–Пт) и «Неделя» (Пн–Вс). Существующие агенда,
+фильтры, ежедневный чек-лист, редактор, сводка дня и инспектор сохранены.
 
-- почасовая сетка дня и недели (00–23, конфигурируемое «ядро дня»
-  с автопрокруткой к текущему часу);
-- зона all-day над сеткой;
-- drag-and-drop: перенос задачи между слотами и днями, из панели
-  «Без даты» в слот (планирование) и обратно (unschedule по
-  существующему правилу);
-- изменение длительности растягиванием нижнего края события;
-- панель недатированных задач рядом с сеткой;
-- фильтры и навигация: существующие фильтры агенды поверх сетки,
-  переключатель «День/Неделя/Агенда», прыжок к дате через DatePickerField;
-- текущая агенда остаётся как компактный режим просмотра.
+#### Реализовано
 
-### Архитектурная работа
+- видимый диапазон 06:00–23:00, фиксированный time ruler, часовые и
+  получасовые линии, вертикальные разделители дней и прокрутка;
+- отдельная all-day lane с однодневными/многодневными событиями,
+  детерминированным порядком и «ещё N» при переполнении;
+- нормализованная event geometry: clipping до видимых часов и границ дня,
+  minimum visual duration для нулевой/битой длительности, разбиение
+  cross-midnight события на дневные блоки;
+- overlap layout: half-open интервалы (касание концом не overlap),
+  стабильная сортировка start/duration/uid, две/три side-by-side колонки,
+  chained overlap groups с переиспользованием освободившейся колонки;
+- selected/today/focus/hover/completed/priority/pending/dead-letter состояния,
+  доступные подписи событий и информация не только цветом;
+- current-time line только на сегодняшнем дне и внутри диапазона; initial
+  auto-scroll рядом с текущим временем, иначе к 08:00; минутное обновление
+  линии не двигает scroll;
+- мышь: один клик выбирает событие и открывает/reuses inspector, двойной —
+  общий TaskEditorDialog; клик пустого слота лишь визуально выбирает время;
+- клавиатура: ←/→ день, PageUp/PageDown период, Home сегодня, ↑/↓ видимое
+  событие, Enter edit, Space complete/uncomplete, Esc clear; политика
+  `domain/keyboard.py` не перехватывает TextInput/TextEdit и диалоги;
+- responsive: wide grid + inspector rail, normal grid + drawer, compact
+  принудительно начинает с читаемого Day mode; multi-day grid при нехватке
+  ширины прокручивается горизонтально;
+- схема БД и sync-ядро не менялись; режим отображения не персистится.
 
-- модель слотов: `CalendarViewModel` отдаёт QML позиционные данные
-  (день, минута начала, длительность) — раскладку считает Python,
-  QML только рисует;
-- геометрия сетки (слот ↔ минуты, снап к 5/15 минутам) — чистый модуль
-  `domain/timegrid.py`;
-- drag-and-drop завершается вызовами существующих
-  `schedule_task`/`unschedule_task` — новых правил очереди не появляется;
-- виртуализация недели (ListView/Repeater по дням) для плавности.
+#### Архитектура
 
-### Тесты
+- `domain/calendar_layout.py` — Qt-free `CalendarGridConfig`,
+  `CalendarEventBlock`, `CalendarDayColumn`, `OverlapGroup` и чистый interval
+  coloring; QML не считает overlap;
+- `CalendarViewModel` отдаёт visible dates, all-day/timed rows, normalized
+  ratios, current-time data и period/event navigation;
+- reusable QML: `CalendarTimeGrid`, `CalendarDayColumn`,
+  `CalendarEventBlock`, `CalendarAllDayLane`, `CalendarTimeRuler`,
+  `CurrentTimeIndicator`, `CalendarViewModeSwitch`;
+- старая agenda-first область стала сворачиваемой нижней секцией и продолжает
+  использовать общие TaskCard/TaskInspector/TaskEditorDialog/use-case слоты.
 
-- `domain/timegrid.py`: пиксель ↔ время, снап, коллизии/раскладка
-  пересекающихся событий;
-- drop-обработчики ViewModel: перенос ставит update/create, перенос
-  экземпляра повторяющейся серии запрещён, unschedule через DnD следует
-  текущим правилам;
-- пересчёт сетки после мутаций (сигналы);
-- регресс: агенда и фильтры не ломаются.
+#### Тесты и visual smoke
 
-### Риски
+- `test_desktop_calendar_layout.py` — top/height, clipping, midnight,
+  minimum duration, all-day exclusion/multi-day placement;
+- `test_desktop_calendar_overlap.py` — touching, 2-way, 3-way, chained,
+  input-order stability;
+- `test_desktop_calendar_grid_viewmodel.py` — modes/dates, periods/today,
+  current time, geometry rows, selection refresh, compact behavior;
+- `test_desktop_calendar_grid_keyboard.py` — plain/text/dialog routing;
+- профиль `D:\planner-desktop-calendar-smoke`: 14 synthetic tasks,
+  pending + dead-letter, scroll/current-time, click/double-click,
+  agenda/daily, три display modes, compact и reopen persistence `14/14`.
 
-- DnD в Qt Quick конфликтует с Flickable-прокруткой — нужен порог
-  захвата и явные состояния;
-- производительность недельной сетки с тенями/эффектами — профилировать,
-  упрощать делегаты;
-- соблазн «просто патчить start/end» у повторяющихся экземпляров при
-  DnD — запрет сохраняется, как в фазе 1.
+Скриншоты:
 
-### Критерии приёмки
+- [Day grid](screenshots/calendar_day_grid_phase2.png)
+- [Work week grid](screenshots/calendar_workweek_grid_phase2.png)
+- [Week grid](screenshots/calendar_week_grid_phase2.png)
+- [Overlap + inspector](screenshots/calendar_overlap_phase2.png)
+- [All-day overflow](screenshots/calendar_allday_phase2.png)
+- [Compact day](screenshots/calendar_compact_phase2.png)
 
-- задачу можно запланировать, перенести и растянуть только мышью,
-  без диалога; Calendar-очередь получает те же операции, что и через
-  редактор;
-- сетка держит 100+ событий в неделе без видимых лагов;
-- unschedule через DnD и запрет для повторяющихся — с тестами;
-- все фазы-1 сценарии работают без регрессий.
+#### Статус проверки Phase 2.1
 
-### Сознательно отложено
+Фаза **2.1 закрыта 14 июля 2026 года** на Windows. Live Google API не
+вызывался: smoke-профиль не содержит реальных OAuth-данных, а сетевой путь
+проверен существующим regression-набором через fake/injected gateways.
 
-- месячный вид; перенос экземпляров повторяющихся серий; несколько
-  календарей; печать/экспорт.
+| Проверка | Результат |
+|---|---|
+| Pure layout + overlap + grid ViewModel + keyboard | `48 passed` |
+| Все desktop-тесты | `549 passed` |
+| Явный sync regression slice | `159 passed` |
+| Collection | `670 tests collected` |
+| Полный pytest | `669 passed`; единственный failure — известный Windows `test_macos_data_dir` |
+| Compileall | PASS; единственный SyntaxWarning — в нетронутом legacy `ui/pages/calendar.py` |
+| Visual + interaction smoke | PASS: scroll, current-time, click selection, double-click editor, agenda/daily, три display modes, compact, persistence `14/14` |
+| Sync safety | Manual sync controls/service/engine/gateway regression green; startup/page-open/minute timer не вызывают Google, automatic sync остаётся disabled |
+| Scope safety | Только `planner_desktop/`, desktop tests/docs/screenshots; old Flet, `main.py`, old sync/Undated/migration tooling, old DB и old token не изменены |
+
+### Фаза 2.2 — Интерактивное перемещение (план)
+
+Сознательно НЕ входит в Phase 2.1 и остаётся отложенным:
+
+- drag-and-drop между слотами/днями;
+- resize handles и изменение длительности мышью;
+- moving tasks with the mouse;
+- undated-task drag panel и drop для schedule/unschedule;
+- перенос экземпляров повторяющихся серий;
+- автоматический Google sync (остаётся выключенным; ручной путь сохранён).
+
+Будущая реализация обязана завершать drop через существующие
+`schedule_task`/`unschedule_task`, сохранять запрет blind start/end patch для
+recurring instances и отдельно тестировать конфликт Drag/Flickable.
 
 ---
 
