@@ -47,6 +47,8 @@ def task_to_row(task: Task, pending_uids: Set[str]) -> Dict[str, Any]:
         "isLinked": task.google_calendar_event_id is not None,
         "isScheduled": task.start is not None,
         "isRecurring": task.google_calendar_recurring_event_id is not None,
+        "tags": list(task.tags[:3]),
+        "tagOverflow": max(0, len(task.tags) - 3),
     }
 
 

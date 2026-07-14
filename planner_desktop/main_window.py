@@ -22,6 +22,7 @@ from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
 from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
+from planner_desktop.viewmodels.search_viewmodel import SearchViewModel
 from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
 from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
 from planner_desktop.viewmodels.ui_state import UiStateViewModel
@@ -80,15 +81,18 @@ class MainWindow:
             manual_sync_service=self._build_manual_sync_service())
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
+        self.search_viewmodel = SearchViewModel(self.service)
         self.ui_state_viewmodel = UiStateViewModel()
 
         # Мутация задач на одной странице освежает остальные. Петли нет:
         # refresh() эмитит только *Changed-сигналы, а не tasksMutated.
         # Настройки — тоже мутатор: pull ручного синка меняет задачи.
         task_mutators = (self.today_viewmodel, self.calendar_viewmodel,
-                         self.history_viewmodel, self.settings_viewmodel)
+                         self.history_viewmodel, self.search_viewmodel,
+                         self.settings_viewmodel)
         task_listeners = (self.today_viewmodel, self.calendar_viewmodel,
-                          self.settings_viewmodel, self.history_viewmodel)
+                          self.settings_viewmodel, self.history_viewmodel,
+                          self.search_viewmodel)
         for mutator in task_mutators:
             for listener in task_listeners:
                 if listener is not mutator:
@@ -113,6 +117,7 @@ class MainWindow:
         context.setContextProperty("settingsVm", self.settings_viewmodel)
         context.setContextProperty("dailyVm", self.daily_viewmodel)
         context.setContextProperty("historyVm", self.history_viewmodel)
+        context.setContextProperty("searchVm", self.search_viewmodel)
         context.setContextProperty("uiVm", self.ui_state_viewmodel)
 
     def _build_manual_sync_service(self):
