@@ -140,6 +140,12 @@ class CalendarViewModel(TaskActionsViewModel):
         self.selectionChanged.emit()
         self.gridChanged.emit()
 
+    def _visible_task_uids(self) -> List[str]:
+        agenda = [] if self._filter == FILTER_DAILY else [
+            row["uid"] for row in self.selectedDayTasks
+        ]
+        return list(dict.fromkeys(agenda + [row["uid"] for row in self.undatedTasks]))
+
     # ---- display mode and visible period ----------------------------------------
 
     @Property(str, notify=displayModeChanged)
@@ -1020,6 +1026,7 @@ class CalendarViewModel(TaskActionsViewModel):
             self._filter = mode
             self.filterChanged.emit()
             self.selectionChanged.emit()
+            self._prune_selection()
 
     @Slot(str, result=bool)
     def toggleDailyCompleted(self, uid: str) -> bool:

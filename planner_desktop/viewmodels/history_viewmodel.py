@@ -96,6 +96,14 @@ class HistoryViewModel(TaskActionsViewModel):
     def _emit_data_changed(self) -> None:
         self.historyChanged.emit()
 
+    def _visible_task_uids(self) -> List[str]:
+        return [
+            entry.uid
+            for group in self._groups()
+            for entry in group.entries
+            if not entry.is_daily
+        ]
+
     # ---- свойства для QML -------------------------------------------------------
 
     @Property(int, notify=rangeChanged)
@@ -137,6 +145,7 @@ class HistoryViewModel(TaskActionsViewModel):
             self._range_days = days
             self.rangeChanged.emit()
             self.historyChanged.emit()
+            self._prune_selection()
 
     @Slot(str, result=bool)
     def reopenTask(self, uid: str) -> bool:

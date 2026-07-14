@@ -47,6 +47,9 @@ class SearchViewModel(TaskActionsViewModel):
     def _emit_data_changed(self) -> None:
         self._recompute(emit=True)
 
+    def _visible_task_uids(self) -> List[str]:
+        return [match.task.uid for match in self._matches]
+
     def _recompute(self, *, emit: bool) -> None:
         selected = self._selected_uid
         self._matches = self._search.search(
@@ -171,6 +174,7 @@ class SearchViewModel(TaskActionsViewModel):
         self._filters = filters
         self.filtersChanged.emit()
         self._recompute(emit=True)
+        self._prune_selection()
 
     @Slot(int)
     def moveResultSelection(self, delta: int) -> None:
@@ -196,4 +200,3 @@ class SearchViewModel(TaskActionsViewModel):
 
 
 __all__ = ["SearchViewModel"]
-

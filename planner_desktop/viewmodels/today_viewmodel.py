@@ -88,6 +88,12 @@ class TodayViewModel(TaskActionsViewModel):
     def _emit_data_changed(self) -> None:
         self.tasksChanged.emit()
 
+    def _visible_task_uids(self) -> List[str]:
+        return list(dict.fromkeys(
+            [task.uid for task in self._repository.list_today()]
+            + [task.uid for task in self._repository.list_undated()]
+        ))
+
     # ---- свойства для QML -------------------------------------------------
 
     @Property(str, notify=tasksChanged)

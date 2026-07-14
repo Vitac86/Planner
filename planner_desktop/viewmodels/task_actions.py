@@ -36,6 +36,7 @@ from planner_desktop.viewmodels.task_rows import (
     save_editor,
     task_to_row,
 )
+from planner_desktop.viewmodels.task_selection import TaskSelection
 
 
 class TaskActionsViewModel(QObject):
@@ -47,6 +48,7 @@ class TaskActionsViewModel(QObject):
     tasksMutated = Signal()
     busyChanged = Signal()
     selectedTaskChanged = Signal()
+    selectionChanged = Signal()
 
     #: Окно подавления повторного идентичного действия (секунды).
     DUPLICATE_WINDOW_S = 0.3
@@ -64,6 +66,7 @@ class TaskActionsViewModel(QObject):
         self._editor_error = ""
         self._busy = False
         self._selected_uid = ""
+        self._selection = TaskSelection()
         self._last_op: tuple[str, str, float] = ("", "", float("-inf"))
         self._clock = clock or _time.monotonic
         self._now = now_provider or datetime.now
@@ -76,6 +79,7 @@ class TaskActionsViewModel(QObject):
 
     def _notify_mutation(self, toast: str = "") -> None:
         self._emit_data_changed()
+        self._prune_selection()
         self.selectedTaskChanged.emit()
         self.tasksMutated.emit()
         if toast:
@@ -112,6 +116,25 @@ class TaskActionsViewModel(QObject):
     def selectedUid(self) -> str:
         return self._selected_uid
 
+    @Property("QVariantList", notify=selectionChanged)
+    def selectedUids(self) -> List[str]:
+        self._sync_visible_selection()
+        return list(self._selection.selected)
+
+    @Property(int, notify=selectionChanged)
+    def selectedCount(self) -> int:
+        self._sync_visible_selection()
+        return self._selection.count
+
+    @Property(bool, notify=selectionChanged)
+    def hasMultiSelection(self) -> bool:
+        return self.selectedCount > 1
+
+    @Property(str, notify=selectionChanged)
+    def selectionStatus(self) -> str:
+        count = self.selectedCount
+        return "Нет выбранных задач" if count == 0 else f"Выбрано задач: {count}"
+
     @Property("QVariant", notify=selectedTaskChanged)
     def selectedTask(self) -> Optional[Dict[str, Any]]:
         """Строка-словарь выбранной задачи (как в списках) или None."""
@@ -125,15 +148,67 @@ class TaskActionsViewModel(QObject):
             return None
         return self._service.get_task(self._selected_uid)
 
+    def _visible_task_uids(self) -> List[str]:
+        return [task.uid for task in self._service.repository.list_all()]
+
+    def _sync_visible_selection(self) -> bool:
+        return self._selection.set_visible(self._visible_task_uids())
+
+    def _prune_selection(self) -> None:
+        before = self._selection.selected
+        changed = self._sync_visible_selection()
+        visible = set(self._selection.visible)
+        if self._selected_uid and self._selected_uid not in visible:
+            self._selected_uid = ""
+            self.selectedTaskChanged.emit()
+        if changed or before != self._selection.selected:
+            self.selectionChanged.emit()
+
     @Slot(str)
     def selectTask(self, uid: str) -> None:
+        self._sync_visible_selection()
+        selection_changed = self._selection.select(uid)
         if uid != self._selected_uid:
             self._selected_uid = uid
             self.selectedTaskChanged.emit()
+        if selection_changed:
+            self.selectionChanged.emit()
+
+    @Slot(str, bool, bool)
+    def selectTaskWithModifiers(self, uid: str, ctrl: bool, shift: bool) -> None:
+        self._sync_visible_selection()
+        if not self._selection.select(uid, ctrl=bool(ctrl), shift=bool(shift)):
+            return
+        selected = self._selection.selected
+        new_current = uid if uid in selected else (selected[-1] if selected else "")
+        if new_current != self._selected_uid:
+            self._selected_uid = new_current
+            self.selectedTaskChanged.emit()
+        self.selectionChanged.emit()
+
+    @Slot(str, result=bool)
+    def isTaskSelected(self, uid: str) -> bool:
+        self._sync_visible_selection()
+        return self._selection.contains(uid)
+
+    @Slot()
+    def selectAllVisible(self) -> None:
+        self._sync_visible_selection()
+        if self._selection.select_all_visible():
+            selected = self._selection.selected
+            if not self._selected_uid and selected:
+                self._selected_uid = selected[0]
+                self.selectedTaskChanged.emit()
+            self.selectionChanged.emit()
 
     @Slot()
     def clearSelection(self) -> None:
-        self.selectTask("")
+        selection_changed = self._selection.clear()
+        if self._selected_uid:
+            self._selected_uid = ""
+            self.selectedTaskChanged.emit()
+        if selection_changed:
+            self.selectionChanged.emit()
 
     # ---- общий контракт редактора ------------------------------------------------------
 
@@ -400,10 +475,29 @@ class TaskActionsViewModel(QObject):
             self.toastError.emit("Не удалось восстановить задачу.")
         return restored
 
+    @Slot(str, result=bool)
+    def duplicateTask(self, uid: str) -> bool:
+        if not self._begin("duplicate", uid, dedupe=True):
+            return False
+        try:
+            result = self._service.duplicate_task(uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось дублировать задачу: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        self._notify_mutation("Копия задачи создана")
+        self.selectTask(result.task.uid)
+        return True
+
     @Slot()
     def refresh(self) -> None:
         """Перечитать данные (после чужих мутаций); только *Changed-сигналы."""
         self._emit_data_changed()
+        self._prune_selection()
         self.selectedTaskChanged.emit()
 
     # ---- доступ для тестов -----------------------------------------------------------------

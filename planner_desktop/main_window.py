@@ -12,13 +12,16 @@ from planner_desktop.repositories.daily_task_repository import (
     InMemoryDailyTaskRepository,
 )
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
+from planner_desktop.repositories.tag_repository import InMemoryTagRepository
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.storage.sqlite_daily_task_repository import (
     SQLiteDailyTaskRepository,
 )
 from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
+from planner_desktop.storage.tag_repository import SQLiteTagRepository
 from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.task_service import DesktopTaskService
+from planner_desktop.usecases.tag_service import TagService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
 from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
@@ -72,6 +75,12 @@ class MainWindow:
         else:
             self.service, self.daily_service = _build_services()
         self.repository = self.service.repository
+        if isinstance(self.repository, SQLiteTaskRepository):
+            self.tag_repository = SQLiteTagRepository(self.repository.db_path)
+        else:
+            self.tag_repository = InMemoryTagRepository()
+        self.tag_service = TagService(self.tag_repository, self.repository)
+        self.service.tag_service = self.tag_service
         self.today_viewmodel = TodayViewModel(
             service=self.service, daily_service=self.daily_service)
         self.calendar_viewmodel = CalendarViewModel(
