@@ -62,14 +62,39 @@ def test_stats_counts(vm):
     assert vm.hasSyncQueue is True
 
 
-def test_completed_stat_updates_on_toggle(vm):
+def test_completed_stat_updates_on_toggle(repo, queue):
+    clock = [0.0]
+    vm = TodayViewModel(
+        service=DesktopTaskService(repo, calendar_queue=queue),
+        clock=lambda: clock[0],
+    )
     save_new(vm, "Сегодняшняя", scheduled=True,
              date_text=today_text(), time_text="10:00")
     uid = vm.todayTasks[0]["uid"]
     assert vm.toggleCompleted(uid) is True
     assert vm.completedTodayCount == 1
+    clock[0] += 1.0
     assert vm.toggleCompleted(uid) is True
     assert vm.completedTodayCount == 0
+
+
+def test_rapid_duplicate_toggle_is_suppressed(repo, queue):
+    clock = [0.0]
+    vm = TodayViewModel(
+        service=DesktopTaskService(repo, calendar_queue=queue),
+        clock=lambda: clock[0],
+    )
+    save_new(vm, "Сегодняшняя", scheduled=True,
+             date_text=today_text(), time_text="10:00")
+    uid = vm.todayTasks[0]["uid"]
+    toasts = []
+    vm.toastMessage.connect(toasts.append)
+
+    assert vm.toggleCompleted(uid) is True
+    clock[0] += 0.05
+    assert vm.toggleCompleted(uid) is False
+    assert repo.get_by_uid(uid).completed is True
+    assert toasts == ["Задача выполнена"]
 
 
 def test_header_date_text_is_russian(vm):
@@ -129,6 +154,58 @@ def test_save_editor_never_raises_on_garbage(vm):
     assert vm.saveEditor("", "X", "", 0, True, False,
                          "9999-99-99", "99:99", "мусор", False) is False
     assert vm.editorError != ""
+
+
+def test_rapid_duplicate_create_from_editor_is_suppressed(repo, queue):
+    clock = [0.0]
+    vm = TodayViewModel(
+        service=DesktopTaskService(repo, calendar_queue=queue),
+        clock=lambda: clock[0],
+    )
+    assert save_new(vm, "Один раз") is True
+    clock[0] += 0.05
+    assert save_new(vm, "Один раз") is False
+    assert [task.title for task in repo.list_all()] == ["Один раз"]
+
+
+def test_rapid_duplicate_quick_add_is_suppressed(repo, queue):
+    clock = [0.0]
+    vm = TodayViewModel(
+        service=DesktopTaskService(repo, calendar_queue=queue),
+        clock=lambda: clock[0],
+    )
+    assert vm.addQuick("Один quick add", 0) is True
+    clock[0] += 0.05
+    assert vm.addQuick("Один quick add", 0) is False
+    assert [task.title for task in repo.list_all()] == ["Один quick add"]
+
+
+def test_quick_add_repository_error_emits_toast(vm, monkeypatch):
+    errors = []
+    vm.toastError.connect(errors.append)
+
+    def fail_create(task):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(vm.service, "create_task", fail_create)
+    assert vm.addQuick("Не сохранится", 0) is False
+    assert errors and "disk full" in errors[0]
+    assert vm.busy is False
+
+
+def test_toggle_repository_error_emits_toast(vm, monkeypatch):
+    save_new(vm, "Сломанная галочка")
+    uid = vm.repository.list_all()[0].uid
+    errors = []
+    vm.toastError.connect(errors.append)
+
+    def fail_toggle(task_uid):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(vm.service, "toggle_completed", fail_toggle)
+    assert vm.toggleCompleted(uid) is False
+    assert errors and "write failed" in errors[0]
+    assert vm.busy is False
 
 
 # ---- редактор: правка ---------------------------------------------------------------

@@ -5,21 +5,26 @@
 QObject можно создавать без QApplication, поэтому тесты гоняют этот
 класс без какого-либо окна.
 
+Общие действия над задачами (редактор, удаление, снуз, выбор задачи,
+busy-защита, тосты) — в базе TaskActionsViewModel; здесь остаются только
+специфичные для «Сегодня» вещи: Quick Add, ежедневный чек-лист и
+статистика шапки.
+
 Сигналы:
 
 - tasksChanged — данные списков/статистики устарели, QML перечитает свойства;
-- tasksMutated — эта ViewModel сама изменила задачи; MainWindow подписывает
-  на него refresh() других ViewModel-ей (календарь, настройки), чтобы
-  страницы не расходились. refresh() эмитит только tasksChanged, поэтому
-  петля исключена;
-- toastMessage — короткое «Сохранено»/«Удалено» для всплывашки в QML.
+- tasksMutated (база) — эта ViewModel сама изменила задачи; MainWindow
+  подписывает на него refresh() других ViewModel-ей, чтобы страницы
+  не расходились. refresh() эмитит только tasksChanged, поэтому петля
+  исключена;
+- toastMessage/toastError (база) — всплывашки успеха/ошибки.
 """
 from __future__ import annotations
 
 from datetime import date
 from typing import Any, Dict, List
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import Property, Signal, Slot
 
 from planner_desktop.domain.commands import (
     QuickAddCommand,
@@ -34,11 +39,8 @@ from planner_desktop.repositories.daily_task_repository import (
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
 from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.task_service import DesktopTaskService
-from planner_desktop.viewmodels.task_rows import (
-    editor_payload,
-    save_editor,
-    task_to_row,
-)
+from planner_desktop.viewmodels.task_actions import TaskActionsViewModel
+from planner_desktop.viewmodels.task_rows import task_to_row
 
 _MONTHS_GENITIVE = [
     "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -57,19 +59,17 @@ def _header_date_text(day: date) -> str:
     )
 
 
-class TodayViewModel(QObject):
+class TodayViewModel(TaskActionsViewModel):
     tasksChanged = Signal()
     dailyChanged = Signal()
     dailyMutated = Signal()
     errorChanged = Signal()
-    editorErrorChanged = Signal()
-    toastMessage = Signal(str)
-    tasksMutated = Signal()
 
     def __init__(self, repository: TaskRepository | None = None,
-                 parent: QObject | None = None,
+                 parent=None,
                  service: DesktopTaskService | None = None,
-                 daily_service: DailyTaskService | None = None) -> None:
+                 daily_service: DailyTaskService | None = None,
+                 **kwargs) -> None:
         """CRUD идёт через DesktopTaskService: он же ставит Calendar-операции
         в очередь, когда сервис создан с CalendarSyncStore (см. main_window).
         Старый вызов TodayViewModel(repository) работает как раньше —
@@ -78,15 +78,15 @@ class TodayViewModel(QObject):
         Ежедневные задачи — через DailyTaskService (общий с DailyTasksViewModel
         в MainWindow). Без явного daily_service поднимается in-memory сервис,
         поэтому старые вызовы TodayViewModel(repository) не ломаются."""
-        super().__init__(parent)
-        if service is not None:
-            self._service = service
-        else:
-            self._service = DesktopTaskService(repository or FakeTaskRepository())
+        if service is None:
+            service = DesktopTaskService(repository or FakeTaskRepository())
+        super().__init__(service, parent, **kwargs)
         self._repository = self._service.repository
         self._daily = daily_service or DailyTaskService(InMemoryDailyTaskRepository())
         self._error = ""
-        self._editor_error = ""
+
+    def _emit_data_changed(self) -> None:
+        self.tasksChanged.emit()
 
     # ---- свойства для QML -------------------------------------------------
 
@@ -152,11 +152,7 @@ class TodayViewModel(QObject):
     def errorMessage(self) -> str:
         return self._error
 
-    @Property(str, notify=editorErrorChanged)
-    def editorError(self) -> str:
-        return self._editor_error
-
-    # ---- слоты ------------------------------------------------------------
+    # ---- слоты Quick Add ----------------------------------------------------
 
     @Slot(str, str, bool, bool, str, str, str, result=bool)
     def addTask(self, title: str, notes: str, add_to_calendar: bool,
@@ -204,71 +200,30 @@ class TodayViewModel(QObject):
 
     def _create_from_command(self, command: QuickAddCommand,
                              priority: int | None = None) -> bool:
+        dedupe_key = f"{command!r}\x1f{priority!r}"
+        if not self._begin("quickAdd", dedupe_key, dedupe=True):
+            return False
         try:
             result = execute_quick_add(command)
-        except Exception as exc:  # страховка: битый ввод не должен ронять UI
-            self._set_error(f"Не удалось добавить задачу: {exc}")
+            if not result.ok:
+                self._set_error(" ".join(result.errors))
+                return False
+            if priority is not None:
+                result.task.priority = normalize_priority(priority)
+            self._service.create_task(result.task)
+        except Exception as exc:  # в том числе repository/Calendar queue
+            message = f"Не удалось добавить задачу: {exc}"
+            self._set_error(message)
+            self.toastError.emit(message)
             return False
+        finally:
+            self._end()
 
-        if not result.ok:
-            self._set_error(" ".join(result.errors))
-            return False
-
-        if priority is not None:
-            result.task.priority = normalize_priority(priority)
-        self._service.create_task(result.task)
         self._set_error("")
         self._notify_mutation("Задача добавлена")
         return True
 
-    @Slot(str, result=bool)
-    def toggleCompleted(self, uid: str) -> bool:
-        changed = self._service.toggle_completed(uid)
-        if changed:
-            self._notify_mutation()
-        return changed
-
-    @Slot(str, result=bool)
-    def deleteTask(self, uid: str) -> bool:
-        deleted = self._service.delete_task_by_uid(uid)
-        if deleted:
-            self._notify_mutation("Задача удалена")
-        return deleted
-
-    @Slot(str, result="QVariantMap")
-    def editorDataFor(self, uid: str) -> Dict[str, Any]:
-        return editor_payload(self._service.get_task(uid))
-
-    @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
-    def saveEditor(self, uid: str, title: str, notes: str, priority: int,
-                   scheduled: bool, is_all_day: bool, date_text: str,
-                   time_text: str, duration_text: str,
-                   completed: bool) -> bool:
-        """Сохранение TaskEditorDialog (создание при пустом uid).
-
-        Ошибки валидации не закрывают диалог: False + editorError.
-        """
-        try:
-            result = save_editor(
-                self._service, uid, title, notes, priority, scheduled,
-                is_all_day, date_text, time_text, duration_text, completed,
-            )
-        except Exception as exc:  # страховка от зависания UI
-            self._set_editor_error(f"Не удалось сохранить задачу: {exc}")
-            return False
-
-        if not result.ok:
-            self._set_editor_error(" ".join(result.errors))
-            return False
-
-        self._set_editor_error("")
-        self._notify_mutation("Сохранено")
-        return True
-
-    @Slot()
-    def refresh(self) -> None:
-        """Перечитать данные (вызывается извне после чужих мутаций)."""
-        self.tasksChanged.emit()
+    # ---- ежедневные -----------------------------------------------------------
 
     @Slot(str, result=bool)
     def toggleDaily(self, uid: str) -> bool:
@@ -289,27 +244,12 @@ class TodayViewModel(QObject):
     def clearError(self) -> None:
         self._set_error("")
 
-    @Slot()
-    def clearEditorError(self) -> None:
-        self._set_editor_error("")
-
     # ---- внутреннее -------------------------------------------------------
-
-    def _notify_mutation(self, toast: str = "") -> None:
-        self.tasksChanged.emit()
-        self.tasksMutated.emit()
-        if toast:
-            self.toastMessage.emit(toast)
 
     def _set_error(self, message: str) -> None:
         if self._error != message:
             self._error = message
             self.errorChanged.emit()
-
-    def _set_editor_error(self, message: str) -> None:
-        if self._editor_error != message:
-            self._editor_error = message
-            self.editorErrorChanged.emit()
 
     @property
     def repository(self) -> TaskRepository:

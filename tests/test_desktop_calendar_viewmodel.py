@@ -117,6 +117,27 @@ def test_go_to_today_resets_week_and_selection(vm):
     assert vm.selectedDateText == today.strftime("%Y-%m-%d")
 
 
+def test_day_navigation_clears_selected_task(vm, service):
+    task = add_task_on(service, date.today())
+    vm.selectTask(task.uid)
+    assert vm.selectedUid == task.uid
+
+    vm.selectDay((vm.selectedIndex + 1) % 7)
+    assert vm.selectedUid == ""
+    assert vm.selectedTask is None
+
+
+def test_week_and_today_navigation_clear_selected_task(vm, service):
+    task = add_task_on(service, date.today())
+    vm.selectTask(task.uid)
+    vm.nextWeek()
+    assert vm.selectedUid == ""
+
+    vm.selectTask(task.uid)
+    vm.goToToday()
+    assert vm.selectedUid == ""
+
+
 def test_navigation_finds_tasks_on_other_weeks(vm, service):
     future_day = date.today() + timedelta(days=7)
     add_task_on(service, future_day, title="Будущая")

@@ -1,0 +1,413 @@
+"""Общая база действий над задачами для Today/Calendar/History ViewModel.
+
+До фазы 1 три ViewModel-я дублировали одинаковые слоты (saveEditor,
+editorDataFor, deleteTask, toggleCompleted...). Теперь общий контракт живёт
+здесь один раз:
+
+- редактор: editorDataFor / saveEditor (тот же 10-аргументный слот) /
+  editorError / clearEditorError / applyEditorPreset / newScheduledDefaults;
+- действия: toggleCompleted / deleteTask / postponeTask (снуз) /
+  unscheduleTask / restoreTask;
+- выбор задачи: selectedUid / selectedTask / selectTask / clearSelection —
+  выбор живёт в Python, QML только показывает;
+- защита от дублей: busy на время операции (кнопки в QML выключаются)
+  плюс окно подавления повторного идентичного действия (быстрый двойной
+  клик по «перенести»/«удалить» не выполняется дважды);
+- тосты: toastMessage — успех, toastError — ошибка (обе строки).
+
+Подкласс обязан реализовать _emit_data_changed() — эмит своих *Changed
+сигналов (расписание страниц у всех разное), больше ничего.
+
+QML НИКОГДА не зовёт репозиторий напрямую: только эти слоты.
+"""
+from __future__ import annotations
+
+import time as _time
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
+
+from PySide6.QtCore import Property, QObject, Signal, Slot
+
+from planner_desktop.domain import scheduling
+from planner_desktop.domain.task import Task
+from planner_desktop.usecases.task_service import DesktopTaskService
+from planner_desktop.viewmodels.task_rows import (
+    editor_payload,
+    save_editor,
+    task_to_row,
+)
+
+
+class TaskActionsViewModel(QObject):
+    """База ViewModel-ей с задачами. Не используется из QML напрямую."""
+
+    editorErrorChanged = Signal()
+    toastMessage = Signal(str)
+    toastError = Signal(str)
+    tasksMutated = Signal()
+    busyChanged = Signal()
+    selectedTaskChanged = Signal()
+
+    #: Окно подавления повторного идентичного действия (секунды).
+    DUPLICATE_WINDOW_S = 0.3
+
+    def __init__(
+        self,
+        service: DesktopTaskService,
+        parent: QObject | None = None,
+        *,
+        clock: Optional[Callable[[], float]] = None,
+        now_provider: Optional[Callable[[], datetime]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._service = service
+        self._editor_error = ""
+        self._busy = False
+        self._selected_uid = ""
+        self._last_op: tuple[str, str, float] = ("", "", float("-inf"))
+        self._clock = clock or _time.monotonic
+        self._now = now_provider or datetime.now
+
+    # ---- хук подкласса -----------------------------------------------------------
+
+    def _emit_data_changed(self) -> None:
+        """Эмит собственных *Changed-сигналов страницы (перечитать списки)."""
+        raise NotImplementedError
+
+    def _notify_mutation(self, toast: str = "") -> None:
+        self._emit_data_changed()
+        self.selectedTaskChanged.emit()
+        self.tasksMutated.emit()
+        if toast:
+            self.toastMessage.emit(toast)
+
+    # ---- защита от дублей ----------------------------------------------------------
+
+    def _begin(self, name: str, uid: str = "", *, dedupe: bool = False) -> bool:
+        """True — операцию можно выполнять; False — занято или дубль клика."""
+        if self._busy:
+            return False
+        if dedupe:
+            now = self._clock()
+            last_name, last_uid, last_at = self._last_op
+            if (name == last_name and uid == last_uid
+                    and now - last_at < self.DUPLICATE_WINDOW_S):
+                return False
+            self._last_op = (name, uid, now)
+        self._busy = True
+        self.busyChanged.emit()
+        return True
+
+    def _end(self) -> None:
+        self._busy = False
+        self.busyChanged.emit()
+
+    @Property(bool, notify=busyChanged)
+    def busy(self) -> bool:
+        return self._busy
+
+    # ---- выбор задачи ---------------------------------------------------------------
+
+    @Property(str, notify=selectedTaskChanged)
+    def selectedUid(self) -> str:
+        return self._selected_uid
+
+    @Property("QVariant", notify=selectedTaskChanged)
+    def selectedTask(self) -> Optional[Dict[str, Any]]:
+        """Строка-словарь выбранной задачи (как в списках) или None."""
+        task = self._selected_live_task()
+        if task is None:
+            return None
+        return task_to_row(task, self._service.pending_task_uids())
+
+    def _selected_live_task(self) -> Optional[Task]:
+        if not self._selected_uid:
+            return None
+        return self._service.get_task(self._selected_uid)
+
+    @Slot(str)
+    def selectTask(self, uid: str) -> None:
+        if uid != self._selected_uid:
+            self._selected_uid = uid
+            self.selectedTaskChanged.emit()
+
+    @Slot()
+    def clearSelection(self) -> None:
+        self.selectTask("")
+
+    # ---- общий контракт редактора ------------------------------------------------------
+
+    @Property(str, notify=editorErrorChanged)
+    def editorError(self) -> str:
+        return self._editor_error
+
+    @Slot(str, result="QVariantMap")
+    def editorDataFor(self, uid: str) -> Dict[str, Any]:
+        return editor_payload(self._service.get_task(uid))
+
+    @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
+    def saveEditor(self, uid: str, title: str, notes: str, priority: int,
+                   scheduled: bool, is_all_day: bool, date_text: str,
+                   time_text: str, duration_text: str,
+                   completed: bool) -> bool:
+        """Сохранение TaskEditorDialog (создание при пустом uid).
+
+        Ошибки валидации не закрывают диалог: False + editorError.
+        """
+        dedupe_key = "\x1f".join((
+            uid,
+            title,
+            notes,
+            str(priority),
+            str(scheduled),
+            str(is_all_day),
+            date_text,
+            time_text,
+            duration_text,
+            str(completed),
+        ))
+        if not self._begin("saveEditor", dedupe_key, dedupe=True):
+            return False
+        try:
+            result = save_editor(
+                self._service, uid, title, notes, priority, scheduled,
+                is_all_day, date_text, time_text, duration_text, completed,
+            )
+        except Exception as exc:  # страховка от зависания UI
+            message = f"Не удалось сохранить задачу: {exc}"
+            self._set_editor_error(message)
+            self.toastError.emit(message)
+            return False
+        finally:
+            self._end()
+
+        if not result.ok:
+            self._set_editor_error(" ".join(result.errors))
+            return False
+
+        self._set_editor_error("")
+        self._notify_mutation("Сохранено")
+        return True
+
+    @Slot()
+    def clearEditorError(self) -> None:
+        self._set_editor_error("")
+
+    def _set_editor_error(self, message: str) -> None:
+        if self._editor_error != message:
+            self._editor_error = message
+            self.editorErrorChanged.emit()
+
+    # ---- пресеты формы (чистые расчёты, ничего не сохраняют) ---------------------------
+
+    @Slot(str, str, str, str, result="QVariantMap")
+    def applyEditorPreset(self, preset: str, mode: str, date_text: str,
+                          time_text: str) -> Dict[str, Any]:
+        """Пересчёт полей формы пресетом («Сегодня»/«На вечер»/…).
+
+        Возвращает {ok, mode, dateText, timeText, error}; при ok=False форма
+        не меняется, error пригоден для инлайн-подсказки.
+        """
+        state = scheduling.EditorState(
+            mode=mode, date_text=date_text, time_text=time_text)
+        result = scheduling.apply_editor_preset(
+            preset, state, today=self._now().date(), now=self._now())
+        return {
+            "ok": result.ok,
+            "mode": result.mode,
+            "dateText": result.date_text,
+            "timeText": result.time_text,
+            "error": result.error,
+        }
+
+    @Slot(result="QVariantMap")
+    def newScheduledDefaults(self) -> Dict[str, Any]:
+        """Заготовка «новой запланированной задачи» (Ctrl+Shift+N)."""
+        result = scheduling.new_scheduled_defaults(self._now())
+        return {
+            "ok": result.ok,
+            "mode": result.mode,
+            "dateText": result.date_text,
+            "timeText": result.time_text,
+            "error": result.error,
+        }
+
+    @Property("QVariantList", constant=True)
+    def editorPresets(self) -> List[dict]:
+        return scheduling.editor_presets()
+
+    @Property("QVariantList", constant=True)
+    def durationPresets(self) -> List[dict]:
+        return scheduling.duration_presets()
+
+    # ---- quick scheduling выбранной/инспектируемой задачи ----------------------
+
+    @Slot(str, result="QVariantList")
+    def taskPresetsFor(self, uid: str) -> List[Dict[str, Any]]:
+        """Editor presets как persistable actions для TaskInspector."""
+        task = self._service.get_task(uid)
+        if task is None:
+            return []
+        recurring = task.google_calendar_recurring_event_id is not None
+        timed = task.start is not None and not task.is_all_day
+        scheduled = task.start is not None
+        actions: List[Dict[str, Any]] = []
+        for item in scheduling.editor_presets():
+            enabled = not recurring
+            if item["id"] == scheduling.PRESET_PLUS_HOUR:
+                enabled = enabled and timed
+            elif item["id"] == scheduling.PRESET_UNSCHEDULE:
+                enabled = enabled and scheduled
+            actions.append({**item, "enabled": enabled})
+        return actions
+
+    @Slot(str, str, result=bool)
+    def applyTaskPreset(self, uid: str, preset: str) -> bool:
+        """Сохранить scheduling preset через use-case слой и Calendar queue."""
+        if not self._begin(f"taskPreset:{preset}", uid, dedupe=True):
+            return False
+        try:
+            result = self._service.apply_scheduling_preset(
+                uid, preset, now=self._now()
+            )
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось изменить расписание: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        toast = (
+            "Дата снята"
+            if preset == scheduling.PRESET_UNSCHEDULE
+            else "Расписание обновлено"
+        )
+        self._notify_mutation(toast)
+        return True
+
+    # ---- снуз / перенос -------------------------------------------------------------------
+
+    @Slot(str, result="QVariantList")
+    def snoozeActionsFor(self, uid: str) -> List[Dict[str, Any]]:
+        """Пункты меню снуза для конкретной задачи с флагом enabled.
+
+        Экземплярам повторяющихся серий перенос запрещён (безопасность
+        синка), недатированной задаче нечего «снимать».
+        """
+        task = self._service.get_task(uid)
+        if task is None:
+            return []
+        recurring = task.google_calendar_recurring_event_id is not None
+        actions = []
+        for item in scheduling.snooze_actions():
+            enabled = True
+            if recurring:
+                enabled = False
+            if item["id"] == scheduling.SNOOZE_UNSCHEDULE and task.start is None:
+                enabled = False
+            actions.append({**item, "enabled": enabled})
+        return actions
+
+    @Slot(str, str, result=bool)
+    def postponeTask(self, uid: str, action: str) -> bool:
+        """Снуз задачи. Все правила — в domain/scheduling.py и сервисе;
+        двойной быстрый клик по тому же пункту подавляется."""
+        if action == scheduling.SNOOZE_PICK:
+            return False  # «Выбрать дату и время» открывает редактор в QML
+        # Ключ дедупликации включает действие: подавляется именно повторный
+        # клик по тому же пункту, а не два разных переноса подряд.
+        if not self._begin(f"postpone:{action}", uid, dedupe=True):
+            return False
+        try:
+            result = self._service.postpone_task(uid, action, now=self._now())
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось перенести задачу: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        toast = ("Дата снята" if action == scheduling.SNOOZE_UNSCHEDULE
+                 else "Задача перенесена")
+        self._notify_mutation(toast)
+        return True
+
+    @Slot(str, result=bool)
+    def unscheduleTask(self, uid: str) -> bool:
+        return self.postponeTask(uid, scheduling.SNOOZE_UNSCHEDULE)
+
+    # ---- базовые действия -------------------------------------------------------------------
+
+    @Slot(str, result=bool)
+    def toggleCompleted(self, uid: str) -> bool:
+        if not self._begin("toggle", uid, dedupe=True):
+            return False
+        try:
+            changed = self._service.toggle_completed(uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось изменить состояние задачи: {exc}")
+            return False
+        finally:
+            self._end()
+        if changed:
+            task = self._service.get_task(uid)
+            toast = (
+                "Задача выполнена"
+                if task is not None and task.completed
+                else "Задача возвращена в работу"
+            )
+            self._notify_mutation(toast)
+        else:
+            self.toastError.emit("Не удалось изменить состояние задачи.")
+        return changed
+
+    @Slot(str, result=bool)
+    def deleteTask(self, uid: str) -> bool:
+        if not self._begin("delete", uid, dedupe=True):
+            return False
+        try:
+            deleted = self._service.delete_task_by_uid(uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось удалить задачу: {exc}")
+            return False
+        finally:
+            self._end()
+        if deleted:
+            if uid == self._selected_uid:
+                self._selected_uid = ""
+            self._notify_mutation("Задача удалена")
+        else:
+            self.toastError.emit("Не удалось удалить задачу.")
+        return deleted
+
+    @Slot(str, result=bool)
+    def restoreTask(self, uid: str) -> bool:
+        """Вернуть выполненную задачу в работу (страница «История» и др.)."""
+        if not self._begin("restore", uid, dedupe=True):
+            return False
+        try:
+            restored = self._service.restore_task(uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось восстановить задачу: {exc}")
+            return False
+        finally:
+            self._end()
+        if restored:
+            self._notify_mutation("Задача возвращена в работу")
+        else:
+            self.toastError.emit("Не удалось восстановить задачу.")
+        return restored
+
+    @Slot()
+    def refresh(self) -> None:
+        """Перечитать данные (после чужих мутаций); только *Changed-сигналы."""
+        self._emit_data_changed()
+        self.selectedTaskChanged.emit()
+
+    # ---- доступ для тестов -----------------------------------------------------------------
+
+    @property
+    def service(self) -> DesktopTaskService:
+        return self._service

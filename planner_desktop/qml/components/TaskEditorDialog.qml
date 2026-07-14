@@ -7,9 +7,18 @@ import QtQuick.Effects
 import "../theme"
 
 // Единый диалог создания/редактирования задачи.
-// vm — TodayViewModel или CalendarViewModel: у обоих одинаковые
-// слоты saveEditor/editorDataFor/clearEditorError и свойство editorError.
-// Валидация — в Python; при ошибке диалог остаётся открытым.
+//
+// vm — Today/Calendar/History ViewModel: общий контракт TaskActionsViewModel
+// (saveEditor/editorDataFor/applyEditorPreset/editorError/busy).
+//
+// Планирование — сегментами «Без даты» / «Весь день» / «Со временем»
+// с нативными контролами (DatePickerField/TimePickerField/DurationPicker)
+// и пресетами (SchedulePresetBar, семантика в domain/scheduling.py).
+// Сырые строки дат пользователь не видит; финальная валидация — Python:
+// при ошибке диалог остаётся открытым и редактируемым.
+//
+// Клавиатура: Enter в полях названия/времени сохраняет, Ctrl+S сохраняет,
+// Esc закрывает. Кнопки выключаются на время операции (vm.busy).
 Dialog {
     id: dialog
 
@@ -18,11 +27,18 @@ Dialog {
     property string taskUid: ""
     property bool recurringInstance: false
 
+    // Режим планирования: "none" | "allday" | "timed" (domain/scheduling.py).
+    property string schedMode: "none"
+
+    signal deleteRequested(string uid)
+
     parent: Overlay.overlay
     anchors.centerIn: parent
     modal: true
     focus: true
-    width: Math.min(560, (parent ? parent.width : 560) - 64)
+    width: Math.min(600, (parent ? parent.width : 600) - 48)
+    height: Math.min(implicitHeight,
+                     Math.max(360, (parent ? parent.height : 720) - 32))
     padding: Theme.spacingXl
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
@@ -61,27 +77,56 @@ Dialog {
         }
     }
 
-    function todayText() { return Qt.formatDate(new Date(), "yyyy-MM-dd") }
-    function tomorrowText() {
-        var d = new Date()
-        d.setDate(d.getDate() + 1)
-        return Qt.formatDate(d, "yyyy-MM-dd")
+    // Ctrl+S сохраняет, пока диалог открыт (и не мешает окну, когда закрыт).
+    Shortcut {
+        sequence: "Ctrl+S"
+        enabled: dialog.visible
+        onActivated: dialog.submit()
+    }
+
+    // ---- открытие ----------------------------------------------------------
+
+    function _resetForm(data) {
+        titleField.text = data.title || ""
+        notesArea.text = data.notes || ""
+        dialog._setPriority(data.priority || 0)
+        dialog.schedMode = data.mode || "none"
+        dateField.dateText = data.dateText || ""
+        timeField.timeText = data.timeText || ""
+        durationPicker.reset(data.durationText || "")
+        completedCheck.checked = !!data.completed
+        vm.clearEditorError()
+        Qt.callLater(function() {
+            if (formScroll.contentItem)
+                formScroll.contentItem.contentY = 0
+        })
     }
 
     function openForCreate(prefillDateText) {
         isEdit = false
         taskUid = ""
         recurringInstance = false
-        titleField.text = ""
-        notesArea.text = ""
-        priorityBox.currentIndex = 0
-        scheduledCheck.checked = !!prefillDateText && prefillDateText.length > 0
-        allDayCheck.checked = false
-        dateField.text = prefillDateText || ""
-        timeField.text = ""
-        durationField.text = ""
-        completedCheck.checked = false
-        vm.clearEditorError()
+        _resetForm({
+            mode: (prefillDateText && prefillDateText.length > 0) ? "allday" : "none",
+            dateText: prefillDateText || ""
+        })
+        open()
+        titleField.forceActiveFocus()
+    }
+
+    // Ctrl+Shift+N: сразу запланированная задача (ближайший час; дата —
+    // сегодня или переданная, например выбранный день календаря).
+    function openForCreateScheduled(prefillDateText) {
+        isEdit = false
+        taskUid = ""
+        recurringInstance = false
+        var defaults = vm.newScheduledDefaults()
+        _resetForm({
+            mode: defaults.mode,
+            dateText: (prefillDateText && prefillDateText.length > 0)
+                      ? prefillDateText : defaults.dateText,
+            timeText: defaults.timeText
+        })
         open()
         titleField.forceActiveFocus()
     }
@@ -93,31 +138,63 @@ Dialog {
         isEdit = true
         taskUid = uid
         recurringInstance = data.isRecurringInstance
-        titleField.text = data.title
-        notesArea.text = data.notes
-        priorityBox.currentIndex = data.priority
-        scheduledCheck.checked = data.scheduled
-        allDayCheck.checked = data.isAllDay
-        dateField.text = data.dateText
-        timeField.text = data.timeText
-        durationField.text = data.durationText
-        completedCheck.checked = data.completed
-        vm.clearEditorError()
+        _resetForm(data)
         open()
         titleField.forceActiveFocus()
     }
 
+    // ---- режимы и пресеты -----------------------------------------------------
+
+    function _setMode(value) {
+        if (dialog.recurringInstance)
+            return
+        if (value === dialog.schedMode)
+            return
+        dialog.schedMode = value
+        // Дозаполнение по умолчанию — из Python (DEFAULT_START_TIME и т.п.).
+        if (value !== "none"
+                && (dateField.dateText === ""
+                    || (value === "timed" && timeField.timeText === ""))) {
+            var res = vm.applyEditorPreset(
+                "today", value, dateField.dateText, timeField.timeText)
+            if (res.ok) {
+                if (dateField.dateText === "")
+                    dateField.dateText = res.dateText
+                if (value === "timed" && timeField.timeText === "")
+                    timeField.timeText = res.timeText
+            }
+        }
+    }
+
+    function _applyPreset(presetId) {
+        if (dialog.recurringInstance)
+            return
+        var res = vm.applyEditorPreset(
+            presetId, dialog.schedMode, dateField.dateText, timeField.timeText)
+        if (!res.ok)
+            return
+        dialog.schedMode = res.mode
+        dateField.dateText = res.dateText
+        timeField.timeText = res.timeText
+    }
+
+    function _setPriority(p) {
+        priorityRow.current = Math.max(0, Math.min(3, p))
+    }
+
     function submit() {
+        if (vm.busy)
+            return
         var ok = vm.saveEditor(
             taskUid,
             titleField.text,
             notesArea.text,
-            priorityBox.currentIndex,
-            scheduledCheck.checked,
-            allDayCheck.checked,
-            dateField.text,
-            timeField.text,
-            durationField.text,
+            priorityRow.current,
+            dialog.schedMode !== "none",
+            dialog.schedMode === "allday",
+            dialog.schedMode !== "none" ? dateField.dateText : "",
+            dialog.schedMode === "timed" ? timeField.timeText : "",
+            dialog.schedMode === "timed" ? durationPicker.durationText : "",
             completedCheck.checked
         )
         if (ok)
@@ -127,6 +204,25 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: Theme.spacingMd
 
+        // Основная форма прокручивается, а действия остаются закреплены снизу.
+        // На обычной высоте ScrollBar скрыт и внешний вид остаётся прежним;
+        // при минимальном окне 680x560 footer всё равно всегда доступен.
+        ScrollView {
+            id: formScroll
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            implicitHeight: formColumn.implicitHeight
+            contentWidth: availableWidth
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+            ColumnLayout {
+                id: formColumn
+                width: formScroll.availableWidth
+                spacing: Theme.spacingMd
+
+        // ---- шапка ----
         RowLayout {
             spacing: Theme.spacingSm
             Layout.fillWidth: true
@@ -154,21 +250,24 @@ Dialog {
             Item { Layout.fillWidth: true }
             IconButton {
                 iconName: "close"
-                tip: "Закрыть"
+                tip: "Закрыть (Esc)"
                 onClicked: dialog.close()
             }
         }
 
+        // ---- название: главное поле ----
         AppTextField {
             id: titleField
-            placeholderText: "Название задачи"
+            placeholderText: "Что нужно сделать?"
+            font.pixelSize: Theme.fontSubtitle + 1
             Layout.fillWidth: true
             onAccepted: dialog.submit()
         }
 
+        // ---- заметки ----
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 82
+            Layout.preferredHeight: 74
             radius: Theme.radiusSmall
             color: Theme.surface
             border.color: notesArea.activeFocus ? Theme.accent : Theme.border
@@ -194,6 +293,92 @@ Dialog {
             }
         }
 
+        // ---- планирование ----
+        Label {
+            text: "Планирование"
+            font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
+            font.weight: Font.DemiBold
+            font.letterSpacing: 0.4
+            color: Theme.textMuted
+            Layout.topMargin: Theme.spacingXs
+        }
+
+        SegmentedControl {
+            current: dialog.schedMode
+            enabled: !dialog.recurringInstance
+            options: [
+                { label: "Без даты", value: "none" },
+                { label: "Весь день", value: "allday" },
+                { label: "Со временем", value: "timed" }
+            ]
+            onSelected: value => dialog._setMode(value)
+        }
+
+        GridLayout {
+            visible: dialog.schedMode !== "none"
+            columns: 2
+            columnSpacing: Theme.spacingSm
+            rowSpacing: Theme.spacingSm
+            Layout.fillWidth: true
+
+            Label {
+                text: "Дата"
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.textSecondary
+            }
+            DatePickerField {
+                id: dateField
+                enabled: !dialog.recurringInstance
+                Layout.fillWidth: true
+                Layout.maximumWidth: 300
+            }
+
+            Label {
+                visible: dialog.schedMode === "timed"
+                text: "Время"
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.textSecondary
+            }
+            TimePickerField {
+                id: timeField
+                visible: dialog.schedMode === "timed"
+                enabled: !dialog.recurringInstance
+                onAccepted: dialog.submit()
+            }
+
+            Label {
+                visible: dialog.schedMode === "timed"
+                text: "Длительность"
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.textSecondary
+                Layout.alignment: Qt.AlignTop
+                Layout.topMargin: 6
+            }
+            DurationPicker {
+                id: durationPicker
+                visible: dialog.schedMode === "timed"
+                enabled: !dialog.recurringInstance
+                presets: dialog.vm ? dialog.vm.durationPresets : []
+                Layout.fillWidth: true
+            }
+        }
+
+        SchedulePresetBar {
+            presets: dialog.vm ? dialog.vm.editorPresets : []
+            enabled: !dialog.recurringInstance
+            plusHourEnabled: dialog.schedMode === "timed"
+                             && timeField.timeText.length > 0
+            onTriggered: presetId => dialog._applyPreset(presetId)
+            Layout.fillWidth: true
+        }
+
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+        // ---- приоритет и «выполнено» ----
         RowLayout {
             spacing: Theme.spacingMd
             Layout.fillWidth: true
@@ -204,12 +389,75 @@ Dialog {
                 font.family: Theme.fontFamily
                 color: Theme.textSecondary
             }
-            ComboBox {
-                id: priorityBox
-                model: Theme.priorityNames
-                Layout.preferredWidth: 190
-                font.pixelSize: Theme.fontBody
-                font.family: Theme.fontFamily
+            Row {
+                id: priorityRow
+                property int current: 0
+                spacing: Theme.spacingXs
+
+                Repeater {
+                    model: ["Нет", "Низкий", "Средний", "Высокий"]
+                    delegate: Rectangle {
+                        id: prioChip
+                        required property string modelData
+                        required property int index
+
+                        readonly property bool active: priorityRow.current === index
+                        implicitHeight: 30
+                        implicitWidth: prioRow.implicitWidth + 20
+                        radius: Theme.radiusPill
+                        color: active ? Theme.priorityBgColor(index)
+                             : prioHover.hovered ? Theme.surfaceHover : Theme.surface
+                        border.color: active ? Theme.priorityColor(index) : Theme.border
+                        border.width: 1
+                        Behavior on color { ColorAnimation { duration: 90 } }
+
+                        Row {
+                            id: prioRow
+                            anchors.centerIn: parent
+                            spacing: 5
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 8; height: 8; radius: 4
+                                color: prioChip.index > 0
+                                       ? Theme.priorityColor(prioChip.index)
+                                       : Theme.textMuted
+                            }
+                            Label {
+                                text: prioChip.modelData
+                                font.pixelSize: Theme.fontCaption + 1
+                                font.family: Theme.fontFamily
+                                font.weight: prioChip.active ? Font.DemiBold : Font.Medium
+                                color: prioChip.active
+                                       ? Theme.priorityColor(prioChip.index)
+                                       : Theme.textSecondary
+                            }
+                        }
+                        HoverHandler { id: prioHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler {
+                            onTapped: {
+                                prioChip.forceActiveFocus()
+                                priorityRow.current = prioChip.index
+                            }
+                        }
+                        activeFocusOnTab: true
+                        Keys.onReturnPressed: priorityRow.current = prioChip.index
+                        Keys.onSpacePressed: priorityRow.current = prioChip.index
+                        Accessible.role: Accessible.RadioButton
+                        Accessible.name: "Приоритет: " + prioChip.modelData
+                        Accessible.checked: prioChip.active
+                        Accessible.focusable: true
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: -2
+                            radius: parent.radius
+                            color: "transparent"
+                            border.color: Theme.focusRing
+                            border.width: 2
+                            visible: prioChip.activeFocus
+                        }
+                    }
+                }
             }
             Item { Layout.fillWidth: true }
             CheckBox {
@@ -221,96 +469,68 @@ Dialog {
             }
         }
 
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.border
-        }
-
+        // ---- предупреждение о повторяющемся событии ----
         RowLayout {
-            spacing: Theme.spacingMd
-            Layout.fillWidth: true
-
-            CheckBox {
-                id: scheduledCheck
-                text: "Запланировать (попадёт в календарь)"
-                font.pixelSize: Theme.fontBody
-                font.family: Theme.fontFamily
-            }
-            CheckBox {
-                id: allDayCheck
-                text: "Весь день"
-                visible: scheduledCheck.checked
-                font.pixelSize: Theme.fontBody
-                font.family: Theme.fontFamily
-            }
-            Item { Layout.fillWidth: true }
-        }
-
-        GridLayout {
-            visible: scheduledCheck.checked
-            columns: 3
-            columnSpacing: Theme.spacingSm
-            rowSpacing: Theme.spacingSm
-            Layout.fillWidth: true
-
-            AppTextField {
-                id: dateField
-                placeholderText: "Дата: ГГГГ-ММ-ДД"
-                Layout.preferredWidth: 170
-            }
-            AppButton {
-                text: "Сегодня"
-                variant: "secondary"
-                onClicked: dateField.text = dialog.todayText()
-            }
-            AppButton {
-                text: "Завтра"
-                variant: "secondary"
-                onClicked: dateField.text = dialog.tomorrowText()
-            }
-
-            AppTextField {
-                id: timeField
-                placeholderText: "Время: ЧЧ:ММ"
-                enabled: !allDayCheck.checked
-                Layout.preferredWidth: 170
-            }
-            AppTextField {
-                id: durationField
-                placeholderText: "Длительность, мин"
-                enabled: !allDayCheck.checked
-                Layout.preferredWidth: 170
-                Layout.columnSpan: 2
-            }
-        }
-
-        Label {
             visible: dialog.recurringInstance
-            text: "⚠ Это экземпляр повторяющегося события Google Calendar: "
-                  + "снять дату (отвязать от календаря) у него нельзя."
-            font.pixelSize: Theme.fontCaption
-            font.family: Theme.fontFamily
-            color: Theme.warningText
-            wrapMode: Text.WordWrap
+            spacing: Theme.spacingSm
             Layout.fillWidth: true
+
+            AppIcon { name: "info"; size: 15; color: Theme.warningText }
+            Label {
+                text: "Это экземпляр повторяющегося события Google Calendar: "
+                      + "снять дату или перенести его нельзя."
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.warningText
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
         }
 
-        Label {
-            text: dialog.vm ? dialog.vm.editorError : ""
-            visible: text.length > 0
-            font.pixelSize: Theme.fontCaption
-            font.family: Theme.fontFamily
-            color: Theme.danger
-            wrapMode: Text.WordWrap
+        // ---- инлайн-ошибка валидации ----
+        Rectangle {
+            visible: errorLabel.text.length > 0
             Layout.fillWidth: true
+            implicitHeight: errorLabel.implicitHeight + 2 * Theme.spacingSm
+            radius: Theme.radiusSmall
+            color: Theme.dangerSoft
+            border.color: Qt.alpha(Theme.danger, 0.35)
+            border.width: 1
+
+            Label {
+                id: errorLabel
+                anchors.fill: parent
+                anchors.margins: Theme.spacingSm
+                text: dialog.vm ? dialog.vm.editorError : ""
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.danger
+                wrapMode: Text.WordWrap
+                verticalAlignment: Text.AlignVCenter
+            }
         }
 
+            }
+        }
+
+        // ---- действия: удаление отдельно слева, сохранение справа ----
         RowLayout {
             spacing: Theme.spacingSm
             Layout.fillWidth: true
             Layout.topMargin: Theme.spacingXs
 
+            AppButton {
+                visible: dialog.isEdit
+                text: "Удалить"
+                variant: "ghost"
+                iconName: "trash"
+                enabled: dialog.vm ? !dialog.vm.busy : true
+                onClicked: {
+                    var uid = dialog.taskUid
+                    dialog.close()
+                    dialog.deleteRequested(uid)
+                }
+            }
             Item { Layout.fillWidth: true }
             AppButton {
                 text: "Отмена"
@@ -321,6 +541,7 @@ Dialog {
                 text: dialog.isEdit ? "Сохранить" : "Создать"
                 variant: "primary"
                 iconName: dialog.isEdit ? "check" : "plus"
+                enabled: dialog.vm ? !dialog.vm.busy : true
                 onClicked: dialog.submit()
             }
         }

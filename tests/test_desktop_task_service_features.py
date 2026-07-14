@@ -14,6 +14,7 @@ from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
 from planner_desktop.usecases.task_service import (
     DesktopTaskService,
+    RESCHEDULE_RECURRING_ERROR,
     UNSCHEDULE_RECURRING_ERROR,
 )
 
@@ -140,6 +141,77 @@ def test_edit_scheduled_linked_task_enqueues_update(service, repo, queue):
     assert ops(queue) == [("update", created.uid)]
 
 
+def test_edit_linked_title_only_enqueues_update(service, repo, queue):
+    created = service.create_from_editor(scheduled_editor()).task
+    queue.remove_op(queue.list_due_ops()[0].id)
+    created.google_calendar_event_id = "evt-title"
+    repo.update(created)
+
+    result = service.edit_task(created.uid, scheduled_editor(title="Новое имя"))
+    assert result.ok
+    assert ops(queue) == [("update", created.uid)]
+
+
+def test_edit_linked_priority_and_completion_stay_local(service, repo, queue):
+    created = service.create_from_editor(scheduled_editor()).task
+    queue.remove_op(queue.list_due_ops()[0].id)
+    created.google_calendar_event_id = "evt-local-fields"
+    repo.update(created)
+
+    result = service.edit_task(created.uid, scheduled_editor(
+        priority=3, completed=True,
+    ))
+    assert result.ok
+    saved = repo.get_by_uid(created.uid)
+    assert saved.priority == 3
+    assert saved.completed is True
+    assert ops(queue) == []
+
+
+def test_recurring_text_and_local_fields_edit_preserves_schedule(
+        service, repo, queue):
+    created = service.create_from_editor(scheduled_editor()).task
+    queue.remove_op(queue.list_due_ops()[0].id)
+    created.google_calendar_event_id = "evt-rec"
+    created.google_calendar_recurring_event_id = "series-rec"
+    repo.update(created)
+    before = (created.start, created.end, created.duration_minutes, created.is_all_day)
+
+    result = service.edit_task(created.uid, scheduled_editor(
+        title="Новое имя", notes="Новые заметки", priority=2, completed=True,
+    ))
+    assert result.ok
+    saved = repo.get_by_uid(created.uid)
+    assert (saved.start, saved.end, saved.duration_minutes, saved.is_all_day) == before
+    assert (saved.title, saved.notes, saved.priority, saved.completed) == (
+        "Новое имя", "Новые заметки", 2, True,
+    )
+    assert ops(queue) == [("update", created.uid)]  # summary/description only
+
+
+@pytest.mark.parametrize("changes", [
+    {"date_text": "2026-07-09"},
+    {"time_text": "11:00"},
+    {"duration_text": "90"},
+    {"is_all_day": True, "time_text": "", "duration_text": ""},
+])
+def test_recurring_editor_rejects_every_schedule_change(
+        changes, service, repo, queue):
+    created = service.create_from_editor(scheduled_editor()).task
+    queue.remove_op(queue.list_due_ops()[0].id)
+    created.google_calendar_event_id = "evt-rec"
+    created.google_calendar_recurring_event_id = "series-rec"
+    repo.update(created)
+    before = (created.start, created.end, created.duration_minutes, created.is_all_day)
+
+    result = service.edit_task(created.uid, scheduled_editor(**changes))
+    assert not result.ok
+    assert result.errors == [RESCHEDULE_RECURRING_ERROR]
+    saved = repo.get_by_uid(created.uid)
+    assert (saved.start, saved.end, saved.duration_minutes, saved.is_all_day) == before
+    assert ops(queue) == []
+
+
 def test_edit_moves_date_and_time(service, repo):
     created = service.create_from_editor(scheduled_editor()).task
     result = service.edit_task(created.uid, scheduled_editor(
@@ -260,6 +332,43 @@ def test_schedule_task_all_day(service, queue):
     assert updated.is_all_day is True
     assert updated.end == start + timedelta(days=1)
     assert updated.duration_minutes is None
+
+
+def test_schedule_task_all_day_normalizes_midnight(service):
+    created = service.create_from_editor(editor()).task
+    updated = service.schedule_task(
+        created.uid, datetime(2026, 7, 21, 15, 45), is_all_day=True
+    )
+    assert updated.start == datetime(2026, 7, 21)
+    assert updated.end == datetime(2026, 7, 22)
+
+
+@pytest.mark.parametrize("duration", [0, -1])
+def test_schedule_task_rejects_non_positive_duration(
+        duration, service, repo, queue):
+    created = service.create_from_editor(editor()).task
+    assert service.schedule_task(
+        created.uid, datetime(2026, 7, 21, 10, 0),
+        duration_minutes=duration,
+    ) is None
+    assert repo.get_by_uid(created.uid).start is None
+    assert ops(queue) == []
+
+
+def test_public_schedule_task_refuses_recurring_instance(
+        service, repo, queue):
+    created = service.create_from_editor(scheduled_editor()).task
+    queue.remove_op(queue.list_due_ops()[0].id)
+    created.google_calendar_event_id = "evt-rec"
+    created.google_calendar_recurring_event_id = "series-rec"
+    repo.update(created)
+    before = created.start
+
+    assert service.schedule_task(
+        created.uid, datetime(2026, 7, 25, 18, 0), duration_minutes=60
+    ) is None
+    assert repo.get_by_uid(created.uid).start == before
+    assert ops(queue) == []
 
 
 def test_schedule_then_unschedule_is_deterministic(service, repo, queue):

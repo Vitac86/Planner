@@ -45,6 +45,8 @@ def task_to_row(task: Task, pending_uids: Set[str]) -> Dict[str, Any]:
         "completed": task.completed,
         "hasPendingSync": task.uid in pending_uids,
         "isLinked": task.google_calendar_event_id is not None,
+        "isScheduled": task.start is not None,
+        "isRecurring": task.google_calendar_recurring_event_id is not None,
     }
 
 
@@ -59,6 +61,7 @@ def editor_payload(task: Optional[Task]) -> Dict[str, Any]:
             "priority": 0,
             "scheduled": False,
             "isAllDay": False,
+            "mode": "none",
             "dateText": "",
             "timeText": "",
             "durationText": "",
@@ -74,6 +77,8 @@ def editor_payload(task: Optional[Task]) -> Dict[str, Any]:
         "priority": task.priority,
         "scheduled": scheduled,
         "isAllDay": task.is_all_day,
+        # Режим сегментов формы: none / allday / timed (см. domain/scheduling.py).
+        "mode": ("allday" if task.is_all_day else "timed") if scheduled else "none",
         "dateText": task.start.strftime(DATE_FORMAT) if scheduled else "",
         "timeText": (
             task.start.strftime(TIME_FORMAT)

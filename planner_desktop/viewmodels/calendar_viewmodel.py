@@ -1,23 +1,23 @@
 """ViewModel страницы «Календарь»: недельная навигация + список дня.
 
 Данные — тот же репозиторий, что и у «Сегодня» (через общий
-DesktopTaskService); карточки задач и диалог редактирования на странице
-календаря используют те же слоты (toggleCompleted/deleteTask/saveEditor),
-что и TodayViewModel, поэтому поведение везде одинаковое.
+DesktopTaskService); общие действия над задачами (редактор, удаление,
+снуз, выбор задачи, busy-защита) — в базе TaskActionsViewModel, поэтому
+поведение на всех страницах одинаковое.
 
-Сигналы (та же схема, что у TodayViewModel):
+Сигналы:
 
 - weekChanged/selectionChanged — QML перечитывает сетку и список дня;
-- tasksMutated — эта ViewModel изменила задачи; MainWindow дёргает
+- tasksMutated (база) — эта ViewModel изменила задачи; MainWindow дёргает
   refresh() остальных ViewModel-ей;
-- toastMessage — всплывашка «Сохранено»/«Удалено».
+- toastMessage/toastError (база) — всплывашки успеха/ошибки.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any, Dict, List
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import Property, Signal, Slot
 
 from planner_desktop.repositories import TaskRepository
 from planner_desktop.repositories.daily_task_repository import (
@@ -26,11 +26,8 @@ from planner_desktop.repositories.daily_task_repository import (
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
 from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.task_service import DesktopTaskService
-from planner_desktop.viewmodels.task_rows import (
-    editor_payload,
-    save_editor,
-    task_to_row,
-)
+from planner_desktop.viewmodels.task_actions import TaskActionsViewModel
+from planner_desktop.viewmodels.task_rows import task_to_row
 
 _WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -46,31 +43,30 @@ def _monday_of(day: date) -> date:
     return day - timedelta(days=day.weekday())
 
 
-class CalendarViewModel(QObject):
+class CalendarViewModel(TaskActionsViewModel):
     weekChanged = Signal()
     selectionChanged = Signal()
     filterChanged = Signal()
-    editorErrorChanged = Signal()
-    toastMessage = Signal(str)
-    tasksMutated = Signal()
     dailyMutated = Signal()
 
     def __init__(self, repository: TaskRepository | None = None,
-                 parent: QObject | None = None,
+                 parent=None,
                  service: DesktopTaskService | None = None,
-                 daily_service: DailyTaskService | None = None) -> None:
-        super().__init__(parent)
-        if service is not None:
-            self._service = service
-        else:
-            self._service = DesktopTaskService(repository or FakeTaskRepository())
+                 daily_service: DailyTaskService | None = None,
+                 **kwargs) -> None:
+        if service is None:
+            service = DesktopTaskService(repository or FakeTaskRepository())
+        super().__init__(service, parent, **kwargs)
         self._repository = self._service.repository
         self._daily = daily_service or DailyTaskService(InMemoryDailyTaskRepository())
-        self._editor_error = ""
         self._filter = FILTER_ALL
         today = date.today()
         self._week_start = _monday_of(today)
         self._selected_index = today.weekday()
+
+    def _emit_data_changed(self) -> None:
+        self.weekChanged.emit()
+        self.selectionChanged.emit()
 
     # ---- свойства недели ------------------------------------------------------
 
@@ -166,15 +162,12 @@ class CalendarViewModel(QObject):
     def filterMode(self) -> str:
         return self._filter
 
-    @Property(str, notify=editorErrorChanged)
-    def editorError(self) -> str:
-        return self._editor_error
-
     # ---- навигация --------------------------------------------------------------
 
     @Slot(int)
     def selectDay(self, index: int) -> None:
         if 0 <= index < 7 and index != self._selected_index:
+            self.clearSelection()
             self._selected_index = index
             self.selectionChanged.emit()
             self.weekChanged.emit()
@@ -189,6 +182,7 @@ class CalendarViewModel(QObject):
 
     @Slot()
     def goToToday(self) -> None:
+        self.clearSelection()
         today = date.today()
         self._week_start = _monday_of(today)
         self._selected_index = today.weekday()
@@ -214,78 +208,14 @@ class CalendarViewModel(QObject):
         return True
 
     @Slot()
-    def refresh(self) -> None:
-        """Перечитать данные (вызывается извне после чужих мутаций)."""
-        self.weekChanged.emit()
-        self.selectionChanged.emit()
-
-    @Slot()
     def refreshDaily(self) -> None:
         """Перечитать ежедневный чек-лист (после мутаций на других страницах)."""
         self.selectionChanged.emit()
 
-    # ---- действия над задачами (те же, что на «Сегодня») --------------------------
-
-    @Slot(str, result=bool)
-    def toggleCompleted(self, uid: str) -> bool:
-        changed = self._service.toggle_completed(uid)
-        if changed:
-            self._notify_mutation()
-        return changed
-
-    @Slot(str, result=bool)
-    def deleteTask(self, uid: str) -> bool:
-        deleted = self._service.delete_task_by_uid(uid)
-        if deleted:
-            self._notify_mutation("Задача удалена")
-        return deleted
-
-    @Slot(str, result="QVariantMap")
-    def editorDataFor(self, uid: str) -> Dict[str, Any]:
-        return editor_payload(self._service.get_task(uid))
-
-    @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
-    def saveEditor(self, uid: str, title: str, notes: str, priority: int,
-                   scheduled: bool, is_all_day: bool, date_text: str,
-                   time_text: str, duration_text: str,
-                   completed: bool) -> bool:
-        """Тот же контракт, что у TodayViewModel.saveEditor (общий диалог)."""
-        try:
-            result = save_editor(
-                self._service, uid, title, notes, priority, scheduled,
-                is_all_day, date_text, time_text, duration_text, completed,
-            )
-        except Exception as exc:  # страховка от зависания UI
-            self._set_editor_error(f"Не удалось сохранить задачу: {exc}")
-            return False
-
-        if not result.ok:
-            self._set_editor_error(" ".join(result.errors))
-            return False
-
-        self._set_editor_error("")
-        self._notify_mutation("Сохранено")
-        return True
-
-    @Slot()
-    def clearEditorError(self) -> None:
-        self._set_editor_error("")
-
     # ---- внутреннее ---------------------------------------------------------------
 
-    def _notify_mutation(self, toast: str = "") -> None:
-        self.weekChanged.emit()
-        self.selectionChanged.emit()
-        self.tasksMutated.emit()
-        if toast:
-            self.toastMessage.emit(toast)
-
-    def _set_editor_error(self, message: str) -> None:
-        if self._editor_error != message:
-            self._editor_error = message
-            self.editorErrorChanged.emit()
-
     def _shift_week(self, delta_weeks: int) -> None:
+        self.clearSelection()
         self._week_start += timedelta(days=7 * delta_weeks)
         self.weekChanged.emit()
         self.selectionChanged.emit()
