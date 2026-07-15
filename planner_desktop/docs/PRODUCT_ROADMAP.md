@@ -534,13 +534,33 @@ ordinary sync, restart persistence, `occurrence_event_flood=0`,
 | Compile + collection | PASS | compileall без ошибок; `949 tests collected` |
 | Полный pytest | PASS с известным Windows-исключением | `948 passed`, единственный сбой `tests/test_settings_paths.py::test_macos_data_dir`; не относится к B2 и не исправлялся |
 | QML/fake visual smoke | PASS | 7 screenshots, compact/normal/wide, restart, `qml_warnings=0`, network calls on page-open = 0 |
+| Live-пилот recurring master (реальный Calendar API) | PASS | 15 июля 2026: create → idempotent re-sync → title update → local-only mutations → delete remote/keep local; после пилота повторно `9 passed` focused series-набор, `128 passed` ordinary sync slice, compileall без ошибок; код не менялся |
 
-Live-пилот **не запускался**: изолированный профиль
-`D:\planner-desktop-google-series-live-pilot` и его отдельные тестовые
-credentials отсутствуют, тестовый аккаунт не подтверждён. Старый токен не
-читался и не копировался. Плановый title:
-`TEST Planner Phase 3.2B2 — recurring master pilot`. Это открытый внешний gate,
-а не пройденная проверка.
+Live-пилот **пройден 15 июля 2026 года** на изолированном профиле
+`D:\planner-desktop-google-series-live-pilot` (собственные client_secret,
+token.json и app_desktop.db; старые `Planner/app.db` и `Planner/token.json`
+не читались и не копировались). OAuth выполнен только явным флоу, Google-аккаунт
+явно подтверждён пользователем перед первой записью (идентичность аккаунта в
+документации не фиксируется). Timed-серия
+`TEST Planner Phase 3.2B2 — recurring master pilot`
+(Europe/Moscow, 2026-07-20 09:00–09:15, `RRULE:FREQ=DAILY;INTERVAL=1;COUNT=3`)
+создала ровно один master с детерминированным id
+`plrf214mq1637lfd06cu13gpt77i9t402sflk51jh1it7mq7nr5ss5g` и private
+Planner-маркерами; повторный manual sync без локальных изменений не выполнил
+ни одной записи (etag не изменился, только один pull-list); title-правка
+поставила один UPDATE и обновила тот же master (etag сменился, private
+revision/hash совпали с новым локальным состоянием, recurrence/timezone не
+изменились); completion/tag/priority не поставили ни одной series-операции и
+sync после них не выполнил master-мутаций; явное «удалить в Google, оставить
+локально» отменило master (status `cancelled`, повторное удаление
+идемпотентно), external catalog tombstone, link `detached`, локальная серия и
+завершённая история сохранены. Финальная проверка: 0 событий `TEST Planner`
+в календаре (masters и instances), обе очереди и dead-letter пусты,
+`occurrence_event_flood=0` — materialized occurrences ни разу не получили
+Google id. Каждый write-цикл стоил ровно один master-вызов плюс
+предварительный get (create: get+insert, update: get+patch, delete:
+get+delete; каждый цикл — один pull list); автоматических/фоновых вызовов
+Google — ноль, все вызовы происходили из явных ручных действий.
 
 Скриншоты fake-приёмки:
 
