@@ -25,9 +25,14 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
 from planner_desktop.domain.task import utc_now
+from planner_desktop.domain.series_calendar_link import (
+    PLANNER_PAYLOAD_HASH_PROPERTY,
+    PLANNER_SERIES_UID_PROPERTY,
+)
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CANCELLED,
     CalendarEvent,
+    RemoteMasterConflictError,
     RemoteChangeBatch,
     TerminalGatewayError,
 )
@@ -69,6 +74,15 @@ class FakeCalendarGateway:
         """Прямой доступ к «удалённому» состоянию для ассертов в тестах."""
         event = self._events.get(event_id)
         return replace(event) if event is not None else None
+
+    def get_recurring_master(self, remote_event_id: str) -> Optional[CalendarEvent]:
+        event = self._events.get(remote_event_id)
+        if event is None or event.is_cancelled:
+            return None
+        return replace(
+            event,
+            private_extended_properties=dict(event.private_extended_properties),
+        )
 
     @property
     def events(self) -> List[CalendarEvent]:
@@ -139,6 +153,103 @@ class FakeCalendarGateway:
         self._bump_etag(event)
         event.updated_at = self._tick()
         self._record_change(event)
+
+    # ---- explicit recurring-master contract ---------------------------------
+
+    @staticmethod
+    def _verify_master_owner(
+        current: CalendarEvent, desired: CalendarEvent, remote_event_id: str
+    ) -> None:
+        actual_uid = current.private_extended_properties.get(
+            PLANNER_SERIES_UID_PROPERTY
+        )
+        desired_uid = desired.private_extended_properties.get(
+            PLANNER_SERIES_UID_PROPERTY
+        )
+        if not actual_uid or actual_uid != desired_uid:
+            raise TerminalGatewayError(
+                f"Коллизия Google event id {remote_event_id}: чужой мастер."
+            )
+
+    def insert_recurring_master(
+        self, remote_event_id: str, master_payload: CalendarEvent
+    ) -> CalendarEvent:
+        self.write_call_count += 1
+        self._maybe_fail()
+        if not master_payload.is_recurring_master:
+            raise TerminalGatewayError("Recurring master payload has no recurrence.")
+        existing = self._events.get(remote_event_id)
+        if existing is not None and not existing.is_cancelled:
+            self._verify_master_owner(existing, master_payload, remote_event_id)
+            desired_hash = master_payload.private_extended_properties.get(
+                PLANNER_PAYLOAD_HASH_PROPERTY
+            )
+            actual_hash = existing.private_extended_properties.get(
+                PLANNER_PAYLOAD_HASH_PROPERTY
+            )
+            if desired_hash and desired_hash == actual_hash:
+                return self.get_recurring_master(remote_event_id)
+            raise RemoteMasterConflictError(
+                "Существующий мастер этой серии отличается.",
+                self.get_recurring_master(remote_event_id),
+            )
+        stored = replace(
+            master_payload,
+            id=remote_event_id,
+            etag='"1"',
+            status="confirmed",
+            updated_at=self._tick(),
+            private_extended_properties=dict(
+                master_payload.private_extended_properties
+            ),
+        )
+        self._events[remote_event_id] = stored
+        self._record_change(stored)
+        return self.get_recurring_master(remote_event_id)
+
+    def patch_recurring_master(
+        self,
+        remote_event_id: str,
+        master_payload: CalendarEvent,
+        *,
+        expected_etag: Optional[str] = None,
+    ) -> CalendarEvent:
+        self.write_call_count += 1
+        self._maybe_fail()
+        current = self._events.get(remote_event_id)
+        if current is None or current.is_cancelled:
+            raise RemoteMasterConflictError("Связанный мастер удалён.")
+        self._verify_master_owner(current, master_payload, remote_event_id)
+        desired_hash = master_payload.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        current_hash = current.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        if desired_hash and desired_hash == current_hash:
+            return self.get_recurring_master(remote_event_id)
+        if expected_etag and current.etag != expected_etag:
+            raise RemoteMasterConflictError(
+                "Мастер изменён вне Planner.",
+                self.get_recurring_master(remote_event_id),
+            )
+        private = dict(current.private_extended_properties)
+        private.update(master_payload.private_extended_properties)
+        updated = replace(
+            master_payload,
+            id=remote_event_id,
+            etag=current.etag,
+            status="confirmed",
+            private_extended_properties=private,
+        )
+        self._bump_etag(updated)
+        updated.updated_at = self._tick()
+        self._events[remote_event_id] = updated
+        self._record_change(updated)
+        return self.get_recurring_master(remote_event_id)
+
+    def delete_recurring_master(self, remote_event_id: str) -> None:
+        self.delete_event(remote_event_id)
 
     def list_changes(self, cursor: Optional[str]) -> RemoteChangeBatch:
         self.list_call_count += 1

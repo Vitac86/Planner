@@ -50,10 +50,18 @@ from planner_desktop.domain.google_recurrence import (
     recurrence_to_google_lines as _pure_recurrence_to_google_lines,
 )
 from planner_desktop.domain.recurrence import RecurrenceRule, SeriesSchedule
+from planner_desktop.domain.series_calendar_link import (
+    PLANNER_PAYLOAD_HASH_PROPERTY,
+    PLANNER_SERIES_UID_PROPERTY,
+)
+from planner_desktop.sync.calendar_series_mapper import (
+    master_event_to_owned_payload,
+)
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CONFIRMED,
     CalendarEvent,
     RemoteChangeBatch,
+    RemoteMasterConflictError,
     RetryableGatewayError,
     TerminalGatewayError,
 )
@@ -175,18 +183,14 @@ def recurring_master_to_insert_body(event: CalendarEvent) -> Dict[str, Any]:
     """
     if not event.is_recurring_master:
         raise ValueError("CalendarEvent is not a recurring master.")
-    body = event_to_insert_body(event)
-    body["recurrence"] = list(event.recurrence_lines)
-    return body
+    return master_event_to_owned_payload(event)
 
 
 def recurring_master_patch_to_body(event: CalendarEvent) -> Dict[str, Any]:
     """Pure future master patch body; unused by real patch_event in B1."""
     if not event.is_recurring_master:
         raise ValueError("CalendarEvent is not a recurring master.")
-    body = event_to_insert_body(event)
-    body["recurrence"] = list(event.recurrence_lines)
-    return body
+    return master_event_to_owned_payload(event)
 
 
 def patch_to_body(patch: Mapping[str, Any]) -> Dict[str, Any]:
@@ -289,6 +293,12 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
         start_timezone=start_raw.get("timeZone"),
         end_timezone=end_raw.get("timeZone"),
         recurrence_start=recurrence_start,
+        private_extended_properties={
+            str(key): str(value)
+            for key, value in (
+                ((item.get("extendedProperties") or {}).get("private") or {})
+            ).items()
+        },
     )
 
 
@@ -349,6 +359,144 @@ class GoogleCalendarGateway:
             if _http_status(exc) in (404, 410):
                 return  # уже удалено/отменено — идемпотентный успех
             raise _classify(exc, f"delete_event {event_id}") from exc
+
+    # ---- explicit recurring-master writes (Phase 3.2B2) ---------------------
+
+    @staticmethod
+    def _verify_master_owner(
+        remote: CalendarEvent, desired: CalendarEvent, remote_event_id: str
+    ) -> None:
+        expected_uid = desired.private_extended_properties.get(
+            PLANNER_SERIES_UID_PROPERTY
+        )
+        actual_uid = remote.private_extended_properties.get(
+            PLANNER_SERIES_UID_PROPERTY
+        )
+        if not actual_uid or actual_uid != expected_uid:
+            raise TerminalGatewayError(
+                "Коллизия Google event id: существующий мастер "
+                f"{remote_event_id} принадлежит другой серии."
+            )
+
+    def get_recurring_master(
+        self, remote_event_id: str
+    ) -> Optional[CalendarEvent]:
+        try:
+            item = self._service.events().get(
+                calendarId=self._calendar_id, eventId=remote_event_id,
+            ).execute()
+        except Exception as exc:
+            if _http_status(exc) in (404, 410):
+                return None
+            raise _classify(exc, f"get_recurring_master {remote_event_id}") from exc
+        event = payload_to_event(item)
+        if event.is_cancelled:
+            return None
+        return event
+
+    def insert_recurring_master(
+        self, remote_event_id: str, master_payload: CalendarEvent
+    ) -> CalendarEvent:
+        body = recurring_master_to_insert_body(master_payload)
+        body["id"] = remote_event_id
+        try:
+            item = self._service.events().insert(
+                calendarId=self._calendar_id, body=body,
+            ).execute()
+            return payload_to_event(item)
+        except Exception as exc:
+            if _http_status(exc) != 409:
+                raise _classify(
+                    exc, f"insert_recurring_master {remote_event_id}"
+                ) from exc
+
+        # Deterministic ID retry: reconcile the one existing resource.  Never
+        # fall back to a random second master.
+        remote = self.get_recurring_master(remote_event_id)
+        if remote is None:
+            raise TerminalGatewayError(
+                f"Google сообщил коллизию id {remote_event_id}, но мастер не найден."
+            )
+        self._verify_master_owner(remote, master_payload, remote_event_id)
+        desired_hash = master_payload.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        remote_hash = remote.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        if desired_hash and remote_hash == desired_hash:
+            return remote
+        raise RemoteMasterConflictError(
+            "Мастер с детерминированным id уже принадлежит этой серии, "
+            "но его содержимое отличается.",
+            remote,
+        )
+
+    def patch_recurring_master(
+        self,
+        remote_event_id: str,
+        master_payload: CalendarEvent,
+        *,
+        expected_etag: Optional[str] = None,
+    ) -> CalendarEvent:
+        current = self.get_recurring_master(remote_event_id)
+        if current is None:
+            raise RemoteMasterConflictError(
+                "Связанный мастер Google был удалён.", None
+            )
+        self._verify_master_owner(current, master_payload, remote_event_id)
+        desired_hash = master_payload.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        current_hash = current.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        if desired_hash and current_hash == desired_hash:
+            return current  # remote-success/local-persistence-failure retry
+        if expected_etag and current.etag != expected_etag:
+            raise RemoteMasterConflictError(
+                "Мастер Google изменён вне Planner; автоматическая перезапись запрещена.",
+                current,
+            )
+
+        body = recurring_master_patch_to_body(master_payload)
+        private = dict(current.private_extended_properties)
+        private.update(master_payload.private_extended_properties)
+        body["extendedProperties"] = {"private": private}
+        try:
+            request = self._service.events().patch(
+                calendarId=self._calendar_id,
+                eventId=remote_event_id,
+                body=body,
+            )
+            headers = getattr(request, "headers", None)
+            if expected_etag and isinstance(headers, dict):
+                headers["If-Match"] = expected_etag
+            item = request.execute()
+        except Exception as exc:
+            if _http_status(exc) in (409, 412):
+                raise RemoteMasterConflictError(
+                    "Google отклонил условное обновление: мастер изменён.",
+                    self.get_recurring_master(remote_event_id),
+                ) from exc
+            raise _classify(
+                exc, f"patch_recurring_master {remote_event_id}"
+            ) from exc
+        return payload_to_event(item)
+
+    def delete_recurring_master(self, remote_event_id: str) -> None:
+        # Same idempotent HTTP semantics as ordinary delete, but a separate
+        # method keeps user intent and the series queue explicit.
+        try:
+            self._service.events().delete(
+                calendarId=self._calendar_id, eventId=remote_event_id,
+            ).execute()
+        except Exception as exc:
+            if _http_status(exc) in (404, 410):
+                return
+            raise _classify(
+                exc, f"delete_recurring_master {remote_event_id}"
+            ) from exc
 
     # ---- pull -------------------------------------------------------------------
 

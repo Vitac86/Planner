@@ -139,6 +139,29 @@ class CalendarGateway(Protocol):
 
 
 @runtime_checkable
+class RecurringMasterGateway(Protocol):
+    """Explicit recurring-master writes; ordinary event methods stay separate."""
+
+    def insert_recurring_master(
+        self, remote_event_id: str, master_payload: CalendarEvent
+    ) -> CalendarEvent: ...
+
+    def get_recurring_master(
+        self, remote_event_id: str
+    ) -> Optional[CalendarEvent]: ...
+
+    def patch_recurring_master(
+        self,
+        remote_event_id: str,
+        master_payload: CalendarEvent,
+        *,
+        expected_etag: Optional[str] = None,
+    ) -> CalendarEvent: ...
+
+    def delete_recurring_master(self, remote_event_id: str) -> None: ...
+
+
+@runtime_checkable
 class CalendarEventMapper(Protocol):
     """Чистое преобразование Task <-> событие Calendar. Без сети."""
 
