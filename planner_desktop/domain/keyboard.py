@@ -25,6 +25,7 @@ from typing import Tuple
 _WINDOW_SHORTCUTS: dict[str, bool] = {
     "new_task": False,          # Ctrl+N
     "new_scheduled_task": False,  # Ctrl+Shift+N
+    "new_from_template": False,  # Ctrl+Alt+N — новая задача из шаблона
     "quick_add": False,         # Ctrl+K
     "refresh": False,           # Ctrl+R — только локальные модели, НЕ синк
     "search": False,            # Ctrl+F

@@ -29,6 +29,12 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
+from planner_desktop.domain.templates import (
+    SCHEDULE_MODE_NONE,
+    TEMPLATE_KIND_ORDINARY,
+    TEMPLATE_KIND_RECURRING,
+    TaskTemplate,
+)
 from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.manual_sync_service import (
     LAST_SYNC_AT_KEY,
@@ -39,6 +45,7 @@ from planner_desktop.usecases.manual_sync_service import (
 )
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.usecases.tag_service import TagService
+from planner_desktop.viewmodels.series_rows import rule_from_map, rule_to_map
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +95,7 @@ class SettingsViewModel(QObject):
     tasksMutated = Signal()  # pull мог создать/изменить задачи — освежить страницы
     toastMessage = Signal(str)
     tagStateChanged = Signal()
+    templateStateChanged = Signal()
 
     def __init__(self, service: DesktopTaskService,
                  daily_service: DailyTaskService | None = None,
@@ -111,6 +119,8 @@ class SettingsViewModel(QObject):
         self._live_error_set = False
         self._tag_busy = False
         self._tag_error = ""
+        self._template_busy = False
+        self._template_error = ""
 
     # ---- общие сведения ---------------------------------------------------------
 
@@ -292,6 +302,7 @@ class SettingsViewModel(QObject):
         self.stateChanged.emit()
         self.syncStateChanged.emit()
         self.tagStateChanged.emit()
+        self.templateStateChanged.emit()
 
     # ---- локальные теги --------------------------------------------------------
 
@@ -374,6 +385,233 @@ class SettingsViewModel(QObject):
         self.tasksMutated.emit()
         self.toastMessage.emit(success_message)
         return True
+
+    # ---- шаблоны задач (Phase 3.2A) ------------------------------------------------
+
+    @Property(str, constant=True)
+    def templateNote(self) -> str:
+        return (
+            "Шаблоны хранятся только в Planner Desktop и не отправляются "
+            "в Google Calendar. Применение шаблона предзаполняет редактор; "
+            "правка шаблона не меняет уже созданные задачи."
+        )
+
+    def _template_service(self):
+        return getattr(self._service, "template_service", None)
+
+    @Property("QVariantList", notify=templateStateChanged)
+    def templates(self):
+        service = self._template_service()
+        if service is None:
+            return []
+        rows = []
+        for item in service.list_templates():
+            rows.append({
+                "uid": item.uid,
+                "name": item.name,
+                "kind": item.kind,
+                "kindLabel": (
+                    "Повторяющаяся серия" if item.is_recurring else "Обычная задача"
+                ),
+                "title": item.title,
+                "isRecurring": item.is_recurring,
+            })
+        return rows
+
+    @Property(int, notify=templateStateChanged)
+    def templateCount(self) -> int:
+        return len(self.templates)
+
+    @Property(bool, notify=templateStateChanged)
+    def templateBusy(self) -> bool:
+        return self._template_busy
+
+    @Property(str, notify=templateStateChanged)
+    def templateError(self) -> str:
+        return self._template_error
+
+    @Slot(str, result="QVariantMap")
+    def templateDataFor(self, uid: str):
+        """Данные шаблона для TemplateEditorDialog (пустая форма для '')."""
+        service = self._template_service()
+        template = service.get_template(uid) if service and uid else None
+        if template is None:
+            return {
+                "exists": False,
+                "uid": "",
+                "name": "",
+                "kind": TEMPLATE_KIND_ORDINARY,
+                "title": "",
+                "notes": "",
+                "priority": 0,
+                "scheduleMode": SCHEDULE_MODE_NONE,
+                "timeText": "",
+                "durationText": "",
+                "tagIds": [],
+                "rule": rule_to_map(None),
+            }
+        tag_ids = list(service.repository.tag_ids_for_template(uid))
+        return {
+            "exists": True,
+            "uid": template.uid,
+            "name": template.name,
+            "kind": template.kind,
+            "title": template.title,
+            "notes": template.notes,
+            "priority": template.priority,
+            "scheduleMode": template.schedule_mode,
+            "timeText": template.time_text,
+            "durationText": (
+                str(template.duration_minutes)
+                if template.duration_minutes else ""
+            ),
+            "tagIds": tag_ids,
+            "rule": rule_to_map(template.rule),
+        }
+
+    def _template_from_map(self, data) -> TaskTemplate:
+        data = dict(data or {})
+        kind = str(data.get("kind") or TEMPLATE_KIND_ORDINARY)
+        duration_text = str(data.get("durationText") or "").strip()
+        duration = int(duration_text) if duration_text.isdigit() else None
+        rule = None
+        if kind == TEMPLATE_KIND_RECURRING:
+            rule = rule_from_map(data.get("rule") or {})
+        return TaskTemplate(
+            name=str(data.get("name") or ""),
+            kind=kind,
+            title=str(data.get("title") or "").strip(),
+            notes=str(data.get("notes") or "").strip(),
+            priority=int(data.get("priority") or 0),
+            schedule_mode=str(data.get("scheduleMode") or SCHEDULE_MODE_NONE),
+            time_text=str(data.get("timeText") or "").strip(),
+            duration_minutes=duration,
+            rule=rule,
+        )
+
+    @staticmethod
+    def _template_tag_ids(data) -> Optional[list]:
+        raw = dict(data or {}).get("tagIds")
+        if raw is None:
+            return None
+        return [int(item) for item in raw]
+
+    @Slot("QVariantMap", result=bool)
+    def createTemplate(self, data) -> bool:
+        return self._template_action(
+            lambda service: service.create_template(
+                self._template_from_map(data),
+                tag_ids=self._template_tag_ids(data),
+            ),
+            "Шаблон создан",
+        )
+
+    @Slot(str, "QVariantMap", result=bool)
+    def updateTemplate(self, uid: str, data) -> bool:
+        return self._template_action(
+            lambda service: service.update_template(
+                uid,
+                self._template_from_map(data),
+                tag_ids=self._template_tag_ids(data),
+            ),
+            "Шаблон изменён",
+        )
+
+    @Slot(str, result=bool)
+    def duplicateTemplate(self, uid: str) -> bool:
+        return self._template_action(
+            lambda service: service.duplicate_template(uid),
+            "Копия шаблона создана",
+        )
+
+    @Slot(str, result=bool)
+    def deleteTemplate(self, uid: str) -> bool:
+        """Удаляет только шаблон: созданные из него задачи/серии остаются."""
+        def operation(service):
+            ok = service.delete_template(uid)
+            if not ok:
+                raise KeyError("Шаблон не найден.")
+            return ok
+        return self._template_action(
+            operation, "Шаблон удалён; созданные задачи сохранены"
+        )
+
+    @Slot()
+    def clearTemplateError(self) -> None:
+        if self._template_error:
+            self._template_error = ""
+            self.templateStateChanged.emit()
+
+    def _template_action(self, operation, success_message: str) -> bool:
+        if self._template_busy:
+            return False
+        service = self._template_service()
+        if service is None:
+            self._template_error = "Сервис шаблонов недоступен."
+            self.templateStateChanged.emit()
+            return False
+        self._template_busy = True
+        self.templateStateChanged.emit()
+        try:
+            result = operation(service)
+            errors = getattr(result, "errors", None)
+            if errors:
+                self._template_error = " ".join(errors)
+                return False
+        except Exception as exc:
+            self._template_error = str(exc)
+            return False
+        finally:
+            self._template_busy = False
+            self.templateStateChanged.emit()
+        self._template_error = ""
+        self.templateStateChanged.emit()
+        self.toastMessage.emit(success_message)
+        return True
+
+    # ---- диагностика локальных серий (Phase 3.2A) ----------------------------------
+
+    @Property(str, constant=True)
+    def seriesNote(self) -> str:
+        return (
+            "Локальные серии не синхронизируются с Google Calendar в этой "
+            "фазе: экземпляры существуют только в Planner Desktop."
+        )
+
+    def _recurrence_service(self):
+        return getattr(self._service, "recurrence_service", None)
+
+    def _series_diagnostics(self) -> dict:
+        service = self._recurrence_service()
+        if service is None:
+            return {"active_series": 0, "occurrences": 0, "exceptions": 0}
+        try:
+            return service.diagnostics()
+        except Exception:
+            logger.exception("Не удалось прочитать диагностику серий")
+            return {"active_series": 0, "occurrences": 0, "exceptions": 0}
+
+    @Property(int, notify=stateChanged)
+    def activeSeriesCount(self) -> int:
+        return int(self._series_diagnostics().get("active_series", 0))
+
+    @Property(int, notify=stateChanged)
+    def seriesOccurrenceCount(self) -> int:
+        return int(self._series_diagnostics().get("occurrences", 0))
+
+    @Property(int, notify=stateChanged)
+    def seriesExceptionCount(self) -> int:
+        return int(self._series_diagnostics().get("exceptions", 0))
+
+    @Property(str, notify=stateChanged)
+    def materializationHorizonText(self) -> str:
+        materializer = getattr(self._service, "materializer", None)
+        if materializer is None:
+            return "—"
+        covered_end = materializer.covered_end
+        if covered_end is None:
+            return "ещё не материализовано"
+        return covered_end.strftime("%d.%m.%Y")
 
     # ---- внутреннее -------------------------------------------------------------------
 

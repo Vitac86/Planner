@@ -12,16 +12,25 @@ from planner_desktop.repositories.daily_task_repository import (
     InMemoryDailyTaskRepository,
 )
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
+from planner_desktop.repositories.series_repository import InMemorySeriesRepository
 from planner_desktop.repositories.tag_repository import InMemoryTagRepository
+from planner_desktop.repositories.template_repository import (
+    InMemoryTemplateRepository,
+)
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
+from planner_desktop.storage.series_repository import SQLiteSeriesRepository
 from planner_desktop.storage.sqlite_daily_task_repository import (
     SQLiteDailyTaskRepository,
 )
 from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
 from planner_desktop.storage.tag_repository import SQLiteTagRepository
+from planner_desktop.storage.template_repository import SQLiteTemplateRepository
 from planner_desktop.usecases.daily_task_service import DailyTaskService
+from planner_desktop.usecases.occurrence_materializer import OccurrenceMaterializer
+from planner_desktop.usecases.recurrence_service import RecurrenceService
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.usecases.tag_service import TagService
+from planner_desktop.usecases.template_service import TemplateService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
 from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
@@ -81,6 +90,24 @@ class MainWindow:
             self.tag_repository = InMemoryTagRepository()
         self.tag_service = TagService(self.tag_repository, self.repository)
         self.service.tag_service = self.tag_service
+
+        # Локальные серии и шаблоны (Phase 3.2A). Строго локальны:
+        # ни Calendar-очереди, ни Google. SQLite-режим делит ту же БД.
+        if isinstance(self.repository, SQLiteTaskRepository):
+            series_repository = SQLiteSeriesRepository(self.repository.db_path)
+            template_repository = SQLiteTemplateRepository(self.repository.db_path)
+        else:
+            series_repository = InMemorySeriesRepository()
+            template_repository = InMemoryTemplateRepository()
+        self.recurrence_service = RecurrenceService(
+            series_repository, self.repository, tag_service=self.tag_service)
+        self.template_service = TemplateService(
+            template_repository, tag_service=self.tag_service)
+        self.materializer = OccurrenceMaterializer(self.recurrence_service)
+        self.service.recurrence_service = self.recurrence_service
+        self.service.template_service = self.template_service
+        self.service.materializer = self.materializer
+
         self.today_viewmodel = TodayViewModel(
             service=self.service, daily_service=self.daily_service)
         self.calendar_viewmodel = CalendarViewModel(

@@ -77,6 +77,21 @@ Rectangle {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
             }
+            AppIcon {
+                visible: block.eventData.isSeriesOccurrence === true
+                         || block.eventData.isRecurring === true
+                name: "repeat"
+                size: 11
+                color: block.eventData.isRecurring === true
+                       ? Theme.textSecondary : Theme.accent
+                ToolTip.visible: seriesIconHover.hovered
+                ToolTip.text: block.eventData.isRecurring === true
+                              ? "Серия Google"
+                              : (block.eventData.isSeriesException === true
+                                 ? "Локальная серия (экземпляр изменён)"
+                                 : "Локальная серия")
+                HoverHandler { id: seriesIconHover }
+            }
             Rectangle {
                 visible: block.eventData.hasPendingSync === true
                          || block.eventData.hasDeadLetter === true

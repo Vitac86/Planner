@@ -7,12 +7,18 @@ import "../theme"
 
 ScrollView {
     id: page
+    objectName: "settingsPage"
     contentWidth: availableWidth
     clip: true
     readonly property bool compact: availableWidth < 700
 
     // Счётчики очереди могли измениться на других страницах.
     onVisibleChanged: if (visible) settingsVm.refresh()
+
+    function scrollToTemplates() {
+        if (contentItem)
+            contentItem.contentY = Math.max(0, templateManagement.y - Theme.spacingLg)
+    }
 
     // Карточка «иконка + название настройки + значение».
     component SettingRow: Panel {
@@ -232,6 +238,216 @@ ScrollView {
                     color: Theme.textMuted
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
+                }
+            }
+        }
+
+        // ---- Шаблоны задач (Phase 3.2A) ----
+        Panel {
+            id: templateManagement
+            objectName: "settingsTemplateManagement"
+            Layout.fillWidth: true
+            implicitHeight: templateColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: templateColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    AppIcon { name: "template"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: "Шаблоны"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                        }
+                        Label {
+                            text: settingsVm.templateNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                    Badge { text: String(settingsVm.templateCount) }
+                    AppButton {
+                        text: page.compact ? "" : "Создать шаблон"
+                        iconName: "plus"
+                        variant: "secondary"
+                        enabled: !settingsVm.templateBusy
+                        Accessible.name: "Создать шаблон задачи"
+                        onClicked: templateEditor.openForCreate()
+                    }
+                }
+
+                Label {
+                    visible: settingsVm.templateError.length > 0
+                    text: settingsVm.templateError
+                    font.pixelSize: Theme.fontCaption
+                    font.family: Theme.fontFamily
+                    color: Theme.danger
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    Accessible.role: Accessible.AlertMessage
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    visible: settingsVm.templateCount > 0
+                    Repeater {
+                        model: settingsVm.templates
+                        delegate: Rectangle {
+                            id: templateRow
+                            required property var modelData
+                            Layout.fillWidth: true
+                            implicitHeight: templateRowContent.implicitHeight
+                                            + 2 * Theme.spacingSm
+                            radius: Theme.radiusSmall
+                            color: Theme.surfaceMuted
+                            border.color: Theme.border
+                            border.width: 1
+
+                            RowLayout {
+                                id: templateRowContent
+                                anchors.fill: parent
+                                anchors.margins: Theme.spacingSm
+                                spacing: Theme.spacingSm
+
+                                AppIcon {
+                                    name: templateRow.modelData.isRecurring
+                                          ? "repeat" : "template"
+                                    size: 15
+                                    color: templateRow.modelData.isRecurring
+                                           ? Theme.accent : Theme.textSecondary
+                                }
+                                ColumnLayout {
+                                    spacing: 0
+                                    Layout.fillWidth: true
+                                    Label {
+                                        text: templateRow.modelData.name
+                                        font.pixelSize: Theme.fontBody
+                                        font.family: Theme.fontFamily
+                                        font.weight: Font.Medium
+                                        color: Theme.textPrimary
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: templateRow.modelData.kindLabel
+                                        font.pixelSize: Theme.fontCaption - 1
+                                        font.family: Theme.fontFamily
+                                        color: Theme.textMuted
+                                    }
+                                }
+                                AppButton {
+                                    text: page.compact ? "" : "Изменить"
+                                    iconName: "edit"
+                                    variant: "ghost"
+                                    enabled: !settingsVm.templateBusy
+                                    Accessible.name: "Изменить шаблон «"
+                                        + templateRow.modelData.name + "»"
+                                    onClicked: templateEditor.openForEdit(
+                                        templateRow.modelData.uid)
+                                }
+                                AppButton {
+                                    text: page.compact ? "" : "Дублировать"
+                                    iconName: "plus"
+                                    variant: "ghost"
+                                    enabled: !settingsVm.templateBusy
+                                    Accessible.name: "Дублировать шаблон «"
+                                        + templateRow.modelData.name + "»"
+                                    onClicked: settingsVm.duplicateTemplate(
+                                        templateRow.modelData.uid)
+                                }
+                                IconButton {
+                                    iconName: "trash"
+                                    tip: "Удалить шаблон «"
+                                         + templateRow.modelData.name + "»"
+                                    Accessible.name: tip
+                                    onClicked: templateDeleteDialog.openFor(
+                                        templateRow.modelData.uid)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Label {
+                    visible: settingsVm.templateCount === 0
+                    text: "Шаблонов пока нет. Шаблон предзаполняет редактор "
+                          + "новой задачи или повторяющейся серии."
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+            }
+        }
+
+        // ---- Локальные серии: диагностика (Phase 3.2A) ----
+        Panel {
+            objectName: "settingsSeriesDiagnostics"
+            Layout.fillWidth: true
+            implicitHeight: seriesColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: seriesColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    AppIcon { name: "repeat"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: "Локальные серии"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                        }
+                        Label {
+                            text: settingsVm.seriesNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+
+                    Badge {
+                        text: "Активных серий: " + settingsVm.activeSeriesCount
+                        fg: Theme.accent
+                        bg: Theme.accentSoft
+                    }
+                    Badge {
+                        text: "Экземпляров: " + settingsVm.seriesOccurrenceCount
+                    }
+                    Badge {
+                        text: "Исключений: " + settingsVm.seriesExceptionCount
+                    }
+                    Badge {
+                        text: "Горизонт: " + settingsVm.materializationHorizonText
+                    }
                 }
             }
         }
@@ -704,5 +920,18 @@ ScrollView {
         headerText: "Удалить тег?"
         message: "Тег будет убран у всех задач, но сами задачи останутся. Это локальное изменение не отправляется в Google Calendar."
         onConfirmed: uid => settingsVm.deleteTag(parseInt(uid))
+    }
+
+    ConfirmDialog {
+        id: templateDeleteDialog
+        headerText: "Удалить шаблон?"
+        message: "Будет удалён только шаблон: задачи и серии, созданные из него, останутся без изменений."
+        onConfirmed: uid => settingsVm.deleteTemplate(uid)
+    }
+
+    TemplateEditorDialog {
+        id: templateEditor
+        settingsVm: settingsVm
+        actionsVm: todayVm
     }
 }

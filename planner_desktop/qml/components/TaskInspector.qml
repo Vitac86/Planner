@@ -20,10 +20,14 @@ Panel {
     property var taskPresets: []
     property bool busy: false
 
+    // Сводка правила серии для экземпляра локальной серии (или "").
+    property string seriesSummary: ""
+
     signal editRequested(string uid)
     signal toggleRequested(string uid)
     signal deleteRequested(string uid)
     signal duplicateRequested(string uid)
+    signal duplicateSeriesRequested(string seriesUid)
     signal postponeRequested(string uid, string action)
     signal presetRequested(string uid, string presetId)
     signal pickRequested(string uid)
@@ -138,6 +142,17 @@ Panel {
                 fg: inspector._completed ? Theme.success : Theme.textSecondary
                 bg: inspector._completed ? Theme.successSoft : Theme.surfacePressed
             }
+            SeriesBadge {
+                isLocalSeries: !!(inspector.task && inspector.task.isSeriesOccurrence)
+                isGoogleSeries: !!(inspector.task && inspector.task.isRecurring)
+                isException: !!(inspector.task && inspector.task.isSeriesException)
+            }
+        }
+
+        SeriesSummary {
+            summary: inspector.seriesSummary
+            visible: inspector.seriesSummary.length > 0
+            Layout.fillWidth: true
         }
 
         Flow {
@@ -406,6 +421,17 @@ Panel {
                 enabled: !inspector.busy
                 onClicked: inspector.deleteRequested(inspector._uid)
             }
+        }
+        AppButton {
+            visible: !!(inspector.task && inspector.task.isSeriesOccurrence)
+            Layout.fillWidth: true
+            text: "Создать копию серии"
+            variant: "secondary"
+            iconName: "repeat"
+            enabled: !inspector.busy
+            Accessible.name: "Создать независимую копию всей серии"
+            onClicked: inspector.duplicateSeriesRequested(
+                inspector.task ? inspector.task.seriesUid : "")
         }
         }
     }

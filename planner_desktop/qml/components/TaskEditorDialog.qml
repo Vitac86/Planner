@@ -20,12 +20,30 @@ import "../theme"
 // Клавиатура: Enter в полях названия/времени сохраняет, Ctrl+S сохраняет,
 // Esc закрывает. Кнопки выключаются на время операции (vm.busy).
 Dialog {
-    id: dialog
+    id: taskEditorDialog
 
     property var vm
     property bool isEdit: false
     property string taskUid: ""
     property bool recurringInstance: false
+    property bool linkedTask: false
+
+    // Экземпляр ЛОКАЛЬНОЙ серии (Phase 3.2A): сохранение всегда идёт через
+    // явный выбор области изменений (SeriesScopeDialog).
+    property bool seriesOccurrence: false
+    property bool seriesException: false
+    property string seriesUid: ""
+    property string seriesSummaryText: ""
+    property string seriesTimezone: ""
+    // Повторение для НОВОЙ задачи: включается тумблером, сохраняется
+    // как локальная серия (vm.saveEditorAsSeries).
+    property bool recurEnabled: false
+    // Снимки исходного состояния для детекции изменений расписания/правила.
+    property string _origScheduleJson: ""
+    property string _origRuleJson: ""
+    property var _scopeDialogObject: null
+    property var _deleteSeriesConfirmObject: null
+    property var _templatePickerObject: null
 
     // Режим планирования: "none" | "allday" | "timed" (domain/scheduling.py).
     property string schedMode: "none"
@@ -80,22 +98,47 @@ Dialog {
     // Ctrl+S сохраняет, пока диалог открыт (и не мешает окну, когда закрыт).
     Shortcut {
         sequence: "Ctrl+S"
-        enabled: dialog.visible
-        onActivated: dialog.submit()
+        enabled: taskEditorDialog.visible
+        onActivated: taskEditorDialog.submit()
     }
 
     // ---- открытие ----------------------------------------------------------
 
+    function _prepareNestedPopups() {
+        if (!taskEditorDialog._scopeDialogObject)
+            taskEditorDialog._scopeDialogObject =
+                scopeDialogFactory.createObject(taskEditorDialog.parent)
+        if (!taskEditorDialog._deleteSeriesConfirmObject)
+            taskEditorDialog._deleteSeriesConfirmObject =
+                deleteSeriesConfirmFactory.createObject(taskEditorDialog.parent)
+        if (!taskEditorDialog._templatePickerObject)
+            taskEditorDialog._templatePickerObject =
+                templatePickerFactory.createObject(taskEditorDialog.parent)
+    }
+
     function _resetForm(data) {
+        taskEditorDialog._prepareNestedPopups()
         titleField.text = data.title || ""
         notesArea.text = data.notes || ""
-        dialog._setPriority(data.priority || 0)
-        dialog.schedMode = data.mode || "none"
+        taskEditorDialog._setPriority(data.priority || 0)
+        taskEditorDialog.schedMode = data.mode || "none"
         dateField.dateText = data.dateText || ""
         timeField.timeText = data.timeText || ""
         durationPicker.reset(data.durationText || "")
         completedCheck.checked = !!data.completed
         tagPicker.reset(data.tagIds || [])
+        taskEditorDialog.linkedTask = !!data.isLinked
+        taskEditorDialog.seriesOccurrence = !!data.isSeriesOccurrence
+        taskEditorDialog.seriesException = !!data.isSeriesException
+        taskEditorDialog.seriesUid = data.seriesUid || ""
+        taskEditorDialog.seriesSummaryText = data.seriesSummary || ""
+        taskEditorDialog.seriesTimezone = data.timezoneName || ""
+        taskEditorDialog.recurEnabled = !!data.recurring || taskEditorDialog.seriesOccurrence
+        ruleEditor.reset(data.rule || {},
+                         (data.recurring || data.isSeriesOccurrence) ? "custom" : "")
+        taskEditorDialog._origScheduleJson = taskEditorDialog._scheduleJson()
+        taskEditorDialog._origRuleJson = JSON.stringify(ruleEditor.ruleMap())
+        taskEditorDialog._updateRecurrenceSummary()
         vm.clearEditorError()
         Qt.callLater(function() {
             if (formScroll.contentItem)
@@ -111,6 +154,26 @@ Dialog {
             mode: (prefillDateText && prefillDateText.length > 0) ? "allday" : "none",
             dateText: prefillDateText || ""
         })
+        open()
+        titleField.forceActiveFocus()
+    }
+
+    function openTemplatePicker() {
+        taskEditorDialog._prepareNestedPopups()
+        taskEditorDialog._templatePickerObject.templates =
+            taskEditorDialog.vm ? taskEditorDialog.vm.taskTemplates : []
+        taskEditorDialog._templatePickerObject.open()
+    }
+
+    // Создание из шаблона: форма предзаполнена, ничего не сохранено
+    // до явного «Создать». data — vm.templatePrefill(uid).
+    function openFromTemplate(data) {
+        if (!data || !data.exists)
+            return
+        isEdit = false
+        taskUid = ""
+        recurringInstance = false
+        _resetForm(data)
         open()
         titleField.forceActiveFocus()
     }
@@ -144,14 +207,62 @@ Dialog {
         titleField.forceActiveFocus()
     }
 
+    // ---- повторение (локальные серии, Phase 3.2A) ------------------------
+
+    function _scheduleJson() {
+        return JSON.stringify([
+            taskEditorDialog.schedMode, dateField.dateText, timeField.timeText,
+            durationPicker.durationText
+        ])
+    }
+
+    function _recurrencePayload() {
+        return {
+            title: titleField.text,
+            notes: notesArea.text,
+            priority: priorityRow.current,
+            scheduled: taskEditorDialog.schedMode !== "none",
+            isAllDay: taskEditorDialog.schedMode === "allday",
+            dateText: taskEditorDialog.schedMode !== "none" ? dateField.dateText : "",
+            timeText: taskEditorDialog.schedMode === "timed" ? timeField.timeText : "",
+            durationText: taskEditorDialog.schedMode === "timed" ? durationPicker.durationText : "",
+            completed: completedCheck.checked,
+            tagIds: tagPicker.selectedIds,
+            rule: ruleEditor.ruleMap()
+        }
+    }
+
+    function _updateRecurrenceSummary() {
+        if (!taskEditorDialog.recurEnabled || taskEditorDialog.recurringInstance || !taskEditorDialog.vm) {
+            ruleEditor.summaryText = ""
+            ruleEditor.errorText = ""
+            return
+        }
+        if (taskEditorDialog.schedMode === "none") {
+            ruleEditor.summaryText = ""
+            ruleEditor.errorText = "Для повторения укажите дату начала."
+            return
+        }
+        var res = taskEditorDialog.vm.recurrenceSummary(taskEditorDialog._recurrencePayload())
+        ruleEditor.summaryText = res.ok ? res.summary : ""
+        ruleEditor.errorText = res.ok ? "" : res.error
+    }
+
+    function _saveScoped(scope) {
+        var ok = taskEditorDialog.vm.saveOccurrenceScoped(
+            taskEditorDialog.taskUid, scope, taskEditorDialog._recurrencePayload())
+        if (ok)
+            taskEditorDialog.close()
+    }
+
     // ---- режимы и пресеты -----------------------------------------------------
 
     function _setMode(value) {
-        if (dialog.recurringInstance)
+        if (taskEditorDialog.recurringInstance)
             return
-        if (value === dialog.schedMode)
+        if (value === taskEditorDialog.schedMode)
             return
-        dialog.schedMode = value
+        taskEditorDialog.schedMode = value
         // Дозаполнение по умолчанию — из Python (DEFAULT_START_TIME и т.п.).
         if (value !== "none"
                 && (dateField.dateText === ""
@@ -165,18 +276,20 @@ Dialog {
                     timeField.timeText = res.timeText
             }
         }
+        taskEditorDialog._updateRecurrenceSummary()
     }
 
     function _applyPreset(presetId) {
-        if (dialog.recurringInstance)
+        if (taskEditorDialog.recurringInstance)
             return
         var res = vm.applyEditorPreset(
-            presetId, dialog.schedMode, dateField.dateText, timeField.timeText)
+            presetId, taskEditorDialog.schedMode, dateField.dateText, timeField.timeText)
         if (!res.ok)
             return
-        dialog.schedMode = res.mode
+        taskEditorDialog.schedMode = res.mode
         dateField.dateText = res.dateText
         timeField.timeText = res.timeText
+        taskEditorDialog._updateRecurrenceSummary()
     }
 
     function _setPriority(p) {
@@ -186,21 +299,72 @@ Dialog {
     function submit() {
         if (vm.busy)
             return
+        // Экземпляр локальной серии: область изменений выбирается ЯВНО,
+        // случайного «применить ко всем будущим» нет.
+        if (taskEditorDialog.isEdit && taskEditorDialog.seriesOccurrence) {
+            var scheduleChanged = taskEditorDialog._scheduleJson() !== taskEditorDialog._origScheduleJson
+            var ruleChanged =
+                JSON.stringify(ruleEditor.ruleMap()) !== taskEditorDialog._origRuleJson
+            taskEditorDialog._scopeDialogObject.openForSave(
+                scheduleChanged, ruleChanged)
+            return
+        }
+        // Новая задача с включённым повторением -> локальная серия.
+        if (!taskEditorDialog.isEdit && taskEditorDialog.recurEnabled && !taskEditorDialog.recurringInstance) {
+            if (vm.saveEditorAsSeries(taskEditorDialog._recurrencePayload()))
+                taskEditorDialog.close()
+            return
+        }
         var ok = vm.saveEditorWithTags(
             taskUid,
             titleField.text,
             notesArea.text,
             priorityRow.current,
-            dialog.schedMode !== "none",
-            dialog.schedMode === "allday",
-            dialog.schedMode !== "none" ? dateField.dateText : "",
-            dialog.schedMode === "timed" ? timeField.timeText : "",
-            dialog.schedMode === "timed" ? durationPicker.durationText : "",
+            taskEditorDialog.schedMode !== "none",
+            taskEditorDialog.schedMode === "allday",
+            taskEditorDialog.schedMode !== "none" ? dateField.dateText : "",
+            taskEditorDialog.schedMode === "timed" ? timeField.timeText : "",
+            taskEditorDialog.schedMode === "timed" ? durationPicker.durationText : "",
             completedCheck.checked,
             tagPicker.selectedIds
         )
         if (ok)
-            dialog.close()
+            taskEditorDialog.close()
+    }
+
+    Component {
+        id: scopeDialogFactory
+        SeriesScopeDialog {
+            objectName: "seriesScopeDialog"
+            onScopeChosen: scope => taskEditorDialog._saveScoped(scope)
+        }
+    }
+
+    Component {
+        id: deleteSeriesConfirmFactory
+        ConfirmDialog {
+            objectName: "seriesDeleteConfirm"
+            headerText: "Удалить локальную серию?"
+            message: "Будущие невыполненные экземпляры будут удалены. "
+                     + "Выполненные экземпляры и прошлая история сохранятся."
+            confirmText: "Удалить серию"
+            onConfirmed: uid => {
+                if (taskEditorDialog.vm.deleteSeries(uid))
+                    taskEditorDialog.close()
+            }
+        }
+    }
+
+    Component {
+        id: templatePickerFactory
+        TemplatePicker {
+            objectName: "taskTemplatePicker"
+            onTemplateChosen: uid => {
+                var data = taskEditorDialog.vm.templatePrefill(uid)
+                if (data && data.exists)
+                    taskEditorDialog._resetForm(data)
+            }
+        }
     }
 
     contentItem: ColumnLayout {
@@ -236,24 +400,38 @@ Dialog {
                 color: Theme.accentSoft
                 AppIcon {
                     anchors.centerIn: parent
-                    name: dialog.isEdit ? "edit" : "plus"
+                    name: taskEditorDialog.isEdit ? "edit" : "plus"
                     color: Theme.accent
                     size: 19
                 }
             }
             Label {
-                text: dialog.isEdit ? "Редактировать задачу" : "Новая задача"
+                text: taskEditorDialog.isEdit ? "Редактировать задачу" : "Новая задача"
                 font.pixelSize: Theme.fontTitle
                 font.family: Theme.fontFamily
                 font.weight: Font.DemiBold
                 color: Theme.textPrimary
                 Layout.alignment: Qt.AlignVCenter
             }
+            SeriesBadge {
+                isLocalSeries: taskEditorDialog.seriesOccurrence
+                isGoogleSeries: taskEditorDialog.recurringInstance
+                isException: taskEditorDialog.seriesException
+                Layout.alignment: Qt.AlignVCenter
+            }
             Item { Layout.fillWidth: true }
+            AppButton {
+                visible: !taskEditorDialog.isEdit
+                text: "Из шаблона"
+                variant: "ghost"
+                iconName: "template"
+                Accessible.name: "Создать из шаблона"
+                onClicked: taskEditorDialog.openTemplatePicker()
+            }
             IconButton {
                 iconName: "close"
                 tip: "Закрыть (Esc)"
-                onClicked: dialog.close()
+                onClicked: taskEditorDialog.close()
             }
         }
 
@@ -263,7 +441,7 @@ Dialog {
             placeholderText: "Что нужно сделать?"
             font.pixelSize: Theme.fontSubtitle + 1
             Layout.fillWidth: true
-            onAccepted: dialog.submit()
+            onAccepted: taskEditorDialog.submit()
         }
 
         // ---- заметки ----
@@ -307,18 +485,18 @@ Dialog {
         }
 
         SegmentedControl {
-            current: dialog.schedMode
-            enabled: !dialog.recurringInstance
+            current: taskEditorDialog.schedMode
+            enabled: !taskEditorDialog.recurringInstance
             options: [
                 { label: "Без даты", value: "none" },
                 { label: "Весь день", value: "allday" },
                 { label: "Со временем", value: "timed" }
             ]
-            onSelected: value => dialog._setMode(value)
+            onSelected: value => taskEditorDialog._setMode(value)
         }
 
         GridLayout {
-            visible: dialog.schedMode !== "none"
+            visible: taskEditorDialog.schedMode !== "none"
             columns: 2
             columnSpacing: Theme.spacingSm
             rowSpacing: Theme.spacingSm
@@ -332,13 +510,14 @@ Dialog {
             }
             DatePickerField {
                 id: dateField
-                enabled: !dialog.recurringInstance
+                enabled: !taskEditorDialog.recurringInstance
                 Layout.fillWidth: true
                 Layout.maximumWidth: 300
+                onDateTextChanged: taskEditorDialog._updateRecurrenceSummary()
             }
 
             Label {
-                visible: dialog.schedMode === "timed"
+                visible: taskEditorDialog.schedMode === "timed"
                 text: "Время"
                 font.pixelSize: Theme.fontCaption
                 font.family: Theme.fontFamily
@@ -346,13 +525,14 @@ Dialog {
             }
             TimePickerField {
                 id: timeField
-                visible: dialog.schedMode === "timed"
-                enabled: !dialog.recurringInstance
-                onAccepted: dialog.submit()
+                visible: taskEditorDialog.schedMode === "timed"
+                enabled: !taskEditorDialog.recurringInstance
+                onAccepted: taskEditorDialog.submit()
+                onTimeTextChanged: taskEditorDialog._updateRecurrenceSummary()
             }
 
             Label {
-                visible: dialog.schedMode === "timed"
+                visible: taskEditorDialog.schedMode === "timed"
                 text: "Длительность"
                 font.pixelSize: Theme.fontCaption
                 font.family: Theme.fontFamily
@@ -362,28 +542,105 @@ Dialog {
             }
             DurationPicker {
                 id: durationPicker
-                visible: dialog.schedMode === "timed"
-                enabled: !dialog.recurringInstance
-                presets: dialog.vm ? dialog.vm.durationPresets : []
+                visible: taskEditorDialog.schedMode === "timed"
+                enabled: !taskEditorDialog.recurringInstance
+                presets: taskEditorDialog.vm ? taskEditorDialog.vm.durationPresets : []
                 Layout.fillWidth: true
             }
         }
 
         SchedulePresetBar {
-            presets: dialog.vm ? dialog.vm.editorPresets : []
-            enabled: !dialog.recurringInstance
-            plusHourEnabled: dialog.schedMode === "timed"
+            presets: taskEditorDialog.vm ? taskEditorDialog.vm.editorPresets : []
+            enabled: !taskEditorDialog.recurringInstance
+            plusHourEnabled: taskEditorDialog.schedMode === "timed"
                              && timeField.timeText.length > 0
-            onTriggered: presetId => dialog._applyPreset(presetId)
+            onTriggered: presetId => taskEditorDialog._applyPreset(presetId)
+            Layout.fillWidth: true
+        }
+
+        // ---- повторение (локальная серия, Phase 3.2A) ----
+        RowLayout {
+            visible: !taskEditorDialog.recurringInstance
+                     && (!taskEditorDialog.isEdit || taskEditorDialog.seriesOccurrence)
+            spacing: Theme.spacingSm
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.spacingXs
+
+            Switch {
+                id: recurSwitch
+                text: "Повторять"
+                font.pixelSize: Theme.fontBody
+                font.family: Theme.fontFamily
+                checked: taskEditorDialog.recurEnabled
+                // Экземпляр существующей серии не «выключается» из серии
+                // тумблером: серией управляют области изменений и действия
+                // «остановить/удалить серию».
+                enabled: !taskEditorDialog.isEdit || !taskEditorDialog.seriesOccurrence
+                Accessible.name: "Повторять задачу"
+                onToggled: {
+                    taskEditorDialog.recurEnabled = checked
+                    if (checked && taskEditorDialog.schedMode === "none")
+                        taskEditorDialog._setMode("allday")
+                    taskEditorDialog._updateRecurrenceSummary()
+                }
+            }
+            Label {
+                visible: taskEditorDialog.recurEnabled && taskEditorDialog.seriesTimezone.length > 0
+                text: "Часовой пояс: " + taskEditorDialog.seriesTimezone
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.textMuted
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+            Label {
+                visible: taskEditorDialog.recurEnabled && taskEditorDialog.seriesTimezone.length === 0
+                         && taskEditorDialog.vm !== undefined && taskEditorDialog.vm !== null
+                text: "Часовой пояс: " + (taskEditorDialog.vm ? taskEditorDialog.vm.localTimezoneName : "")
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.textMuted
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+        }
+
+        Label {
+            visible: taskEditorDialog.seriesOccurrence && taskEditorDialog.seriesSummaryText.length > 0
+            text: "Серия: " + taskEditorDialog.seriesSummaryText
+            font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
+            color: Theme.textSecondary
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        RecurrenceRuleEditor {
+            id: ruleEditor
+            visible: taskEditorDialog.recurEnabled && !taskEditorDialog.recurringInstance
+                     && (!taskEditorDialog.isEdit || taskEditorDialog.seriesOccurrence)
+            presets: taskEditorDialog.vm ? taskEditorDialog.vm.recurrencePresets : []
+            Layout.fillWidth: true
+            onRuleEdited: taskEditorDialog._updateRecurrenceSummary()
+        }
+
+        Label {
+            visible: taskEditorDialog.recurEnabled && !taskEditorDialog.isEdit
+            text: "Локальная серия: повторения существуют только в Planner "
+                  + "Desktop и не отправляются в Google Calendar."
+            font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
+            color: Theme.textMuted
+            wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }
 
         TagPicker {
             id: tagPicker
             Layout.fillWidth: true
-            availableTags: dialog.vm ? dialog.vm.availableTags : []
+            availableTags: taskEditorDialog.vm ? taskEditorDialog.vm.availableTags : []
             onCreateRequested: name => {
-                var result = dialog.vm.createTag(name)
+                var result = taskEditorDialog.vm.createTag(name)
                 handleCreated(result)
             }
         }
@@ -475,7 +732,7 @@ Dialog {
             CheckBox {
                 id: completedCheck
                 text: "Выполнено"
-                visible: dialog.isEdit
+                visible: taskEditorDialog.isEdit
                 font.pixelSize: Theme.fontBody
                 font.family: Theme.fontFamily
             }
@@ -483,7 +740,7 @@ Dialog {
 
         // ---- предупреждение о повторяющемся событии ----
         RowLayout {
-            visible: dialog.recurringInstance
+            visible: taskEditorDialog.recurringInstance
             spacing: Theme.spacingSm
             Layout.fillWidth: true
 
@@ -491,6 +748,24 @@ Dialog {
             Label {
                 text: "Это экземпляр повторяющегося события Google Calendar: "
                       + "снять дату или перенести его нельзя."
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.warningText
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+
+        RowLayout {
+            visible: taskEditorDialog.isEdit && taskEditorDialog.linkedTask
+                     && !taskEditorDialog.recurringInstance && !taskEditorDialog.seriesOccurrence
+            spacing: Theme.spacingSm
+            Layout.fillWidth: true
+
+            AppIcon { name: "info"; size: 15; color: Theme.warningText }
+            Label {
+                text: "Эта обычная задача связана с Google Calendar. В Phase 3.2A "
+                      + "её нельзя преобразовать в локальную повторяющуюся серию."
                 font.pixelSize: Theme.fontCaption
                 font.family: Theme.fontFamily
                 color: Theme.warningText
@@ -513,7 +788,7 @@ Dialog {
                 id: errorLabel
                 anchors.fill: parent
                 anchors.margins: Theme.spacingSm
-                text: dialog.vm ? dialog.vm.editorError : ""
+                text: taskEditorDialog.vm ? taskEditorDialog.vm.editorError : ""
                 font.pixelSize: Theme.fontCaption
                 font.family: Theme.fontFamily
                 color: Theme.danger
@@ -532,41 +807,91 @@ Dialog {
             Layout.topMargin: Theme.spacingXs
 
             AppButton {
-                visible: dialog.isEdit
+                visible: taskEditorDialog.isEdit && !taskEditorDialog.seriesOccurrence
                 text: "Удалить"
                 variant: "ghost"
                 iconName: "trash"
-                enabled: dialog.vm ? !dialog.vm.busy : true
+                enabled: taskEditorDialog.vm ? !taskEditorDialog.vm.busy : true
+                Accessible.description: "Удалить обычную задачу"
                 onClicked: {
-                    var uid = dialog.taskUid
-                    dialog.close()
-                    dialog.deleteRequested(uid)
+                    var uid = taskEditorDialog.taskUid
+                    taskEditorDialog.close()
+                    taskEditorDialog.deleteRequested(uid)
                 }
             }
             AppButton {
-                visible: dialog.isEdit
+                visible: taskEditorDialog.isEdit && taskEditorDialog.seriesOccurrence
+                text: "Серия…"
+                variant: "ghost"
+                iconName: "snooze"
+                enabled: taskEditorDialog.vm ? !taskEditorDialog.vm.busy : true
+                Accessible.description:
+                    "Остановить серию с этого экземпляра или удалить всю серию"
+                onClicked: seriesMenu.open()
+
+                Menu {
+                    id: seriesMenu
+                    y: parent.height
+                    MenuItem {
+                        text: "Удалить только этот экземпляр…"
+                        onTriggered: {
+                            var uid = taskEditorDialog.taskUid
+                            taskEditorDialog.close()
+                            taskEditorDialog.deleteRequested(uid)
+                        }
+                    }
+                    MenuItem {
+                        text: "Дублировать как обычную задачу"
+                        onTriggered: {
+                            if (taskEditorDialog.vm.duplicateTask(
+                                    taskEditorDialog.taskUid))
+                                taskEditorDialog.close()
+                        }
+                    }
+                    MenuSeparator {}
+                    MenuItem {
+                        text: "Остановить с этого экземпляра"
+                        onTriggered: {
+                            var uid = taskEditorDialog.taskUid
+                            taskEditorDialog.close()
+                            taskEditorDialog.vm.stopSeriesFromOccurrence(uid)
+                        }
+                    }
+                    MenuItem {
+                        text: "Удалить всю серию…"
+                        onTriggered: {
+                            taskEditorDialog._prepareNestedPopups()
+                            taskEditorDialog._deleteSeriesConfirmObject.openFor(
+                                taskEditorDialog.seriesUid)
+                        }
+                    }
+                }
+            }
+            AppButton {
+                visible: taskEditorDialog.isEdit
+                         && !taskEditorDialog.seriesOccurrence
                 text: "Дублировать"
                 variant: "secondary"
                 iconName: "plus"
-                enabled: dialog.vm ? !dialog.vm.busy : true
+                enabled: taskEditorDialog.vm ? !taskEditorDialog.vm.busy : true
                 Accessible.name: "Дублировать редактируемую задачу"
                 onClicked: {
-                    if (dialog.vm.duplicateTask(dialog.taskUid))
-                        dialog.close()
+                    if (taskEditorDialog.vm.duplicateTask(taskEditorDialog.taskUid))
+                        taskEditorDialog.close()
                 }
             }
             Item { Layout.fillWidth: true }
             AppButton {
                 text: "Отмена"
                 variant: "ghost"
-                onClicked: dialog.close()
+                onClicked: taskEditorDialog.close()
             }
             AppButton {
-                text: dialog.isEdit ? "Сохранить" : "Создать"
+                text: taskEditorDialog.isEdit ? "Сохранить" : "Создать"
                 variant: "primary"
-                iconName: dialog.isEdit ? "check" : "plus"
-                enabled: dialog.vm ? !dialog.vm.busy : true
-                onClicked: dialog.submit()
+                iconName: taskEditorDialog.isEdit ? "check" : "plus"
+                enabled: taskEditorDialog.vm ? !taskEditorDialog.vm.busy : true
+                onClicked: taskEditorDialog.submit()
             }
         }
     }

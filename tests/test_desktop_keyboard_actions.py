@@ -24,8 +24,8 @@ BARE = ["open_selected", "toggle_selected", "delete_selected",
         "calendar_move_slot", "calendar_move_day", "calendar_resize",
         "calendar_to_all_day", "calendar_unschedule",
         "quick_add_slash", "select_all", "duplicate_selected"]
-CTRL = ["new_task", "new_scheduled_task", "quick_add", "refresh",
-        "search"]
+CTRL = ["new_task", "new_scheduled_task", "new_from_template", "quick_add",
+        "refresh", "search"]
 
 
 # ---- политика ---------------------------------------------------------------------

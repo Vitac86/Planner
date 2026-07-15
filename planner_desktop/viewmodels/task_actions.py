@@ -23,12 +23,22 @@ QML НИКОГДА не зовёт репозиторий напрямую: то
 from __future__ import annotations
 
 import time as _time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
 from planner_desktop.domain import scheduling
+from planner_desktop.domain.commands import TaskEditorCommand
+from planner_desktop.domain.recurrence import (
+    SeriesEditScope,
+    SeriesSchedule,
+    TaskSeries,
+    describe_rule,
+    default_timezone_name,
+    recurrence_presets,
+    validate_rule,
+)
 from planner_desktop.domain.task import Task
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.usecases.bulk_task_service import (
@@ -41,6 +51,11 @@ from planner_desktop.usecases.bulk_task_service import (
     ACTION_RESTORE,
     ACTION_UNSCHEDULE,
     BulkTaskService,
+)
+from planner_desktop.viewmodels.series_rows import (
+    rule_from_map,
+    rule_to_map,
+    series_to_row,
 )
 from planner_desktop.viewmodels.task_rows import (
     editor_payload,
@@ -60,6 +75,7 @@ class TaskActionsViewModel(QObject):
     busyChanged = Signal()
     selectedTaskChanged = Signal()
     taskSelectionChanged = Signal()
+    templatesChanged = Signal()
 
     #: Окно подавления повторного идентичного действия (секунды).
     DUPLICATE_WINDOW_S = 0.3
@@ -82,6 +98,9 @@ class TaskActionsViewModel(QObject):
         self._clock = clock or _time.monotonic
         self._now = now_provider or datetime.now
         self._bulk = BulkTaskService(service, getattr(service, "tag_service", None))
+        template_service = getattr(service, "template_service", None)
+        if template_service is not None:
+            template_service.add_change_listener(self.templatesChanged.emit)
 
     # ---- хук подкласса -----------------------------------------------------------
 
@@ -249,6 +268,16 @@ class TaskActionsViewModel(QObject):
         tags = tag_service.tags_for_task(uid) if uid and tag_service is not None else []
         data["tagIds"] = [tag.id for tag in tags]
         data["tags"] = [{"id": tag.id, "name": tag.name} for tag in tags]
+        data.setdefault("seriesSummary", "")
+        data.setdefault("rule", rule_to_map(None))
+        data.setdefault("timezoneName", "")
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if data.get("isSeriesOccurrence") and recurrence is not None:
+            series = recurrence.get_series(data.get("seriesUid", ""))
+            if series is not None:
+                data["seriesSummary"] = series.summary()
+                data["rule"] = rule_to_map(series.rule)
+                data["timezoneName"] = series.schedule.timezone_name
         return data
 
     @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
@@ -427,7 +456,10 @@ class TaskActionsViewModel(QObject):
         task = self._service.get_task(uid)
         if task is None:
             return []
-        recurring = task.google_calendar_recurring_event_id is not None
+        recurring = (
+            task.google_calendar_recurring_event_id is not None
+            or task.is_series_occurrence
+        )
         timed = task.start is not None and not task.is_all_day
         scheduled = task.start is not None
         actions: List[Dict[str, Any]] = []
@@ -477,7 +509,10 @@ class TaskActionsViewModel(QObject):
         task = self._service.get_task(uid)
         if task is None:
             return []
-        recurring = task.google_calendar_recurring_event_id is not None
+        recurring = (
+            task.google_calendar_recurring_event_id is not None
+            or task.is_series_occurrence
+        )
         actions = []
         for item in scheduling.snooze_actions():
             enabled = True
@@ -596,6 +631,327 @@ class TaskActionsViewModel(QObject):
         self._notify_mutation("Копия задачи создана")
         self.selectTask(result.task.uid)
         return True
+
+    # ---- локальные повторяющиеся серии (Phase 3.2A) --------------------------
+
+    @Property("QVariantList", constant=True)
+    def recurrencePresets(self) -> List[dict]:
+        return recurrence_presets()
+
+    def _schedule_from_payload(
+        self, payload: Dict[str, Any]
+    ) -> Optional[SeriesSchedule]:
+        """SeriesSchedule из полей формы; None при невалидной дате/времени."""
+        date_text = str(payload.get("dateText") or "").strip()
+        try:
+            start_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        is_all_day = bool(payload.get("isAllDay"))
+        local_time = None
+        if not is_all_day:
+            try:
+                local_time = datetime.strptime(
+                    str(payload.get("timeText") or "").strip(), "%H:%M"
+                ).time()
+            except ValueError:
+                return None
+        duration_text = str(payload.get("durationText") or "").strip()
+        duration = None
+        if not is_all_day:
+            try:
+                duration = int(duration_text) if duration_text else 60
+            except ValueError:
+                return None
+            if duration <= 0:
+                return None
+        return SeriesSchedule(
+            start_date=start_date,
+            all_day=is_all_day,
+            local_time=local_time,
+            duration_minutes=duration,
+            timezone_name=default_timezone_name(),
+        )
+
+    @Slot("QVariantMap", result="QVariantMap")
+    def recurrenceSummary(self, payload) -> Dict[str, Any]:
+        """{ok, summary, error} для инлайн-сводки редактора правила."""
+        payload = dict(payload or {})
+        schedule = self._schedule_from_payload(payload)
+        if schedule is None:
+            return {"ok": False, "summary": "", "error": "Укажите дату начала."}
+        rule = rule_from_map(payload.get("rule") or {}, schedule.start_date)
+        validation = validate_rule(rule, schedule)
+        if not validation.ok:
+            return {
+                "ok": False,
+                "summary": "",
+                "error": " ".join(validation.errors),
+            }
+        return {
+            "ok": True,
+            "summary": describe_rule(rule, schedule),
+            "error": "",
+        }
+
+    @Property(str, constant=True)
+    def localTimezoneName(self) -> str:
+        return default_timezone_name()
+
+    def _editor_command_from_payload(
+        self, payload: Dict[str, Any]
+    ) -> TaskEditorCommand:
+        return TaskEditorCommand(
+            title=str(payload.get("title") or ""),
+            notes=str(payload.get("notes") or ""),
+            add_to_calendar=bool(payload.get("scheduled", True)),
+            is_all_day=bool(payload.get("isAllDay")),
+            date_text=str(payload.get("dateText") or ""),
+            time_text=str(payload.get("timeText") or ""),
+            duration_text=str(payload.get("durationText") or ""),
+            priority=int(payload.get("priority") or 0),
+            completed=bool(payload.get("completed")),
+        )
+
+    def _payload_tag_ids(self, payload: Dict[str, Any]) -> Optional[List[int]]:
+        raw = payload.get("tagIds")
+        if raw is None:
+            return None
+        return [int(item) for item in raw]
+
+    def _ensure_default_horizon(self) -> None:
+        """Материализовать разумный горизонт после операции с серией."""
+        materializer = getattr(self._service, "materializer", None)
+        if materializer is not None:
+            today = self._now().date()
+            materializer.ensure_range(today, today + timedelta(days=30))
+
+    @Slot("QVariantMap", result=bool)
+    def saveEditorAsSeries(self, payload) -> bool:
+        """Создание новой локальной серии из формы редактора.
+
+        Никаких Calendar-операций: серия строго локальна в Phase 3.2A.
+        """
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None:
+            self._set_editor_error("Сервис повторяющихся задач недоступен.")
+            return False
+        payload = dict(payload or {})
+        schedule = self._schedule_from_payload(payload)
+        if schedule is None:
+            self._set_editor_error(
+                "Для повторяющейся задачи укажите дату (и время)."
+            )
+            return False
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            self._set_editor_error("Название задачи не может быть пустым.")
+            return False
+        rule = rule_from_map(payload.get("rule") or {}, schedule.start_date)
+        series = TaskSeries(
+            title=title,
+            schedule=schedule,
+            rule=rule,
+            notes=str(payload.get("notes") or "").strip(),
+            priority=int(payload.get("priority") or 0),
+        )
+        if not self._begin("saveSeries", series.title, dedupe=True):
+            return False
+        try:
+            result = recurrence.create_series(
+                series, tag_ids=self._payload_tag_ids(payload)
+            )
+        except Exception as exc:
+            self._set_editor_error(f"Не удалось создать серию: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self._set_editor_error(" ".join(result.errors))
+            return False
+        self._ensure_default_horizon()
+        self._set_editor_error("")
+        self._notify_mutation("Повторяющаяся задача создана")
+        return True
+
+    @Slot(str, str, "QVariantMap", result=bool)
+    def saveOccurrenceScoped(self, uid: str, scope: str, payload) -> bool:
+        """Сохранение экземпляра серии с ЯВНОЙ областью изменений.
+
+        scope: this_occurrence — правка одной строки (exception);
+        this_and_future — транзакционный split серии.
+        """
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None:
+            self._set_editor_error("Сервис повторяющихся задач недоступен.")
+            return False
+        try:
+            edit_scope = SeriesEditScope(scope)
+        except ValueError:
+            self._set_editor_error("Неизвестная область изменений.")
+            return False
+        payload = dict(payload or {})
+        command = self._editor_command_from_payload(payload)
+        tag_ids = self._payload_tag_ids(payload)
+        tag_service = getattr(self._service, "tag_service", None)
+        if tag_ids:
+            if tag_service is None:
+                self._set_editor_error("Сервис тегов недоступен.")
+                return False
+            try:
+                tag_service.resolve_tag_ids(tag_ids)
+            except Exception as exc:
+                self._set_editor_error(str(exc))
+                return False
+        if not self._begin(f"saveOccurrence:{scope}", uid, dedupe=True):
+            return False
+        try:
+            if edit_scope == SeriesEditScope.THIS_OCCURRENCE:
+                result = recurrence.edit_occurrence(
+                    uid, command, tag_ids=tag_ids
+                )
+                ok = result.ok
+                errors = result.errors
+                target_uid = result.task.uid if result.task is not None else ""
+                toast = "Экземпляр изменён"
+            else:
+                rule = None
+                if payload.get("rule") is not None:
+                    schedule = self._schedule_from_payload(payload)
+                    anchor = (
+                        schedule.start_date if schedule is not None
+                        else self._now().date()
+                    )
+                    rule = rule_from_map(payload.get("rule") or {}, anchor)
+                split = recurrence.edit_this_and_future(
+                    uid, command, rule=rule, tag_ids=tag_ids
+                )
+                ok = split.ok
+                errors = split.errors
+                target_uid = (
+                    split.moved_task.uid if split.moved_task is not None else ""
+                )
+                toast = "Серия изменена с этого экземпляра"
+        except Exception as exc:
+            self._set_editor_error(f"Не удалось сохранить изменения: {exc}")
+            return False
+        finally:
+            self._end()
+        if not ok:
+            self._set_editor_error(" ".join(errors))
+            return False
+        self._ensure_default_horizon()
+        self._set_editor_error("")
+        self._notify_mutation(toast)
+        return True
+
+    @Slot(str, result=bool)
+    def stopSeriesFromOccurrence(self, uid: str) -> bool:
+        """«Остановить этот и все будущие»: история сохраняется."""
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None:
+            self.toastError.emit("Сервис повторяющихся задач недоступен.")
+            return False
+        if not self._begin("stopSeries", uid, dedupe=True):
+            return False
+        try:
+            result = recurrence.stop_this_and_future(uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось остановить серию: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        self._notify_mutation("Серия остановлена; история сохранена")
+        return True
+
+    @Slot(str, result=bool)
+    def deleteSeries(self, series_uid: str) -> bool:
+        """Удалить серию целиком; выполненная история остаётся."""
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None:
+            self.toastError.emit("Сервис повторяющихся задач недоступен.")
+            return False
+        if not self._begin("deleteSeries", series_uid, dedupe=True):
+            return False
+        try:
+            result = recurrence.delete_series(series_uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось удалить серию: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        self._notify_mutation("Серия удалена; история сохранена")
+        return True
+
+    @Slot(str, result=bool)
+    def duplicateSeries(self, series_uid: str) -> bool:
+        """Явное «Создать копию серии» (определение, без экземпляров)."""
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None:
+            self.toastError.emit("Сервис повторяющихся задач недоступен.")
+            return False
+        if not self._begin("duplicateSeries", series_uid, dedupe=True):
+            return False
+        try:
+            result = recurrence.duplicate_series(series_uid)
+        except Exception as exc:
+            self.toastError.emit(f"Не удалось создать копию серии: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(" ".join(result.errors))
+            return False
+        self._ensure_default_horizon()
+        self._notify_mutation("Копия серии создана")
+        return True
+
+    # ---- шаблоны задач (Phase 3.2A) --------------------------------------------
+
+    @Property("QVariantList", notify=templatesChanged)
+    def taskTemplates(self) -> List[Dict[str, Any]]:
+        templates = getattr(self._service, "template_service", None)
+        if templates is None:
+            return []
+        return [
+            {
+                "uid": item.uid,
+                "name": item.name,
+                "kind": item.kind,
+                "title": item.title,
+                "isRecurring": item.is_recurring,
+            }
+            for item in templates.list_templates()
+        ]
+
+    @Slot(str, result=str)
+    def seriesSummaryFor(self, uid: str) -> str:
+        """Человекочитаемая сводка правила серии для экземпляра (или '')."""
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None:
+            return ""
+        task = self._service.get_task(uid)
+        if task is None or task.series_uid is None:
+            return ""
+        series = recurrence.get_series(task.series_uid)
+        return series.summary() if series is not None else ""
+
+    @Slot(str, result="QVariantMap")
+    def templatePrefill(self, template_uid: str) -> Dict[str, Any]:
+        """Предзаполнение редактора из шаблона; ничего не сохраняет."""
+        templates = getattr(self._service, "template_service", None)
+        if templates is None:
+            return {}
+        data = templates.editor_prefill(template_uid)
+        if data and data.get("scheduled") and not data.get("dateText"):
+            data["dateText"] = self._now().strftime("%Y-%m-%d")
+        return data
 
     def _bulk_result_map(self, result) -> Dict[str, Any]:
         return {

@@ -21,6 +21,7 @@ Dialog {
         open()
     }
 
+
     parent: Overlay.overlay
     anchors.centerIn: parent
     modal: true

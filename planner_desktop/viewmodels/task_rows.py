@@ -47,6 +47,9 @@ def task_to_row(task: Task, pending_uids: Set[str]) -> Dict[str, Any]:
         "isLinked": task.google_calendar_event_id is not None,
         "isScheduled": task.start is not None,
         "isRecurring": task.google_calendar_recurring_event_id is not None,
+        "isSeriesOccurrence": task.series_uid is not None,
+        "isSeriesException": bool(task.is_series_exception),
+        "seriesUid": task.series_uid or "",
         "tags": list(task.tags[:3]),
         "tagOverflow": max(0, len(task.tags) - 3),
     }
@@ -68,7 +71,12 @@ def editor_payload(task: Optional[Task]) -> Dict[str, Any]:
             "timeText": "",
             "durationText": "",
             "completed": False,
+            "isLinked": False,
             "isRecurringInstance": False,
+            "isSeriesOccurrence": False,
+            "isSeriesException": False,
+            "seriesUid": "",
+            "occurrenceKey": "",
         }
     scheduled = task.start is not None
     return {
@@ -91,7 +99,12 @@ def editor_payload(task: Optional[Task]) -> Dict[str, Any]:
             str(task.duration_minutes) if task.duration_minutes else ""
         ),
         "completed": task.completed,
+        "isLinked": task.google_calendar_event_id is not None,
         "isRecurringInstance": task.google_calendar_recurring_event_id is not None,
+        "isSeriesOccurrence": task.series_uid is not None,
+        "isSeriesException": bool(task.is_series_exception),
+        "seriesUid": task.series_uid or "",
+        "occurrenceKey": task.occurrence_key or "",
     }
 
 

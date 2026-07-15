@@ -23,6 +23,8 @@ Item {
     property bool isLinked: false
     property bool isScheduled: false
     property bool isRecurring: false
+    property bool isSeriesOccurrence: false
+    property bool isSeriesException: false
     property var tags: []
     property int tagOverflow: 0
     // Пока идёт операция (vm.busy), действия карточки выключены —
@@ -49,7 +51,12 @@ Item {
 
     Accessible.role: Accessible.ListItem
     Accessible.name: title
-    Accessible.description: timeLabel.length > 0 ? timeLabel : "Без даты"
+    Accessible.description: (timeLabel.length > 0 ? timeLabel : "Без даты")
+        + (isSeriesOccurrence
+           ? (isSeriesException
+              ? ", экземпляр локальной серии (изменён отдельно)"
+              : ", экземпляр локальной серии")
+           : (isRecurring ? ", экземпляр серии Google" : ""))
     Accessible.focusable: actionsEnabled
     Accessible.selected: selected
 
@@ -264,6 +271,14 @@ Item {
                     Accessible.name: "Ещё тегов: " + card.tagOverflow
                 }
             }
+        }
+
+        SeriesBadge {
+            isLocalSeries: card.isSeriesOccurrence
+            isGoogleSeries: card.isRecurring
+            isException: card.isSeriesException
+            compact: true
+            Layout.alignment: Qt.AlignVCenter
         }
 
         Badge {
