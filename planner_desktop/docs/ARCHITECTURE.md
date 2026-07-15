@@ -79,6 +79,9 @@ OAuth-токен нового десктопа изолирован (`<PlannerDe
 - `tags.normalized_name` уникален и вычисляется Python NFKC+casefold;
   отображаемый регистр сохраняется, имя trim-ится и ограничено 32 символами,
   на задачу разрешено не более 10 тегов;
+- schema v6 добавляет локальные TaskSeries/templates и occurrence identity;
+  schema v7 аддитивно добавляет независимый read-only
+  `external_calendar_series` без FK/cascade к Task или TaskSeries;
 - scheduling presets, Calendar layout и временное selection state остаются
   в domain/ViewModel, а не в БД.
 
@@ -91,6 +94,9 @@ Domain (planner_desktop/domain)
       keyboard.py задаёт контекстную политику shortcuts;
       tags.py задаёт Unicode validation/limits, task_search.py — чистые
       query/filter/ranking rules;
+      recurrence.py — локальная Phase 3.2A семантика;
+      google_recurrence.py — чистый lossless Google RRULE transport;
+      external_series.py — read-only модель удалённого мастера;
       calendar_layout.py режет события по дням/видимому диапазону и
       детерминированно раскладывает overlap-колонки;
       calendar_interactions.py рассчитывает snap/target/move/resize/conversion
@@ -100,7 +106,8 @@ Repository (planner_desktop/repositories + planner_desktop/storage)
       FakeTaskRepository — для тестов и демо-режима; общий контракт —
       Protocol TaskRepository; TagRepository/SQLiteTagRepository — локальные
       теги и associations; CalendarSyncStore — очередь Calendar-операций
-      и состояние синка в той же БД
+      и состояние синка в той же БД; ExternalSeriesRepository имеет SQLite
+      и in-memory реализации, не связывая каталог с локальной TaskSeries
 Use cases (planner_desktop/usecases)
    ↓  DesktopTaskService: CRUD + schedule/unschedule/postpone/restore задач,
       explicit move/resize/timed↔all-day operations и компенсирующий rollback
@@ -197,23 +204,30 @@ recurring instances пропускаются без mutation. Tag-only bulk не
 Calendar queue; schedule/unschedule/delete переиспользуют существующую sync
 семантику. Один busy guard предотвращает повторный быстрый запуск.
 
-## Ядро Calendar-синхронизации (фейковый шлюз)
+## Ядро Calendar-синхронизации и read-only Google recurrence
 
 Состав (`planner_desktop/sync/` + `planner_desktop/storage/`):
 
 - `sync_types.py` — `CalendarEvent` (собственная модель события, без
-  Google-клиентов), `PendingOp`, ошибки шлюза
+  Google-клиентов) с recurrence/timezone transport и disjoint properties
+  ordinary/master/instance, `PendingOp`, `CalendarPullStats`, ошибки шлюза
   (`RetryableGatewayError` / `TerminalGatewayError`);
 - `calendar_mapper.py` — чистый маппинг Task ↔ CalendarEvent;
 - `calendar_sync_engine.py` — двусторонний движок: push очереди,
-  pull изменений, конфликтная политика;
+  pull изменений, конфликтная политика; optional master handler стоит до
+  Task mapping, поэтому master не может стать ordinary Task;
 - `fake_calendar_gateway.py` — in-memory календарь для тестов/разработки:
   etag-и, updated_at, журнал изменений с курсором (аналог syncToken),
-  all-day и timed события, метаданные повторяющихся экземпляров,
-  инъекция ошибок;
+  all-day/timed, master и changed/cancelled instance события, без expansion
+  бесконечной серии, инъекция ошибок;
 - `storage/calendar_sync_store.py` — локальная очередь push-операций
   (`desktop_pending_calendar_ops`) и состояние синка
   (`desktop_sync_state`) в том же изолированном `app_desktop.db`.
+- `domain/google_recurrence.py` — чистый canonical/lossless RRULE codec;
+  unsupported constructs сохраняются raw и никогда не упрощаются;
+- `storage/external_series_repository.py` — schema v7 catalog;
+  `usecases/external_series_service.py` отдаёт Settings только локальные
+  rows/counts и никогда не строит gateway.
 
 Поток данных:
 
@@ -225,9 +239,10 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
   патчем, тумбстоун — delete-ом; временная ошибка → ретрай с бэкоффом,
   после `MAX_ATTEMPTS` или постоянной ошибки — dead-letter (terminal),
   бесконечных ретраев нет;
-- `CalendarSyncEngine.pull_remote_changes()` — правки «с телефона»:
-  новое событие → новая задача, правка → обновление задачи, отмена →
-  тумбстоун задачи.
+- `CalendarSyncEngine.pull_remote_changes()` — ordinary event использует
+  прежний create/update/tombstone Task path; recurring instance — тот же path
+  с recurring metadata; recurring master — только catalog upsert/tombstone.
+  Ошибка catalog persistence выходит до записи cursor.
 
 ### Текущая конфликтная политика (детерминированная)
 
@@ -264,6 +279,13 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
   remote-правки задачу не воскрешают;
 - задачи **без даты** остаются локальными для нового десктопа в этой
   фазе: в календарь (и вообще наружу) они не отправляются.
+- recurring master хранится отдельно от TaskSeries/Task; его отмена не удаляет
+  completed/history instances. Возможный legacy Task с event id мастера лишь
+  попадает в diagnostic и не меняется автоматически;
+- production insert/patch/delete recurrence не пишут. Отдельные чистые future
+  master body helpers не подключены к сети до Phase 3.2B2;
+- master pull/catalog и любые операции локальной TaskSeries дают нулевую
+  дельту Calendar queue.
 
 ## Правила маппинга Task ↔ событие Calendar (закреплены заранее)
 
@@ -298,11 +320,13 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | Calendar layout engine | Phase 2.1: `domain/calendar_layout.py`, normalized top/height, clipping видимых часов/границ дня, minimum visual duration, all-day spans и deterministic interval coloring; Qt-free |
 | Calendar interaction engine | Phase 2.2: `domain/calendar_interactions.py`, deterministic 15/5-minute snapping, clamping, timed/all-day/undated conversion, resize proposals и structured rejection; Qt-free |
 | CalendarPage | Phase 2.2: возможности Phase 2.1 плюс safe DnD/resize, translucent valid/invalid preview, timed ↔ all-day, responsive undated panel, bounded focus-aware vertical auto-scroll и keyboard alternatives; authoritative geometry обновляется только после service commit |
-| SettingsPage | режим, путь БД, счётчики очереди с разбивкой по типам (create/update/delete/dead-letter), время последнего локального изменения, курсор pull-а, панель «Диагностика» с копированием; статус подключения Google + кнопки «Подключить Google Calendar» и «Синхронизировать сейчас» (работа в фоновом потоке, прогресс/итог/ошибка на странице, время последнего успешного синка) |
+| SettingsPage | режим, БД, очередь/курсор/диагностика, подключение и только ручной sync; Phase 3.2B1 добавляет read-only Google series catalog (active/unsupported/cancelled/legacy, raw RRULE, timezone, instance count) без mutation controls и page-open Google call |
 | HistoryPage | журнал выполненного по датам, фильтр 7/30/всё, restore/edit/delete через общий контракт действий; полностью локально |
 | HistoryService + Task.completed_at | готовы: миграция схемы v3 → v4 аддитивно добавляет tasks.completed_at и заполняет для уже выполненных задач их updated_at |
 | DailyTaskService / ежедневные задачи | готовы (локально, в Calendar не уходят); отметки хранят момент выполнения — «История» показывает их по датам |
 | TaskSeries / RecurrenceService | готовы для Phase 3.2A: локальные определения серий отдельно от DailyTask, идемпотентная материализация `Task`-экземпляров, exception/tombstone, transactional SQLite split и нулевая Calendar-очередь; подробности в `RECURRENCE_ARCHITECTURE.md` |
+| GoogleRecurrence codec | Phase 3.2B1 готов: canonical daily/weekly/monthly/yearly subset, interval/BYDAY/BYMONTHDAY/BYMONTH/COUNT/UNTIL/safe WKST, EXDATE/RDATE/TZID transport, structured unsupported reasons и timezone-safe inclusive UNTIL |
+| External series catalog | Phase 3.2B1 готов: schema v7, SQLite + in-memory repositories, local query service, cancellation tombstone, derived instance count и conservative legacy diagnostic; TaskSeries linkage отсутствует |
 | OccurrenceMaterializer | готов: Today запрашивает сегодня, Calendar — видимый диапазон, буфер 14 дней, предел 366 экземпляров на серию за вызов; History генерацию не запускает |
 | TemplateService | готов: локальные ordinary/recurring шаблоны, NFKC+casefold уникальность имени, Settings CRUD/duplicate и неперсистентный editor prefill |
 | TaskEditorDialog (создание/правка) | готов: режимы «Без даты»/«Весь день»/«Со временем», native date/time/duration controls, scheduling presets, приоритет/completed, inline validation, busy guard и отдельное delete-действие |
@@ -310,11 +334,11 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | Unschedule (запланирована -> без даты) | реализован для непушенных и привязанных одиночных задач; для экземпляров повторяющихся серий — запрещён с ошибкой |
 | Очередь Calendar-операций (calendar_sync_store.py) | готова, с ретраями, dead-letter и счётчиками для UI |
 | Маппер Task ↔ CalendarEvent | готов, покрыт тестами |
-| CalendarSyncEngine (двусторонний) | готов, работает на FakeCalendarGateway |
-| FakeCalendarGateway | готов: журнал изменений, etag-и, инъекция ошибок |
-| GoogleCalendarGateway (реальный) | реализован (sync/google_calendar_gateway.py): dateTime/dateTime для timed, date/date c эксклюзивным концом для all-day, формы не смешиваются (PATCH явно null-ит противоположную), pull через nextSyncToken c showDeleted, HTTP 410 → детерминированный полный пересбор, ошибки классифицируются retryable/terminal; сервис Calendar API инъецируется, при импорте ни OAuth, ни сети |
+| CalendarSyncEngine (двусторонний) | готов: ordinary/instance behavior сохранён, recurring master routed в optional catalog before Task mapping; catalog failure не продвигает cursor |
+| FakeCalendarGateway | готов: deterministic change journal/cursor, etag, masters + changed/cancelled instances, без expansion, инъекция ошибок |
+| GoogleCalendarGateway (реальный) | реализован: прежний ordinary write mapping; pull сохраняет recurrence/timeZone/instance metadata, `singleEvents=False`, nextSyncToken/showDeleted/HTTP 410 rebuild; B1 recurrence write helpers не вызываются production methods |
 | Изолированный OAuth десктопа (sync/google_auth.py) | token.json и secrets/client_secret.json в профиле PlannerDesktop (учитывает PLANNER_DESKTOP_DATA_DIR); старый профиль не читается; вход только явным действием, рекомендуется тестовый аккаунт |
-| Ручной синк (usecases/manual_sync_service.py + scripts/desktop_calendar_sync_once.py + кнопка в настройках) | реализован: один цикл push+pull, повторный одновременный запуск отвергается, структурный результат (pushed/pulled/очередь/dead-letter/курсор/ошибка), сводка сохраняется в desktop_sync_state |
+| Ручной синк (usecases/manual_sync_service.py + scripts/desktop_calendar_sync_once.py + кнопка в настройках) | реализован: один цикл push+pull, concurrency guard, persisted summary; B1 result добавляет ordinary/master/instance/unsupported/cancelled-master counts |
 | Автоматический/фоновый синк | НЕ реализован сознательно: ни при старте, ни по таймеру — только явные действия пользователя |
 
 Подробная инвентаризация фич относительно старого приложения —
@@ -323,15 +347,18 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 ## Тесты
 
 Чистая Python-логика тестируется без видимого окна. Каноническая
-верификация Phase 3.2A:
+верификация Phase 3.2B1:
 
 ```
 python -m compileall . -q
 python -m pytest --collect-only -q
+python -m pytest -q tests/test_desktop_google_rrule.py tests/test_desktop_google_recurrence_roundtrip.py tests/test_desktop_external_series_schema.py tests/test_desktop_external_series_repository.py tests/test_desktop_google_master_gateway.py tests/test_desktop_google_master_pull.py tests/test_desktop_google_master_diagnostics.py tests/test_desktop_google_recurrence_viewmodel.py tests/test_desktop_google_recurrence_sync_isolation.py
 python -m pytest -q tests/test_desktop_recurrence_rules.py tests/test_desktop_recurrence_generation.py tests/test_desktop_series_repository.py tests/test_desktop_recurrence_service.py tests/test_desktop_series_edit_scope.py tests/test_desktop_occurrence_materializer.py tests/test_desktop_series_sync_isolation.py tests/test_desktop_templates.py tests/test_desktop_template_service.py tests/test_desktop_recurrence_viewmodel.py tests/test_desktop_recurrence_keyboard.py
 python -m pytest -q
 ```
 
+Focused Phase 3.2B1 покрывает RRULE/round-trip, schema v7/reopen,
+master gateway/pull/cursor failure, diagnostics/ViewModel и write/queue isolation.
 Focused Phase 3.2A тесты покрывают rules/DST/month-end,
 schema v6/reopen/idempotence, occurrence identity/materialization, exception/tombstone,
 transactional split/rollback, templates, ViewModel/QML и нулевую Calendar-queue delta.
@@ -339,6 +366,6 @@ transactional split/rollback, templates, ViewModel/QML и нулевую Calenda
 sync regression файлы дополнительно запускаются отдельными срезами; существующие
 Phase 1/2/sync тесты не удаляются и входят в полный прогон. На Windows известен отдельный
 платформенный провал `tests/test_settings_paths.py::test_macos_data_dir`; он не
-исправляется в Phase 3.2A. Фактический статус финального прогона фиксируется в
+исправляется в Phase 3.2B1. Фактический статус финального прогона фиксируется в
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md), а не объявляется архитектурной
 гарантией заранее.

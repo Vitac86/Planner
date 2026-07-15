@@ -868,6 +868,7 @@ ScrollView {
 
         // ---- Диагностика (локально, без токенов) ----
         Panel {
+            objectName: "settingsDiagnosticsPanel"
             Layout.fillWidth: true
             implicitHeight: diagColumn.implicitHeight + 2 * Theme.spacingLg
 
@@ -953,6 +954,16 @@ ScrollView {
                     DiagVal { text: String(settingsVm.pendingOpsCount) }
                     DiagKey { text: "Dead-letter:" }
                     DiagVal { text: String(settingsVm.terminalOpsCount) }
+                    DiagKey { text: "Google-серий (активных):" }
+                    DiagVal { text: String(settingsVm.externalActiveSeriesCount) }
+                    DiagKey { text: "Google-серий (неподдерживаемых):" }
+                    DiagVal { text: String(settingsVm.externalUnsupportedSeriesCount) }
+                    DiagKey { text: "Google-серий (отменённых):" }
+                    DiagVal { text: String(settingsVm.externalCancelledSeriesCount) }
+                    DiagKey { text: "Возможных старых импортов мастера:" }
+                    DiagVal { text: String(settingsVm.possibleLegacyMasterImportCount) }
+                    DiagKey { text: "Обновление каталога серий:" }
+                    DiagVal { text: settingsVm.externalSeriesLastRefresh }
                 }
 
                 // Скрытый носитель текста для «Копировать» (буфер обмена через

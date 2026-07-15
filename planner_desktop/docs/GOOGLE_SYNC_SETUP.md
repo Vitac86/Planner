@@ -77,3 +77,27 @@ Planner-а это и есть родной Google Calendar).
   dead-letter без бесконечных повторов;
 - задачи без даты остаются локальными и в календарь не отправляются;
 - галочка «выполнено» — локальная, событие в календаре не трогается.
+
+## Повторяющиеся события: граница Phase 3.2B1
+
+Ручной pull выполняется с `singleEvents=False`. Поэтому Calendar transport
+различает три вида данных:
+
+- ordinary event — прежний двусторонний Task path;
+- recurring instance (`recurringEventId` + `originalStartTime`) — прежний
+  импорт Task с запретом небезопасной смены расписания;
+- recurring master (`recurrence` без `recurringEventId`) — **не Task**, а
+  read-only строка локального `external_calendar_series`.
+
+Settings показывает обнаруженные мастера, поддержку RRULE, timezone,
+количество уже импортированных экземпляров, отмену и exact raw RRULE. Открытие
+Settings читает только SQLite: Google API не вызывается. Неизвестные
+`BYSETPOS`, ordinal BYDAY, multiple RRULE, EXRULE и другие сложные правила
+сохраняются дословно и не упрощаются до локальной серии.
+
+Phase 3.2B1 **не создаёт, не патчит и не удаляет Google recurring master**,
+не связывает его с локальной TaskSeries и не пишет exception/split. Отдельные
+чистые serialization helpers существуют для тестируемого фундамента, но real
+`insert_event`/`patch_event`/`delete_event` их не вызывают. Master pull/catalog
+даёт нулевую дельту Calendar queue. Все удалённые recurrence writes/adoption
+явно отложены до Phase 3.2B2.

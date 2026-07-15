@@ -1,10 +1,11 @@
-# Архитектура повторяющихся задач Planner Desktop (Phase 3.2A)
+# Архитектура повторяющихся задач Planner Desktop (Phase 3.2A + 3.2B1)
 
 Документ фиксирует продуктовые и технические решения локальных
 повторяющихся серий (`TaskSeries`), материализации экземпляров и шаблонов
-задач. Phase 3.2A — строго локальная: **ни одна операция серии не создаёт,
-не изменяет и не удаляет события Google Calendar**. Интеграция recurrence
-с Google вынесена в отдельную Phase 3.2B.
+задач. Phase 3.2A остаётся строго локальной: **ни одна операция серии не
+создаёт, не изменяет и не удаляет события Google Calendar**. Phase 3.2B1
+добавляет только транспорт RRULE и read-only обнаружение Google-мастеров;
+привязка и любые удалённые записи остаются за Phase 3.2B2.
 
 ---
 
@@ -17,7 +18,7 @@
 | Выполнение | отметка за день (`desktop_daily_completions`) | галочка на конкретном Task-экземпляре |
 | Календарь | не появляется в сетке, не синхронизируется | экземпляры видны в сетке Calendar |
 | Правила | только маска дней недели | daily/weekly/monthly/yearly, interval, end mode |
-| Синк | никогда | в 3.2A — никогда; в 3.2B — отдельное решение |
+| Синк | никогда | в 3.2A — никогда; B1 только read-only discovery, writes в B2 |
 
 DailyTask не изменяется этой фазой: его домен, репозиторий, сервис,
 диалог управления и отметки выполнения остаются как были.
@@ -183,16 +184,121 @@ DailyTask не изменяется этой фазой: его домен, ре
   пропускает запись `record_local_*` для задач с `series_uid`.
 - Ручной синк обычных одиночных задач продолжает работать как раньше.
 
-## 12. Граница Phase 3.2B (отложено)
+## 12. Phase 3.2B1: transport и read-only каталог Google-мастеров
 
-- перевод локальных правил в/из Google RRULE;
-- создание/обновление/удаление recurring events в Google;
-- усыновление импортированных Google recurring instances локальными
-  сериями и разруливание конфликтов экземпляров;
-- exception/split синхронизация (`recurringEventId`, `originalStartTime`);
+### Чистый RRULE codec
+
+`domain/google_recurrence.py` не импортирует Qt, SQLite, Google client или
+сеть. Входной массив Calendar `recurrence` сохраняется дословно и в исходном
+порядке. Результат содержит разобранный RRULE, EXDATE/RDATE, структурированные
+причины неподдерживаемости, канонический RRULE и `RecurrenceRule` только когда
+переход действительно lossless.
+
+Поддерживаемое подмножество:
+
+- `FREQ=DAILY|WEEKLY|MONTHLY|YEARLY`;
+- `INTERVAL >= 1` в пределах локальной модели;
+- `BYDAY` только для weekly и только обычные `MO..SU` без ordinal;
+- один положительный `BYMONTHDAY` для monthly;
+- по одному `BYMONTH` + `BYMONTHDAY` для yearly;
+- ровно один вариант окончания: `COUNT >= 1` либо `UNTIL`;
+- `WKST`, если он не меняет Monday-anchored семантику Planner
+  (для многонедельного interval безопасен только `MO`);
+- корректные EXDATE/RDATE типа date или date-time, включая сохранение TZID;
+  эти даты пока только показываются в диагностике и не применяются к
+  локальной TaskSeries.
+
+Ключи и значения weekday читаются без учёта регистра. Каноническая запись
+стабильна: `FREQ`, `INTERVAL`, `BYDAY`, `BYMONTHDAY`, `BYMONTH`, `COUNT`/
+`UNTIL`, `WKST`. Дубликаты свойств/значений и невалидные целые отклоняются;
+`COUNT + UNTIL` отклоняется.
+
+`UNTIL` различает `YYYYMMDD`, UTC `YYYYMMDDTHHMMSSZ` и небезопасный floating
+date-time. Date-only lossless для all-day. UTC date-time преобразуется в
+инклюзивную `RecurrenceRule.until_date` только при наличии DTSTART wall-clock
+и IANA timezone и только если UTC-момент точно совпадает со стартом последнего
+локального экземпляра (включая DST). Иначе исходная строка остаётся в каталоге,
+а правило получает статус unsupported — дата не округляется и не угадывается.
+
+Явно не поддерживаются `BYSETPOS`, `BYWEEKNO`, `BYYEARDAY`, `BYHOUR`,
+`BYMINUTE`, `BYSECOND`, ordinal `BYDAY` (`2MO`, `-1FR`), несколько RRULE,
+EXRULE и сложные комбинации, которых нет в Phase 3.2A. Ничего из этого не
+отбрасывается и не упрощается до похожего правила.
+
+### Транспортная классификация
+
+`CalendarEvent` аддитивно несёт `recurrence_lines`, timezone start/end и
+provider wall-clock DTSTART. Классы взаимоисключающие:
+
+1. `is_ordinary_event`: нет recurrence и `recurring_event_id`;
+2. `is_recurring_instance`: есть `recurring_event_id` (даже если provider
+   прислал лишнюю recurrence metadata);
+3. `is_recurring_master`: есть recurrence, но нет `recurring_event_id`.
+
+`payload_to_event` сохраняет `recurrence`, `start.timeZone`, `end.timeZone`,
+`recurringEventId` и `originalStartTime`; усечённый cancelled master
+распознаётся движком по уже существующей строке каталога. Пагинация,
+`singleEvents=False`, syncToken и HTTP 410 rebuild не менялись.
+
+### Схема v7 и каталог
+
+`external_calendar_series` — отдельная read-only таблица с уникальностью
+`(provider, calendar_id, remote_event_id)`. Она хранит remote id/etag/status,
+заголовок/описание, timed/all-day start/end и timezone, точный JSON recurrence
+lines, lossless parsed rule или unsupported reason, first/last seen, remote
+updated и cancellation tombstone. Индексы покрывают remote id, статусы и
+last_seen. FK к `tasks`/`task_series` нет: отмена мастера не каскадирует историю.
+
+`ExternalSeriesRepository` имеет SQLite и in-memory реализации;
+`ExternalSeriesService` только читает локальный каталог. Количество экземпляров
+вычисляется из Task по `google_calendar_recurring_event_id`, не хранится счётчиком.
+
+### Master-aware pull и cursor safety
+
+Обработчик мастера стоит перед ordinary Task mapping:
+
+- active master upsert-ит каталог и никогда не создаёт Task/TaskSeries;
+- unsupported master сохраняет все raw lines и readable reason;
+- recurring instance остаётся на прежнем Task import/update пути;
+- cancelled instance остаётся прежним Task tombstone;
+- cancelled master помечает только каталог и не удаляет completed/history
+  instance rows;
+- отсутствие optional catalog dependency всё равно не превращает master в Task;
+- исключение catalog persistence выходит из pull до `set_sync_cursor`, поэтому
+  курсор не продвигается и master не падает в ordinary fallback.
+
+Pull мастеров и запись каталога создают **нулевую дельту Calendar-очереди**.
+Production `insert_event`/`patch_event` отклоняют recurrence input, а
+`delete_event` принимает только event id; recurrence они не пишут;
+отдельные чистые future-write helpers существуют только как протестированный
+фундамент и не вызываются сетевыми путями B1.
+
+### Legacy diagnostic, UI и reporting
+
+Строка Task, чей `google_calendar_event_id` совпал с обнаруженным master id,
+но не имеет `google_calendar_recurring_event_id`, считается только
+`possible legacy master import`. Показываются count и внутренние uid; строка
+не удаляется и не изменяется автоматически. Будущая B2 migration/adoption
+должна потребовать явную идентификацию и пользовательское решение.
+
+Settings читает только локальный каталог: active/unsupported/cancelled/legacy
+counts, last refresh, title, русскую сводку, timed/all-day, timezone,
+поддержку текстом и цветом, instance count, remote update и selectable raw
+RRULE. Кнопок adopt/connect/create/update/delete/repair/materialize нет.
+Открытие страницы не строит gateway и не делает Google call. ManualSyncResult
+аддитивно сообщает ordinary events, masters, instances, unsupported и
+cancelled masters. Автоматического sync по-прежнему нет.
+
+## 13. Граница Phase 3.2B2 (явно отложено)
+
+- linking/adoption локальной TaskSeries и Google master;
+- create/update/delete Google recurring master;
+- запись локальных exception и перенос/отмена одного Google occurrence;
+- remote split «этот и все будущие»;
+- конфликты local-series ↔ remote-master;
 - снятие ограничения «расписание Google recurring instance менять нельзя».
 
-## 13. Шаблоны задач
+## 14. Шаблоны задач
 
 - Шаблон — локальная заготовка (`task_templates`): имя, заголовок,
   заметки, приоритет, теги, дефолты планирования; recurring-шаблон

@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from planner_desktop.domain.google_recurrence import (
     recurrence_to_google_lines as _pure_recurrence_to_google_lines,
@@ -259,7 +260,17 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
         # Keep the provider's wall-clock DTSTART separately.  The existing
         # ``start`` field remains local-naive for Task compatibility, while
         # recurrence UTC UNTIL must be compared in start.timeZone semantics.
-        recurrence_start = _parse_rfc3339(start_raw["dateTime"]).replace(tzinfo=None)
+        provider_start = _parse_rfc3339(start_raw["dateTime"])
+        if start_raw.get("timeZone"):
+            try:
+                provider_start = provider_start.astimezone(
+                    ZoneInfo(start_raw["timeZone"])
+                )
+            except Exception:
+                # Unknown provider zone remains transport metadata; using the
+                # explicit RFC3339 offset is safer than guessing another zone.
+                pass
+        recurrence_start = provider_start.replace(tzinfo=None)
         end = _parse_timed(end_raw["dateTime"]) if end_raw.get("dateTime") else None
 
     return CalendarEvent(
@@ -302,6 +313,10 @@ class GoogleCalendarGateway:
     # ---- push -------------------------------------------------------------------
 
     def insert_event(self, event: CalendarEvent) -> CalendarEvent:
+        if event.recurrence_lines:
+            raise TerminalGatewayError(
+                "Запись повторяющегося мастера отложена до Phase 3.2B2."
+            )
         body = event_to_insert_body(event)
         try:
             created = self._service.events().insert(
@@ -312,6 +327,10 @@ class GoogleCalendarGateway:
         return payload_to_event(created)
 
     def patch_event(self, event_id: str, patch: Mapping[str, Any]) -> CalendarEvent:
+        if "recurrence" in patch or "recurrence_lines" in patch:
+            raise TerminalGatewayError(
+                "Изменение повторяющегося мастера отложено до Phase 3.2B2."
+            )
         body = patch_to_body(patch)
         try:
             updated = self._service.events().patch(

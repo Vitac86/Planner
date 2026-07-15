@@ -15,6 +15,7 @@ from planner_desktop.domain.recurrence import (
     RecurrenceFrequency,
     RecurrenceRule,
     SeriesSchedule,
+    describe_rule,
 )
 from planner_desktop.domain.task import utc_now
 
@@ -115,6 +116,8 @@ class ExternalCalendarSeries:
 
     def recurrence_summary(self) -> str:
         schedule = self.schedule()
+        if self.is_supported and self.parsed_rule is not None and schedule is not None:
+            return describe_rule(self.parsed_rule, schedule)
         parsed = parse_google_recurrence(self.recurrence_lines, schedule=schedule)
         if not self.is_supported:
             return self.unsupported_reason or parsed.readable_reason or (

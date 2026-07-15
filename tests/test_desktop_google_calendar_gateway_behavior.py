@@ -116,6 +116,21 @@ def test_insert_sends_body_and_returns_linked_event(gateway, service):
     assert created.etag == '"1"'
 
 
+def test_production_gateway_refuses_recurring_master_write_in_b1(gateway, service):
+    with pytest.raises(TerminalGatewayError, match="3.2B2"):
+        gateway.insert_event(CalendarEvent(
+            summary="Master", start=date(2026, 7, 14), end=date(2026, 7, 15),
+            is_all_day=True, recurrence_lines=("RRULE:FREQ=DAILY",),
+        ))
+    assert service.events_resource.insert_calls == []
+
+
+def test_production_gateway_refuses_recurrence_patch_in_b1(gateway, service):
+    with pytest.raises(TerminalGatewayError, match="3.2B2"):
+        gateway.patch_event("master", {"recurrence": ["RRULE:FREQ=DAILY"]})
+    assert service.events_resource.patch_calls == []
+
+
 def test_patch_sends_event_id_and_returns_new_etag(gateway, service):
     updated = gateway.patch_event("evt-1", {"summary": "Новое"})
     call = service.events_resource.patch_calls[0]

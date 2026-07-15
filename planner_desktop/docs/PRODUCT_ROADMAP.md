@@ -441,12 +441,64 @@ series/Google linkage. Автоматический sync остаётся вык
 - [шаблоны в Settings](screenshots/settings_templates_phase3_2a.png);
 - [compact-редактор](screenshots/recurrence_compact_phase3_2a.png).
 
-## Фаза 3.2B — Интеграция повторений Google (план)
+## Фаза 3.2B1 — Google recurrence transport и read-only discovery (готово)
 
-Отложены перевод правил в/из Google RRULE, создание и изменение Google
-recurring events, синхронизация exception/split и осознанное усыновление
-импортированных экземпляров. До этой фазы локальные серии и их
-материализованные экземпляры не отправляются в Google как отдельные события.
+Реализован безопасный фундамент без удалённых записей:
+
+- чистый Google RRULE parser/serializer с lossless mapping подмножества
+  daily/weekly/monthly/yearly, interval, weekly BYDAY, monthly BYMONTHDAY,
+  yearly BYMONTH+BYMONTHDAY, COUNT/UNTIL и безопасного WKST;
+- exact raw preservation, structured diagnostics, EXDATE/RDATE/TZID transport;
+  BYSETPOS/ordinal BYDAY/multiple RRULE/EXRULE и сложные комбинации не
+  упрощаются;
+- recurrence-aware `CalendarEvent` и взаимоисключающая классификация
+  ordinary/master/instance; pagination, `singleEvents=False`, syncToken и
+  HTTP 410 rebuild сохранены;
+- schema v7: отдельный `external_calendar_series` без FK к Task/TaskSeries,
+  SQLite + in-memory repositories и local-only query service;
+- master-aware pull: master никогда не становится Task, instance остаётся на
+  прежнем пути, cancelled master тумбстоунит только каталог, catalog failure
+  не продвигает cursor;
+- консервативный `possible legacy master import` diagnostic без удаления;
+- read-only Settings каталог и расширенный ManualSyncResult reporting;
+- нулевая очередь для master pull/catalog; local TaskSeries по-прежнему
+  local-only; production write paths recurrence не отправляют.
+
+Изолированный smoke на synthetic FakeCalendarGateway подтвердил 9 мастеров
+(8 active, 1 unsupported, 1 cancelled), ordinary timed/all-day events,
+changed/cancelled instances, второй change sync, идемпотентный следующий sync,
+restart persistence, `queue delta = 0`, Settings page-open Google calls = 0 и
+`qml_warnings=0`.
+
+Статус приёмки на 15 июля 2026 года:
+
+| Проверка | Статус | Результат |
+|---|---|---|
+| Focused Phase 3.2B1 | PASS | `63 passed`: RRULE/round-trip, schema/repository, gateway/master pull, diagnostics/ViewModel/isolation |
+| Focused Phase 3.2A | PASS | `82 passed` |
+| Phase 3.1 search/tag/bulk | PASS | `70 passed` |
+| Все Calendar Phase 2 файлы | PASS | `197 passed` |
+| Ordinary desktop sync regression | PASS | `163 passed` |
+| Все desktop tests | PASS | `803 passed` |
+| Compile + collection + полный pytest | PASS с известным исключением | compileall без ошибок; `924 tests collected`; `923 passed`, единственный сбой `test_macos_data_dir` на Windows |
+| Visual smoke + restart | PASS | 6 screenshots, `qml_warnings=0`, 9 masters persisted, idempotent follow-up, Settings Google calls = 0, queue delta = 0 |
+
+Скриншоты приёмки:
+
+- [каталог Google-серий](screenshots/google_series_catalog_phase3_2b1.png);
+- [поддерживаемое правило](screenshots/google_series_supported_phase3_2b1.png);
+- [неподдерживаемое правило + raw RRULE](screenshots/google_series_unsupported_phase3_2b1.png);
+- [отменённый master](screenshots/google_series_cancelled_phase3_2b1.png);
+- [compact layout](screenshots/google_series_compact_phase3_2b1.png);
+- [диагностические счётчики](screenshots/google_series_diagnostics_phase3_2b1.png).
+
+## Фаза 3.2B2 — Google recurrence writes/adoption (план)
+
+Явно отложены linking/adoption локальной TaskSeries с Google master,
+create/update/delete recurring master, exception writes, перенос/отмена одного
+Google occurrence, remote split «этот и все будущие» и разрешение конфликтов
+local-series ↔ remote-master. До B2 локальные серии и их материализованные
+экземпляры не отправляются в Google как отдельные события.
 
 ---
 

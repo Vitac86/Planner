@@ -43,6 +43,16 @@ def test_master_payload_preserves_recurrence_order_timezone_and_kind():
     assert not event.is_ordinary_event
 
 
+def test_provider_wall_clock_uses_timezone_even_when_datetime_is_utc():
+    event = payload_to_event({
+        "id": "master-zone",
+        "recurrence": ["RRULE:FREQ=DAILY;UNTIL=20260731T070000Z"],
+        "start": {"dateTime": "2026-07-15T07:00:00Z", "timeZone": "Europe/Berlin"},
+        "end": {"dateTime": "2026-07-15T07:30:00Z", "timeZone": "Europe/Berlin"},
+    })
+    assert event.recurrence_start == datetime(2026, 7, 15, 9, 0)
+
+
 def test_ordinary_and_instance_classification_remain_disjoint():
     ordinary = payload_to_event({
         "id": "ordinary", "start": {"date": "2026-07-15"},

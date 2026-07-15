@@ -357,7 +357,8 @@ class CalendarSyncEngine:
         )
         if not parsed.supported:
             self.last_pull_stats.unsupported_masters += 1
-        start_value = event.start.isoformat() if event.start is not None else ""
+        catalog_start = event.recurrence_start or event.start
+        start_value = catalog_start.isoformat() if catalog_start is not None else ""
         end_value = event.end.isoformat() if event.end is not None else ""
         repository.upsert(ExternalCalendarSeries(
             provider=self._external_series_provider,
