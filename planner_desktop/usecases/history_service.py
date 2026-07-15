@@ -71,6 +71,10 @@ class HistoryEntry:
     completion_date: date
     is_daily: bool
     can_reopen: bool
+    #: Экземпляр локальной повторяющейся серии (Phase 3.2A) — для бейджа.
+    #: История НИКОГДА не порождает будущие экземпляры: журнал строится
+    #: только из уже существующих выполненных строк.
+    is_series: bool = False
 
 
 @dataclass
@@ -119,6 +123,7 @@ class HistoryService:
                 completion_date=completion_date,
                 is_daily=False,
                 can_reopen=True,
+                is_series=task.series_uid is not None,
             ))
         return entries
 

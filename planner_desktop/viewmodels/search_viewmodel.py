@@ -8,11 +8,16 @@ from typing import Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Property, Signal, Slot
 
 from planner_desktop.domain.task_search import (
+    KIND_ALL,
+    KIND_GOOGLE_SERIES,
+    KIND_LOCAL_SERIES,
     SCOPE_ALL,
     STATUS_ALL,
     SearchFilters,
     SearchMatch,
+    text_matches_query,
 )
+from planner_desktop.viewmodels.series_rows import series_to_row
 from planner_desktop.usecases.search_service import SearchService
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.viewmodels.task_actions import TaskActionsViewModel
@@ -94,6 +99,38 @@ class SearchViewModel(TaskActionsViewModel):
             rows.append(row)
         return rows
 
+    @Property("QVariantList", notify=resultsChanged)
+    def seriesResults(self) -> List[Dict[str, Any]]:
+        """Определения локальных серий, подходящие под запрос (отдельная
+        группа результатов; kind-фильтр «Google-серии» их скрывает)."""
+        recurrence = getattr(self._service, "recurrence_service", None)
+        if recurrence is None or self._filters.kind not in (
+            KIND_ALL,
+            KIND_LOCAL_SERIES,
+        ):
+            return []
+        if not self._query.strip() and self._filters.kind == KIND_ALL:
+            return []  # пустой запрос — серии не дублируют список задач
+        rows: List[Dict[str, Any]] = []
+        for series in recurrence.list_series():
+            if text_matches_query(
+                self._query, series.title, series.notes, series.tags
+            ):
+                rows.append(series_to_row(series))
+        return rows
+
+    @Property(int, notify=resultsChanged)
+    def seriesResultCount(self) -> int:
+        return len(self.seriesResults)
+
+    @Property(str, notify=filtersChanged)
+    def kindFilter(self) -> str:
+        return self._filters.kind
+
+    @Slot(str)
+    def setKindFilter(self, value: str) -> None:
+        self._set_filters(replace(self._filters, kind=value))
+
     @Property(str, notify=filtersChanged)
     def statusFilter(self) -> str:
         return self._filters.status
@@ -168,7 +205,9 @@ class SearchViewModel(TaskActionsViewModel):
 
     @Slot()
     def clearFilters(self) -> None:
-        self._set_filters(SearchFilters(status=STATUS_ALL, scope=SCOPE_ALL))
+        self._set_filters(
+            SearchFilters(status=STATUS_ALL, scope=SCOPE_ALL, kind=KIND_ALL)
+        )
 
     def _set_filters(self, filters: SearchFilters) -> None:
         if filters == self._filters:

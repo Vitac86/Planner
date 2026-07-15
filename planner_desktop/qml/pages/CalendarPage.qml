@@ -18,6 +18,7 @@ Item {
                                         || confirmDeleteDialog.visible
                                         || confirmBulkDeleteDialog.visible
                                         || snoozeMenu.visible
+                                        || newTaskMenu.visible
                                         || undatedDrawer.visible
     readonly property bool gridFocused: timeGrid.gridFocused
     property bool agendaExpanded: false
@@ -62,6 +63,11 @@ Item {
     function newTask() { editorDialog.openForCreate(calendarVm.selectedDateText) }
     function newScheduledTask() {
         editorDialog.openForCreateScheduled(calendarVm.selectedDateText)
+    }
+    // Ctrl+Alt+N: новая задача из шаблона (редактор + выбор шаблона).
+    function newTaskFromTemplate() {
+        editorDialog.openForCreate(calendarVm.selectedDateText)
+        editorDialog.openTemplatePicker()
     }
     function openSelected() {
         if (calendarVm.selectedUid !== "")
@@ -171,13 +177,33 @@ Item {
                 ToolTip.text: "Следующий период · Page Down"
             }
             AppButton {
+                id: newTaskButton
                 text: page.compact ? "" : "Задача"
                 variant: "primary"
                 iconName: "plus"
                 Accessible.name: "Создать задачу на выбранный день"
-                onClicked: page.newTask()
+                onClicked: newTaskMenu.open()
                 ToolTip.visible: page.compact && hovered
                 ToolTip.text: "Задача на выбранный день"
+
+                Menu {
+                    id: newTaskMenu
+                    objectName: "calendarNewTaskMenu"
+                    y: parent.height
+                    MenuItem {
+                        text: "Обычная задача"
+                        onTriggered: page.newTask()
+                    }
+                    MenuItem {
+                        text: "Запланированная задача"
+                        onTriggered: page.newScheduledTask()
+                    }
+                    MenuSeparator {}
+                    MenuItem {
+                        text: "Из шаблона…"
+                        onTriggered: page.newTaskFromTemplate()
+                    }
+                }
             }
         }
 
@@ -412,6 +438,8 @@ Item {
                                     isLinked: modelData.isLinked
                                     isScheduled: modelData.isScheduled
                                     isRecurring: modelData.isRecurring
+                                    isSeriesOccurrence: !!modelData.isSeriesOccurrence
+                                    isSeriesException: !!modelData.isSeriesException
                                     tags: modelData.tags || []
                                     tagOverflow: modelData.tagOverflow || 0
                                     actionsEnabled: !calendarVm.busy
@@ -574,6 +602,9 @@ Item {
                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
                     onDuplicateRequested: uid => calendarVm.duplicateTask(uid)
                     onPostponeRequested: (uid, action) => calendarVm.postponeTask(uid, action)
+                    seriesSummary: page.selTask && page.selTask.isSeriesOccurrence
+                                   ? calendarVm.seriesSummaryFor(page.selTask.uid) : ""
+                    onDuplicateSeriesRequested: seriesUid => calendarVm.duplicateSeries(seriesUid)
                     onPresetRequested: (uid, presetId) => calendarVm.applyTaskPreset(uid, presetId)
                     onPickRequested: uid => page.editEvent(uid)
                     onCloseRequested: page.clearSelection()
@@ -698,6 +729,9 @@ Item {
             }
             onDuplicateRequested: uid => calendarVm.duplicateTask(uid)
             onPostponeRequested: (uid, action) => calendarVm.postponeTask(uid, action)
+            seriesSummary: page.selTask && page.selTask.isSeriesOccurrence
+                           ? calendarVm.seriesSummaryFor(page.selTask.uid) : ""
+            onDuplicateSeriesRequested: seriesUid => calendarVm.duplicateSeries(seriesUid)
             onPresetRequested: (uid, presetId) => calendarVm.applyTaskPreset(uid, presetId)
             onPickRequested: uid => page.editEvent(uid)
             onCloseRequested: {

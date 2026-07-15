@@ -161,6 +161,77 @@ Popup {
             onDeleteRequested: bulkDeleteDialog.openFor("bulk")
         }
 
+        // ---- определения локальных серий (отдельная группа, Phase 3.2A) ----
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingXs
+            visible: search.vm && search.vm.seriesResultCount > 0
+
+            RowLayout {
+                spacing: Theme.spacingXs
+                AppIcon { name: "repeat"; size: 13; color: Theme.accent }
+                Label {
+                    text: "Локальные серии (" + search.vm.seriesResultCount + ")"
+                    font.pixelSize: Theme.fontCaption
+                    font.family: Theme.fontFamily
+                    font.weight: Font.DemiBold
+                    color: Theme.textSecondary
+                }
+            }
+            Repeater {
+                model: search.vm ? search.vm.seriesResults : []
+                delegate: Rectangle {
+                    id: seriesRow
+                    required property var modelData
+                    Layout.fillWidth: true
+                    implicitHeight: 44
+                    radius: Theme.radiusSmall
+                    color: Theme.surface
+                    border.color: Theme.border
+                    border.width: 1
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: "Локальная серия: " + modelData.title
+                        + ", " + modelData.summary
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.spacingMd
+                        anchors.rightMargin: Theme.spacingMd
+                        spacing: Theme.spacingSm
+
+                        AppIcon { name: "repeat"; size: 14; color: Theme.accent }
+                        ColumnLayout {
+                            spacing: 0
+                            Layout.fillWidth: true
+                            Label {
+                                text: seriesRow.modelData.title
+                                font.pixelSize: Theme.fontBody
+                                font.family: Theme.fontFamily
+                                font.weight: Font.Medium
+                                color: Theme.textPrimary
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            Label {
+                                text: seriesRow.modelData.summary
+                                font.pixelSize: Theme.fontCaption - 1
+                                font.family: Theme.fontFamily
+                                color: Theme.textMuted
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+                        Badge {
+                            text: seriesRow.modelData.active
+                                  ? "Локальная серия" : "Остановлена"
+                            fg: Theme.accent
+                            bg: Theme.accentSoft
+                        }
+                    }
+                }
+            }
+        }
+
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true

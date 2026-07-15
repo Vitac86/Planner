@@ -47,6 +47,10 @@ ApplicationWindow {
         if (root.currentPage === 1) calendarPage.newScheduledTask()
         else { root.currentPage = 0; todayPage.newScheduledTask() }
     }
+    function _newTaskFromTemplateOnCurrentPage() {
+        if (root.currentPage === 1) calendarPage.newTaskFromTemplate()
+        else { root.currentPage = 0; todayPage.newTaskFromTemplate() }
+    }
     function _currentTaskPage() {
         if (root.currentPage === 0) return todayPage
         if (root.currentPage === 1) return calendarPage
@@ -140,6 +144,12 @@ ApplicationWindow {
         sequence: "Ctrl+Shift+N"
         enabled: root._allow("new_scheduled_task")
         onActivated: root._newScheduledTaskOnCurrentPage()
+    }
+    // Ctrl+Alt+N — новая задача из шаблона (Phase 3.2A).
+    Shortcut {
+        sequence: "Ctrl+Alt+N"
+        enabled: root._allow("new_from_template")
+        onActivated: root._newTaskFromTemplateOnCurrentPage()
     }
     Shortcut {
         sequences: ["Ctrl+K", "Meta+K"]

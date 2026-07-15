@@ -51,6 +51,23 @@ ColumnLayout {
             Accessible.name: "Фильтр приоритета"
             onActivated: bar.vm.setPriorityFilter(currentIndex - 1)
         }
+        ComboBox {
+            id: kindCombo
+            width: bar.compact ? 170 : 190
+            model: [
+                { text: "Любой вид", value: "all" },
+                { text: "Обычные", value: "ordinary" },
+                { text: "Локальные серии", value: "local_series" },
+                { text: "Серии Google", value: "google_series" }
+            ]
+            textRole: "text"
+            currentIndex: {
+                var values = ["all", "ordinary", "local_series", "google_series"]
+                return Math.max(0, values.indexOf(bar.vm ? bar.vm.kindFilter : "all"))
+            }
+            Accessible.name: "Фильтр вида задачи"
+            onActivated: bar.vm.setKindFilter(model[currentIndex].value)
+        }
         AppButton {
             visible: bar.vm && bar.vm.activeFilterCount > 0
             text: "Сбросить"

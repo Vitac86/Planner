@@ -31,6 +31,14 @@ VALID_SCOPES = (
     SCOPE_ALL_DAY,
 )
 
+# Вид задачи (Phase 3.2A): обычная / экземпляр локальной серии /
+# экземпляр Google-серии.
+KIND_ALL = "all"
+KIND_ORDINARY = "ordinary"
+KIND_LOCAL_SERIES = "local_series"
+KIND_GOOGLE_SERIES = "google_series"
+VALID_KINDS = (KIND_ALL, KIND_ORDINARY, KIND_LOCAL_SERIES, KIND_GOOGLE_SERIES)
+
 _TOKEN_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|(\S+)')
 
 
@@ -57,6 +65,7 @@ class SearchFilters:
     scope: str = SCOPE_ALL
     priority: Optional[int] = None
     tags: Tuple[str, ...] = field(default_factory=tuple)
+    kind: str = KIND_ALL
 
     def __post_init__(self) -> None:
         if self.status not in VALID_STATUSES:
@@ -65,6 +74,8 @@ class SearchFilters:
             raise ValueError(f"Unknown search scope: {self.scope}")
         if self.priority is not None and int(self.priority) not in (0, 1, 2, 3):
             raise ValueError("Priority filter must be 0..3 or None")
+        if self.kind not in VALID_KINDS:
+            raise ValueError(f"Unknown search kind: {self.kind}")
         object.__setattr__(
             self,
             "tags",
@@ -77,6 +88,7 @@ class SearchFilters:
             int(self.status != STATUS_ALL)
             + int(self.scope != SCOPE_ALL)
             + int(self.priority is not None)
+            + int(self.kind != KIND_ALL)
             + len(self.tags)
         )
 
@@ -103,6 +115,15 @@ def _matches_filters(task: Task, filters: SearchFilters, today: date) -> bool:
     if filters.status == STATUS_COMPLETED and not task.completed:
         return False
     if filters.priority is not None and task.priority != filters.priority:
+        return False
+
+    is_local_series = task.series_uid is not None
+    is_google_series = task.google_calendar_recurring_event_id is not None
+    if filters.kind == KIND_ORDINARY and (is_local_series or is_google_series):
+        return False
+    if filters.kind == KIND_LOCAL_SERIES and not is_local_series:
+        return False
+    if filters.kind == KIND_GOOGLE_SERIES and not is_google_series:
         return False
 
     if filters.scope == SCOPE_TODAY:
@@ -167,6 +188,25 @@ def match_task(task: Task, query: str) -> Optional[SearchMatch]:
     return SearchMatch(task, rank, tuple(fields))
 
 
+def text_matches_query(
+    query: str, title: str, notes: str = "", tags: Sequence[str] = ()
+) -> bool:
+    """Все ли термы запроса встречаются в переданных текстах.
+
+    Используется для поиска по ОПРЕДЕЛЕНИЯМ серий (Phase 3.2A), где нет
+    Task-объекта; семантика термов та же, что в match_task.
+    """
+    terms = query_terms(query)
+    if not terms:
+        return True
+    values = (
+        normalize_search_text(title),
+        *(normalize_search_text(tag) for tag in tags),
+        normalize_search_text(notes),
+    )
+    return _all_terms_in(terms, values)
+
+
 def _timestamp(value: datetime) -> float:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -213,6 +253,12 @@ def search_tasks(
 
 
 __all__ = [
+    "KIND_ALL",
+    "KIND_GOOGLE_SERIES",
+    "KIND_LOCAL_SERIES",
+    "KIND_ORDINARY",
+    "VALID_KINDS",
+    "text_matches_query",
     "SCOPE_ALL",
     "SCOPE_ALL_DAY",
     "SCOPE_SCHEDULED",

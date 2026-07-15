@@ -29,6 +29,8 @@ Item {
         isLinked: !!row.task.isLinked
         isScheduled: !!row.task.isScheduled
         isRecurring: !!row.task.isRecurring
+        isSeriesOccurrence: !!row.task.isSeriesOccurrence
+        isSeriesException: !!row.task.isSeriesException
         tags: row.task.tags || []
         tagOverflow: row.task.tagOverflow || 0
         selected: row.selected

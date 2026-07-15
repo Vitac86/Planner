@@ -134,6 +134,20 @@ class CalendarViewModel(TaskActionsViewModel):
         self._resize_edge = ResizeEdge.END
         self._resize_proposal: Optional[CalendarResizeProposal] = None
         self._interaction_busy = False
+        self._ensure_visible(notify=False)
+
+    def _ensure_visible(self, *, notify: bool = True) -> None:
+        """Материализовать экземпляры серий видимого диапазона + буфер.
+
+        Идемпотентно; mutated эмитится только при реальном создании строк
+        (петли нет: повторный ensure ничего не создаёт)."""
+        materializer = getattr(self._service, "materializer", None)
+        if materializer is None:
+            return
+        dates = self._visible_dates()
+        result = materializer.ensure_range(dates[0], dates[-1])
+        if notify and result.created:
+            self.tasksMutated.emit()
 
     def _emit_data_changed(self) -> None:
         self.weekChanged.emit()
@@ -164,6 +178,7 @@ class CalendarViewModel(TaskActionsViewModel):
         if mode == DISPLAY_WORK_WEEK and self._selected_index > 4:
             self.clearSelection()
             self._selected_index = 4
+        self._ensure_visible()
         self.displayModeChanged.emit()
         self.weekChanged.emit()
         self.selectionChanged.emit()
@@ -360,6 +375,12 @@ class CalendarViewModel(TaskActionsViewModel):
             f"{_format_minute(block.start_minute)}–{_format_minute(block.end_minute)}"
         )
         state = "выполнено" if task.completed else "не выполнено"
+        if task.series_uid is not None:
+            state += ", экземпляр локальной серии"
+            if task.is_series_exception:
+                state += " (изменён отдельно)"
+        elif task.google_calendar_recurring_event_id is not None:
+            state += ", экземпляр серии Google"
         row.update({
             "dayIndex": block.day_index,
             "dateText": block.day.strftime("%Y-%m-%d"),
@@ -932,6 +953,7 @@ class CalendarViewModel(TaskActionsViewModel):
             self.clearSelection()
             self._week_start = _monday_of(target)
             self._selected_index = target.weekday()
+            self._ensure_visible()
             self.selectionChanged.emit()
             self.weekChanged.emit()
             self.gridChanged.emit()
@@ -949,6 +971,7 @@ class CalendarViewModel(TaskActionsViewModel):
         self._selected_index = target.weekday()
         if self._display_mode == DISPLAY_WORK_WEEK and self._selected_index > 4:
             self._selected_index = 4
+        self._ensure_visible()
         self.selectionChanged.emit()
         self.weekChanged.emit()
         self.gridChanged.emit()
@@ -985,6 +1008,7 @@ class CalendarViewModel(TaskActionsViewModel):
         self._selected_index = today.weekday()
         if self._display_mode == DISPLAY_WORK_WEEK and self._selected_index > 4:
             self._selected_index = 4
+        self._ensure_visible()
         self.weekChanged.emit()
         self.selectionChanged.emit()
         self.gridChanged.emit()
@@ -1049,6 +1073,7 @@ class CalendarViewModel(TaskActionsViewModel):
     @Slot()
     def refresh(self) -> None:
         """Preserve a live selection, clear a task that disappeared."""
+        self._ensure_visible()
         interaction_uid = self._dragged_uid or self._resize_uid
         if interaction_uid and self._service.get_task(interaction_uid) is None:
             self.cancelInteraction()
@@ -1076,6 +1101,7 @@ class CalendarViewModel(TaskActionsViewModel):
     def _shift_week(self, delta_weeks: int) -> None:
         self.clearSelection()
         self._week_start += timedelta(days=7 * delta_weeks)
+        self._ensure_visible()
         self.weekChanged.emit()
         self.selectionChanged.emit()
         self.gridChanged.emit()

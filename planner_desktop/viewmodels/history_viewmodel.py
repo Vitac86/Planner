@@ -67,6 +67,7 @@ def _entry_to_row(entry: HistoryEntry) -> Dict[str, Any]:
         "priorityLabel": priority_label(entry.priority),
         "isDaily": entry.is_daily,
         "canReopen": entry.can_reopen,
+        "isSeries": entry.is_series,
         "doneAt": entry.completed_at.astimezone().strftime("%H:%M")
         if entry.completed_at is not None and entry.completed_at.tzinfo is not None
         else (entry.completed_at.strftime("%H:%M")

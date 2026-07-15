@@ -84,9 +84,29 @@ class TodayViewModel(TaskActionsViewModel):
         self._repository = self._service.repository
         self._daily = daily_service or DailyTaskService(InMemoryDailyTaskRepository())
         self._error = ""
+        self._ensure_today(notify=False)
 
     def _emit_data_changed(self) -> None:
         self.tasksChanged.emit()
+
+    def _ensure_today(self, *, notify: bool = True) -> None:
+        """Материализовать сегодняшние экземпляры серий перед показом.
+
+        Идемпотентно и локально (см. usecases/occurrence_materializer.py);
+        mutated эмитится только при реальном создании строк, поэтому петли
+        обновлений нет."""
+        materializer = getattr(self._service, "materializer", None)
+        if materializer is None:
+            return
+        today = self._now().date()
+        result = materializer.ensure_range(today, today)
+        if notify and result.created:
+            self.tasksMutated.emit()
+
+    @Slot()
+    def refresh(self) -> None:
+        self._ensure_today()
+        super().refresh()
 
     def _visible_task_uids(self) -> List[str]:
         return list(dict.fromkeys(

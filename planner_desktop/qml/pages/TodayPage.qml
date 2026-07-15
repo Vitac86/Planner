@@ -27,6 +27,7 @@ ScrollView {
                                         || confirmBulkDeleteDialog.visible
                                         || dailyDialog.visible
                                         || snoozeMenu.visible
+                                        || newTaskMenu.visible
                                         || inspectorDrawer.visible
 
     function restoreFocus() {
@@ -58,6 +59,11 @@ ScrollView {
     function focusQuickAdd() { quickAddItem.focusInput() }
     function newTask() { editorDialog.openForCreate("") }
     function newScheduledTask() { editorDialog.openForCreateScheduled() }
+    // Ctrl+Alt+N: новая задача из шаблона (редактор + выбор шаблона).
+    function newTaskFromTemplate() {
+        editorDialog.openForCreate("")
+        editorDialog.openTemplatePicker()
+    }
     function openSelected() {
         if (todayVm.selectedUid !== "")
             editorDialog.openForEdit(todayVm.selectedUid)
@@ -191,10 +197,29 @@ ScrollView {
                         iconName: "plus"
                         onClicked: {
                             page.focusReturnItem = newTaskButton
-                            editorDialog.openForCreate("")
+                            newTaskMenu.open()
                         }
                         ToolTip.visible: page.compact && hovered
                         ToolTip.text: "Новая задача (Ctrl+N)"
+
+                        Menu {
+                            id: newTaskMenu
+                            objectName: "todayNewTaskMenu"
+                            y: parent.height
+                            MenuItem {
+                                text: "Обычная задача"
+                                onTriggered: page.newTask()
+                            }
+                            MenuItem {
+                                text: "Запланированная задача"
+                                onTriggered: page.newScheduledTask()
+                            }
+                            MenuSeparator {}
+                            MenuItem {
+                                text: "Из шаблона…"
+                                onTriggered: page.newTaskFromTemplate()
+                            }
+                        }
                     }
                 }
 
@@ -279,6 +304,8 @@ ScrollView {
                             isLinked: modelData.isLinked
                             isScheduled: modelData.isScheduled
                             isRecurring: modelData.isRecurring
+                            isSeriesOccurrence: !!modelData.isSeriesOccurrence
+                            isSeriesException: !!modelData.isSeriesException
                             tags: modelData.tags || []
                             tagOverflow: modelData.tagOverflow || 0
                             actionsEnabled: !todayVm.busy
@@ -343,6 +370,8 @@ ScrollView {
                             isLinked: modelData.isLinked
                             isScheduled: modelData.isScheduled
                             isRecurring: modelData.isRecurring
+                            isSeriesOccurrence: !!modelData.isSeriesOccurrence
+                            isSeriesException: !!modelData.isSeriesException
                             tags: modelData.tags || []
                             tagOverflow: modelData.tagOverflow || 0
                             actionsEnabled: !todayVm.busy
@@ -411,6 +440,9 @@ ScrollView {
                     onDeleteRequested: uid => confirmDeleteDialog.openFor(uid)
                     onDuplicateRequested: uid => todayVm.duplicateTask(uid)
                     onPostponeRequested: (uid, action) => todayVm.postponeTask(uid, action)
+                    seriesSummary: page.selTask && page.selTask.isSeriesOccurrence
+                                   ? todayVm.seriesSummaryFor(page.selTask.uid) : ""
+                    onDuplicateSeriesRequested: seriesUid => todayVm.duplicateSeries(seriesUid)
                     onPresetRequested: (uid, presetId) => todayVm.applyTaskPreset(uid, presetId)
                     onPickRequested: uid => editorDialog.openForEdit(uid)
                     onCloseRequested: page.clearSelection()
@@ -594,6 +626,9 @@ ScrollView {
             onDeleteRequested: uid => { inspectorDrawer.close(); confirmDeleteDialog.openFor(uid) }
             onDuplicateRequested: uid => todayVm.duplicateTask(uid)
             onPostponeRequested: (uid, action) => todayVm.postponeTask(uid, action)
+            seriesSummary: page.selTask && page.selTask.isSeriesOccurrence
+                           ? todayVm.seriesSummaryFor(page.selTask.uid) : ""
+            onDuplicateSeriesRequested: seriesUid => todayVm.duplicateSeries(seriesUid)
             onPresetRequested: (uid, presetId) => todayVm.applyTaskPreset(uid, presetId)
             onPickRequested: uid => {
                 inspectorDrawer.close()

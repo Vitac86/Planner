@@ -310,6 +310,11 @@ Item {
                                     bg: Theme.accentSoft
                                     Layout.alignment: Qt.AlignVCenter
                                 }
+                                SeriesBadge {
+                                    isLocalSeries: !!entry.modelData.isSeries
+                                    compact: page.compact
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
                                 Badge {
                                     visible: entry.modelData.timeLabel.length > 0
                                              && !page.compact
