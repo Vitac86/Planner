@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -257,6 +257,52 @@ CREATE INDEX IF NOT EXISTS idx_tasks_series_uid
 ON tasks (series_uid) WHERE series_uid IS NOT NULL
 """
 
+# Read-only catalog of recurring masters discovered during an explicit Google
+# pull (Phase 3.2B1).  It is deliberately separate from local task_series:
+# discovery must not adopt/link a local series and there is no FK cascade to
+# tasks or task_series.  recurrence_lines_json is the exact ordered transport
+# array; parsed_rule_json is present only for the lossless Planner subset.
+CREATE_EXTERNAL_CALENDAR_SERIES_TABLE = """
+CREATE TABLE IF NOT EXISTS external_calendar_series (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    calendar_id TEXT NOT NULL,
+    remote_event_id TEXT NOT NULL,
+    etag TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    start_kind TEXT NOT NULL CHECK (start_kind IN ('timed', 'all_day')),
+    start_value TEXT,
+    end_value TEXT,
+    timezone_name TEXT,
+    recurrence_lines_json TEXT NOT NULL DEFAULT '[]',
+    parsed_rule_json TEXT,
+    support_status TEXT NOT NULL CHECK (support_status IN ('supported', 'unsupported')),
+    unsupported_reason TEXT,
+    remote_status TEXT NOT NULL DEFAULT 'confirmed',
+    remote_updated_at TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    deleted_at TEXT,
+    UNIQUE (provider, calendar_id, remote_event_id)
+)
+"""
+
+CREATE_EXTERNAL_SERIES_REMOTE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_external_series_remote_event
+ON external_calendar_series (remote_event_id)
+"""
+
+CREATE_EXTERNAL_SERIES_STATUS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_external_series_status
+ON external_calendar_series (support_status, remote_status, deleted_at)
+"""
+
+CREATE_EXTERNAL_SERIES_LAST_SEEN_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_external_series_last_seen
+ON external_calendar_series (last_seen_at)
+"""
+
 
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -331,5 +377,9 @@ def create_schema(connection: sqlite3.Connection) -> None:
     _migrate_series_columns(connection)
     connection.execute(CREATE_TASK_OCCURRENCE_INDEX)
     connection.execute(CREATE_TASK_SERIES_INDEX)
+    connection.execute(CREATE_EXTERNAL_CALENDAR_SERIES_TABLE)
+    connection.execute(CREATE_EXTERNAL_SERIES_REMOTE_INDEX)
+    connection.execute(CREATE_EXTERNAL_SERIES_STATUS_INDEX)
+    connection.execute(CREATE_EXTERNAL_SERIES_LAST_SEEN_INDEX)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

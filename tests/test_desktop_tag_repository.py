@@ -2,6 +2,7 @@ import sqlite3
 
 from planner_desktop.domain.tags import Tag
 from planner_desktop.domain.task import Task, utc_now
+from planner_desktop.storage.schema import SCHEMA_VERSION
 from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
 from planner_desktop.storage.tag_repository import SQLiteTagRepository
 
@@ -23,9 +24,9 @@ def test_tag_migration_is_additive_and_idempotent(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"preserved", "tasks", "tags", "task_tags"} <= tables
         assert connection.execute("SELECT value FROM preserved").fetchone()[0] == "ok"
-        # Phase 3.2A подняла схему до v6 (серии/шаблоны) тем же аддитивным
-        # идемпотентным путём; теги остались нетронуты.
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        # Последующие desktop-фазы поднимают общую схему тем же аддитивным
+        # идемпотентным путём; теги остаются нетронуты.
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_repository_reopen_persists_assignments_and_rename(tmp_path):
@@ -69,4 +70,3 @@ def test_delete_tag_removes_association_not_task(tmp_path):
     assert tasks.get_by_uid(task.uid).title == "Остаётся"
     tags.close()
     tasks.close()
-
