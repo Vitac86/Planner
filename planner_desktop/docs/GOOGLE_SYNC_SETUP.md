@@ -78,7 +78,7 @@ Planner-а это и есть родной Google Calendar).
 - задачи без даты остаются локальными и в календарь не отправляются;
 - галочка «выполнено» — локальная, событие в календаре не трогается.
 
-## Повторяющиеся события: граница Phase 3.2B1
+## Повторяющиеся события: Phase 3.2B2
 
 Ручной pull выполняется с `singleEvents=False`. Поэтому Calendar transport
 различает три вида данных:
@@ -95,9 +95,23 @@ Settings читает только SQLite: Google API не вызывается.
 `BYSETPOS`, ordinal BYDAY, multiple RRULE, EXRULE и другие сложные правила
 сохраняются дословно и не упрощаются до локальной серии.
 
-Phase 3.2B1 **не создаёт, не патчит и не удаляет Google recurring master**,
-не связывает его с локальной TaskSeries и не пишет exception/split. Отдельные
-чистые serialization helpers существуют для тестируемого фундамента, но real
-`insert_event`/`patch_event`/`delete_event` их не вызывают. Master pull/catalog
-даёт нулевую дельту Calendar queue. Все удалённые recurrence writes/adoption
-явно отложены до Phase 3.2B2.
+Phase 3.2B2 разрешает только явное создание связи поддерживаемой чистой
+`TaskSeries` с **новым** Google master. До первого ручного sync статус остаётся
+«Ожидает создания в Google». Один manual cycle сначала отправляет series queue,
+затем прежнюю ordinary Task queue и только потом выполняет pull.
+
+В master уходят title, notes, first start/end, timezone, canonical RRULE и
+private idempotency markers. Теги, priority, completion и history не уходят;
+materialized occurrences никогда не создаются как отдельные events. Обычные
+`insert_event`/`patch_event`/`delete_event` не принимают recurrence — master
+использует отдельные методы.
+
+Disconnect и delete требуют отдельного выбора: оставить remote, удалить remote
+и оставить local либо удалить обе стороны recoverable-последовательностью.
+Unexpected remote edit ставит конфликт без overwrite; remote deletion сохраняет
+локальную серию; changed linked instance карантинится до Phase 3.2B3.
+
+Adoption существующего master, отдельные occurrence writes, exceptions,
+«этот и все будущие», conflict-resolution UI и restore remote-deleted master
+не реализованы. Открытие Settings/editor по-прежнему читает только SQLite;
+автоматического Google sync нет.

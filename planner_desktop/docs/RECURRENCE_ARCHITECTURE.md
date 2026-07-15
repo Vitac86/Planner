@@ -1,11 +1,10 @@
-# Архитектура повторяющихся задач Planner Desktop (Phase 3.2A + 3.2B1)
+# Архитектура повторяющихся задач Planner Desktop (Phase 3.2A–3.2B2)
 
 Документ фиксирует продуктовые и технические решения локальных
 повторяющихся серий (`TaskSeries`), материализации экземпляров и шаблонов
-задач. Phase 3.2A остаётся строго локальной: **ни одна операция серии не
-создаёт, не изменяет и не удаляет события Google Calendar**. Phase 3.2B1
-добавляет только транспорт RRULE и read-only обнаружение Google-мастеров;
-привязка и любые удалённые записи остаются за Phase 3.2B2.
+задач. Phase 3.2A остаётся основой локальной семантики, Phase 3.2B1 добавляет
+lossless RRULE/read-only discovery, а Phase 3.2B2 — только явную связь
+поддерживаемой чистой серии с одним **новым** Google recurring master.
 
 ---
 
@@ -18,7 +17,7 @@
 | Выполнение | отметка за день (`desktop_daily_completions`) | галочка на конкретном Task-экземпляре |
 | Календарь | не появляется в сетке, не синхронизируется | экземпляры видны в сетке Calendar |
 | Правила | только маска дней недели | daily/weekly/monthly/yearly, interval, end mode |
-| Синк | никогда | в 3.2A — никогда; B1 только read-only discovery, writes в B2 |
+| Синк | никогда | materialized rows — никогда; в B2 только definition-level master op по явной связи |
 
 DailyTask не изменяется этой фазой: его домен, репозиторий, сервис,
 диалог управления и отметки выполнения остаются как были.
@@ -270,35 +269,60 @@ last_seen. FK к `tasks`/`task_series` нет: отмена мастера не 
 Pull мастеров и запись каталога создают **нулевую дельту Calendar-очереди**.
 Production `insert_event`/`patch_event` отклоняют recurrence input, а
 `delete_event` принимает только event id; recurrence они не пишут;
-отдельные чистые future-write helpers существуют только как протестированный
-фундамент и не вызываются сетевыми путями B1.
+Phase 3.2B2 использует отдельный recurring-master gateway contract и отдельную
+series queue, не ослабляя ordinary path.
 
 ### Legacy diagnostic, UI и reporting
 
 Строка Task, чей `google_calendar_event_id` совпал с обнаруженным master id,
 но не имеет `google_calendar_recurring_event_id`, считается только
 `possible legacy master import`. Показываются count и внутренние uid; строка
-не удаляется и не изменяется автоматически. Будущая B2 migration/adoption
+не удаляется и не изменяется автоматически. Будущая B3 adoption
 должна потребовать явную идентификацию и пользовательское решение.
 
 Settings читает только локальный каталог: active/unsupported/cancelled/legacy
 counts, last refresh, title, русскую сводку, timed/all-day, timezone,
 поддержку текстом и цветом, instance count, remote update и selectable raw
-RRULE. Кнопок adopt/connect/create/update/delete/repair/materialize нет.
+RRULE. В каталоге чужих master нет adopt/repair/materialize controls; B2
+connect доступен только из редактора локальной TaskSeries и создаёт новый master.
 Открытие страницы не строит gateway и не делает Google call. ManualSyncResult
-аддитивно сообщает ordinary events, masters, instances, unsupported и
-cancelled masters. Автоматического sync по-прежнему нет.
+аддитивно сообщает ordinary events, masters, instances, unsupported/cancelled,
+а также B2 create/update/delete/conflict/terminal/quarantine. Автоматического
+sync по-прежнему нет.
 
-## 13. Граница Phase 3.2B2 (явно отложено)
+## 13. Phase 3.2B2: явная связь с новым master
 
-- linking/adoption локальной TaskSeries и Google master;
-- create/update/delete Google recurring master;
-- запись локальных exception и перенос/отмена одного Google occurrence;
+`task_series_calendar_links` хранит lifecycle отдельно от `TaskSeries`, а
+`pending_calendar_series_ops` — независимую coalescing queue. Connection
+preflight принимает только active/lossless/IANA-valid серию без Google ids на
+materialized rows и без future exception/tombstone, требующих EXDATE или
+instance write. Completed rows и теги не блокируют связь.
+
+Связь сразу получает deterministic Google-valid id и один CREATE. Ручной sync
+создаёт/патчит/удаляет master через отдельный gateway contract; ordinary Task
+path не получает recurrence. Title/notes/schedule/rule — owned master fields,
+tags/priority/completion/history остаются локальными. Поэтому серия по-прежнему
+материализуется для локального UX, но её строки никогда не выгружаются отдельно.
+
+Pull совпавшего master обновляет metadata как echo. Неожиданная remote-правка
+ставит `conflict` без overwrite/auto-push, отмена — `remote_deleted` без удаления
+локальной истории. Изменённый linked instance записывается в
+`external_series_occurrence_changes`, не становится ordinary Task и ждёт B3.
+
+Disconnect/delete намерение всегда явное: detach+keep remote, delete remote+
+keep local либо recoverable delete local+remote. Полный lifecycle, coalescing,
+non-atomic recovery и markers описаны в
+[`GOOGLE_SERIES_SYNC_ARCHITECTURE.md`](GOOGLE_SERIES_SYNC_ARCHITECTURE.md).
+
+## 14. Граница Phase 3.2B3 (явно отложено)
+
+- adoption существующего внешнего master;
+- запись локальных exceptions и перенос/отмена одного Google occurrence;
 - remote split «этот и все будущие»;
-- конфликты local-series ↔ remote-master;
-- снятие ограничения «расписание Google recurring instance менять нельзя».
+- UI разрешения local-series ↔ remote-master conflict;
+- восстановление удалённого в Google master.
 
-## 14. Шаблоны задач
+## 15. Шаблоны задач
 
 - Шаблон — локальная заготовка (`task_templates`): имя, заголовок,
   заметки, приоритет, теги, дефолты планирования; recurring-шаблон

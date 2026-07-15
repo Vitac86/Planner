@@ -352,6 +352,7 @@ Dialog {
     Component {
         id: seriesGoogleLinkFactory
         SeriesGoogleLinkDialog {
+            objectName: "seriesGoogleLinkDialog"
             vm: taskEditorDialog.vm
         }
     }

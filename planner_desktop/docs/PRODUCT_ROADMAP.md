@@ -492,13 +492,75 @@ restart persistence, `queue delta = 0`, Settings page-open Google calls = 0 и
 - [compact layout](screenshots/google_series_compact_phase3_2b1.png);
 - [диагностические счётчики](screenshots/google_series_diagnostics_phase3_2b1.png).
 
-## Фаза 3.2B2 — Google recurrence writes/adoption (план)
+## Фаза 3.2B2 — явная связь с новым Google master (готово)
 
-Явно отложены linking/adoption локальной TaskSeries с Google master,
-create/update/delete recurring master, exception writes, перенос/отмена одного
-Google occurrence, remote split «этот и все будущие» и разрешение конфликтов
-local-series ↔ remote-master. До B2 локальные серии и их материализованные
-экземпляры не отправляются в Google как отдельные события.
+Поддерживаемая чистая локальная `TaskSeries` теперь по явному действию
+связывается с **одним новым** Google recurring master. Подключение не делает
+сетевой вызов: schema v8 транзакционно создаёт link и отдельную series-операцию
+CREATE, а ручной sync отправляет master до ordinary Task-очереди. Stable
+base32hex event id и private Planner markers делают повтор после удалённого
+успеха/локального сбоя идемпотентным без второго master.
+
+Реализованы:
+
+- lossless preflight (RRULE, IANA timezone, timed/all-day schedule, отсутствие
+  Google id у materialized occurrences и неподдерживаемых future exceptions);
+- coalescing `CREATE+UPDATE`, `CREATE+DELETE`, `UPDATE+UPDATE` и
+  `UPDATE+DELETE`, retry/backoff/dead-letter отдельно от ordinary queue;
+- отдельные recurring-master insert/get/patch/delete gateway methods;
+- explicit disconnect/keep remote, delete remote/keep local и recoverable
+  delete local+remote — неоднозначного удаления нет;
+- linked-master echo/conflict/remote-deleted pull policy и карантин изменённых
+  linked instances без создания ordinary Task;
+- локальные completion/tags/history; series-level title/notes/rule/schedule
+  правки ставят один UPDATE, materialized occurrences никогда не загружаются
+  как отдельные события;
+- локальная Settings-диагностика link/queue/conflict/remote-deleted/terminal и
+  quarantine; page-open, startup и timer сети не вызывают.
+
+Fake/injected smoke в `D:\planner-desktop-google-series-write-smoke`
+подтвердил create → update того же id → delete, insert reconciliation,
+disconnect/reconnect, конфликт, remote cancellation, instance quarantine,
+ordinary sync, restart persistence, `occurrence_event_flood=0`,
+`settings_google_calls=0` и `qml_warnings=0`.
+
+Статус проверки на 15 июля 2026 года:
+
+| Проверка | Статус | Результат |
+|---|---|---|
+| Focused Phase 3.2B2 | PASS | `25 passed` |
+| Phase 3.2B2 + Phase 3.2B1 | PASS | `88 passed` |
+| Phase 3.2A + Phase 3.1 + Calendar Phase 2 + ordinary desktop sync | PASS | `350 passed` |
+| Compile + collection | PASS | compileall без ошибок; `949 tests collected` |
+| Полный pytest | PASS с известным Windows-исключением | `948 passed`, единственный сбой `tests/test_settings_paths.py::test_macos_data_dir`; не относится к B2 и не исправлялся |
+| QML/fake visual smoke | PASS | 7 screenshots, compact/normal/wide, restart, `qml_warnings=0`, network calls on page-open = 0 |
+
+Live-пилот **не запускался**: изолированный профиль
+`D:\planner-desktop-google-series-live-pilot` и его отдельные тестовые
+credentials отсутствуют, тестовый аккаунт не подтверждён. Старый токен не
+читался и не копировался. Плановый title:
+`TEST Planner Phase 3.2B2 — recurring master pilot`. Это открытый внешний gate,
+а не пройденная проверка.
+
+Скриншоты fake-приёмки:
+
+- [подключение](screenshots/series_connect_google_phase3_2b2.png);
+- [ожидает ручного sync](screenshots/series_pending_sync_phase3_2b2.png);
+- [связана](screenshots/series_linked_phase3_2b2.png);
+- [конфликт](screenshots/series_sync_conflict_phase3_2b2.png);
+- [master удалён в Google](screenshots/series_remote_deleted_phase3_2b2.png);
+- [Settings diagnostics](screenshots/series_link_settings_phase3_2b2.png);
+- [compact](screenshots/series_link_compact_phase3_2b2.png).
+
+Подробный контракт: [`GOOGLE_SERIES_SYNC_ARCHITECTURE.md`](GOOGLE_SERIES_SYNC_ARCHITECTURE.md).
+
+### Фаза 3.2B3 — явно отложено
+
+- adoption существующего внешнего master;
+- изменение/отмена одного Google occurrence и запись локальных exceptions;
+- remote split «этот и все будущие»;
+- UI разрешения конфликтов;
+- восстановление удалённого в Google master.
 
 ---
 
