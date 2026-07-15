@@ -29,6 +29,9 @@ DEFAULT_VISIBLE_END_MINUTE = 23 * 60
 RECURRING_INTERACTION_ERROR = (
     "Перенос экземпляров повторяющихся событий пока не поддерживается"
 )
+SERIES_INTERACTION_ERROR = (
+    "Измените экземпляр серии через редактор и выберите область изменений"
+)
 
 
 class DropZoneKind(str, Enum):
@@ -286,6 +289,13 @@ def propose_drag(
         return _drag_rejection(
             task, target, RECURRING_INTERACTION_ERROR, "recurring_instance"
         )
+    if task.series_uid is not None:
+        # Прямой drag экземпляра локальной серии запрещён в Phase 3.2A:
+        # область изменений («только этот» / «этот и все будущие»)
+        # выбирается только явно в редакторе.
+        return _drag_rejection(
+            task, target, SERIES_INTERACTION_ERROR, "local_series_occurrence"
+        )
 
     source = _source_kind(task)
     tzinfo = task.start.tzinfo if task.start is not None else None
@@ -387,6 +397,10 @@ def propose_resize(
         return _resize_rejection(
             task, edge, RECURRING_INTERACTION_ERROR, "recurring_instance"
         )
+    if task.series_uid is not None:
+        return _resize_rejection(
+            task, edge, SERIES_INTERACTION_ERROR, "local_series_occurrence"
+        )
     if task.start is None or task.is_all_day:
         return _resize_rejection(
             task, edge, "Изменять размер можно только у задач со временем",
@@ -468,6 +482,7 @@ __all__ = [
     "InteractionValidationResult",
     "MIN_TIMED_DURATION_MINUTES",
     "RECURRING_INTERACTION_ERROR",
+    "SERIES_INTERACTION_ERROR",
     "ResizeEdge",
     "build_drag_proposal",
     "build_resize_proposal",

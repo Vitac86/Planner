@@ -153,6 +153,12 @@ class BulkTaskService:
                         uid, STATUS_SKIPPED,
                         "Экземпляр повторяющегося события нельзя переносить.",
                     )
+                if task.is_series_occurrence:
+                    return BulkActionItemResult(
+                        uid, STATUS_SKIPPED,
+                        "Экземпляр локальной серии: измените расписание "
+                        "через редактор серии.",
+                    )
                 result = self._compensated_schedule_call(
                     task,
                     lambda: self.task_service.postpone_task(
@@ -169,6 +175,12 @@ class BulkTaskService:
                     return BulkActionItemResult(
                         uid, STATUS_SKIPPED,
                         "Экземпляр повторяющегося события нельзя снять с расписания.",
+                    )
+                if task.is_series_occurrence:
+                    return BulkActionItemResult(
+                        uid, STATUS_SKIPPED,
+                        "Экземпляр локальной серии: измените расписание "
+                        "через редактор серии.",
                     )
                 result = self._compensated_schedule_call(
                     task, lambda: self.task_service.unschedule_task(uid)
