@@ -53,6 +53,10 @@ def _row_to_task(row: sqlite3.Row, tags=()) -> Task:
         google_calendar_etag=row["google_calendar_etag"],
         google_calendar_recurring_event_id=row["google_calendar_recurring_event_id"],
         google_calendar_original_start=_text_to_dt(row["google_calendar_original_start"]),
+        series_uid=row["series_uid"],
+        occurrence_key=row["occurrence_key"],
+        series_revision=row["series_revision"],
+        is_series_exception=bool(row["is_series_exception"]),
         updated_at=_text_to_dt(row["updated_at"]) or utc_now(),
         deleted_at=_text_to_dt(row["deleted_at"]),
     )
@@ -95,8 +99,9 @@ class SQLiteTaskRepository:
                 is_all_day, priority, completed, completed_at,
                 google_calendar_event_id, google_calendar_etag,
                 google_calendar_recurring_event_id, google_calendar_original_start,
+                series_uid, occurrence_key, series_revision, is_series_exception,
                 updated_at, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                 task.id,
@@ -114,6 +119,10 @@ class SQLiteTaskRepository:
                 task.google_calendar_etag,
                 task.google_calendar_recurring_event_id,
                 _dt_to_text(task.google_calendar_original_start),
+                task.series_uid,
+                task.occurrence_key,
+                task.series_revision,
+                int(task.is_series_exception),
                 _dt_to_text(task.updated_at),
                 _dt_to_text(task.deleted_at),
                 ),
@@ -152,6 +161,8 @@ class SQLiteTaskRepository:
                 google_calendar_event_id = ?, google_calendar_etag = ?,
                 google_calendar_recurring_event_id = ?,
                 google_calendar_original_start = ?,
+                series_uid = ?, occurrence_key = ?, series_revision = ?,
+                is_series_exception = ?,
                 updated_at = ?, deleted_at = ?
             WHERE id = ?
             """,
@@ -170,6 +181,10 @@ class SQLiteTaskRepository:
                 task.google_calendar_etag,
                 task.google_calendar_recurring_event_id,
                 _dt_to_text(task.google_calendar_original_start),
+                task.series_uid,
+                task.occurrence_key,
+                task.series_revision,
+                int(task.is_series_exception),
                 _dt_to_text(task.updated_at),
                 _dt_to_text(task.deleted_at),
                 task.id,
@@ -262,6 +277,27 @@ class SQLiteTaskRepository:
 
     def list_undated(self) -> List[Task]:
         return [t for t in self.list_all() if t.start is None]
+
+    # ---- локальные серии (Phase 3.2A) -----------------------------------------
+
+    def list_by_series(self, series_uid: str) -> List[Task]:
+        """ВСЕ строки серии, включая тумбстоуны: тумбстоун — это защита
+        слота от регенерации, поэтому материализация обязана его видеть."""
+        rows = self._connection.execute(
+            "SELECT * FROM tasks WHERE series_uid = ? ORDER BY id",
+            (series_uid,),
+        ).fetchall()
+        return [self._task_from_row(row) for row in rows]
+
+    def hard_delete_by_uid(self, uid: str) -> bool:
+        """Физическое удаление строки (только для замены материализованных
+        экземпляров серии при split/update; пользовательское удаление —
+        всегда тумбстоун через delete())."""
+        cursor = self._connection.execute(
+            "DELETE FROM tasks WHERE uid = ?", (uid,)
+        )
+        self._connection.commit()
+        return cursor.rowcount > 0
 
     # ---- диагностика (для панели «Настройки») --------------------------------
 

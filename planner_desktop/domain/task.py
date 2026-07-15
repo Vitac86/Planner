@@ -52,6 +52,17 @@ class Task:
     google_calendar_recurring_event_id: Optional[str] = None
     google_calendar_original_start: Optional[datetime] = None
 
+    # Привязка к локальной повторяющейся серии (Phase 3.2A).
+    # series_uid + occurrence_key — неизменяемая идентичность слота серии
+    # (см. domain/recurrence.py); series_revision — ревизия правила,
+    # породившего экземпляр; is_series_exception — экземпляр правился
+    # в области «только этот» и регенерацией не перезаписывается.
+    # Локальные серии НЕ синхронизируются с Google в этой фазе.
+    series_uid: Optional[str] = None
+    occurrence_key: Optional[str] = None
+    series_revision: Optional[int] = None
+    is_series_exception: bool = False
+
     updated_at: datetime = field(default_factory=utc_now)
     # Тумбстоун: удаление помечается, а не стирает запись, чтобы будущая
     # синхронизация могла отправить delete в Calendar.
@@ -64,6 +75,11 @@ class Task:
     @property
     def is_scheduled(self) -> bool:
         return self.start is not None
+
+    @property
+    def is_series_occurrence(self) -> bool:
+        """Экземпляр локальной повторяющейся серии (Phase 3.2A)."""
+        return self.series_uid is not None
 
     def mark_deleted(self, when: Optional[datetime] = None) -> None:
         self.deleted_at = when or utc_now()

@@ -114,6 +114,20 @@ class FakeTaskRepository:
     def list_undated(self) -> List[Task]:
         return [t for t in self.all() if t.start is None]
 
+    # ---- локальные серии (Phase 3.2A) ----------------------------------------
+
+    def list_by_series(self, series_uid: str) -> List[Task]:
+        """Все строки серии, включая тумбстоуны (как SQLite-репозиторий)."""
+        return [t for t in self._tasks if t.series_uid == series_uid]
+
+    def hard_delete_by_uid(self, uid: str) -> bool:
+        """Физическое удаление (только замена материализованных экземпляров)."""
+        for index, task in enumerate(self._tasks):
+            if task.uid == uid:
+                del self._tasks[index]
+                return True
+        return False
+
     def delete(self, task_id: int) -> bool:
         """Тумбстоун (deleted_at), запись из списка не выбрасывается."""
         task = self.get(task_id)

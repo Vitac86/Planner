@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -135,6 +135,128 @@ CREATE_TASK_TAGS_TAG_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_task_tags_tag_id ON task_tags (tag_id)
 """
 
+# Локальные повторяющиеся серии (Phase 3.2A). Google-полей нет сознательно:
+# серии и их экземпляры НЕ синхронизируются с Calendar в этой фазе.
+# weekdays_csv — выбранные дни недели weekly-правила через запятую
+# ("0,2,4", 0 = понедельник); даты — ISO 8601 текстом, как в tasks.
+CREATE_TASK_SERIES_TABLE = """
+CREATE TABLE IF NOT EXISTS task_series (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    start_date TEXT NOT NULL,
+    all_day INTEGER NOT NULL DEFAULT 1,
+    local_time TEXT,
+    duration_minutes INTEGER,
+    timezone_name TEXT NOT NULL DEFAULT 'UTC',
+    frequency TEXT NOT NULL CHECK (frequency IN ('daily','weekly','monthly','yearly')),
+    interval INTEGER NOT NULL DEFAULT 1,
+    weekdays_csv TEXT NOT NULL DEFAULT '',
+    month_day INTEGER,
+    yearly_month INTEGER,
+    yearly_day INTEGER,
+    end_mode TEXT NOT NULL DEFAULT 'never' CHECK (end_mode IN ('never','until','count')),
+    until_date TEXT,
+    occurrence_count INTEGER,
+    revision INTEGER NOT NULL DEFAULT 1,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+)
+"""
+
+CREATE_SERIES_ACTIVE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_task_series_active
+ON task_series (active, deleted_at)
+"""
+
+# Теги серии. FK на tags каскадирует только ассоциацию; исторические
+# Task-строки серии никакими FK не задеваются.
+CREATE_SERIES_TAGS_TABLE = """
+CREATE TABLE IF NOT EXISTS series_tags (
+    series_uid TEXT NOT NULL,
+    tag_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (series_uid, tag_id),
+    FOREIGN KEY (series_uid) REFERENCES task_series(uid) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+)
+"""
+
+CREATE_SERIES_TAGS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_series_tags_series ON series_tags (series_uid)
+"""
+
+# Локальные шаблоны задач. rule_* заполняются только для kind='recurring'.
+CREATE_TASK_TEMPLATES_TABLE = """
+CREATE TABLE IF NOT EXISTS task_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL,
+    template_kind TEXT NOT NULL DEFAULT 'ordinary'
+        CHECK (template_kind IN ('ordinary','recurring')),
+    title TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    schedule_mode TEXT NOT NULL DEFAULT 'none'
+        CHECK (schedule_mode IN ('none','allday','timed')),
+    time_text TEXT NOT NULL DEFAULT '',
+    duration_minutes INTEGER,
+    rule_frequency TEXT,
+    rule_interval INTEGER,
+    rule_weekdays_csv TEXT,
+    rule_month_day INTEGER,
+    rule_yearly_month INTEGER,
+    rule_yearly_day INTEGER,
+    rule_end_mode TEXT,
+    rule_until_date TEXT,
+    rule_occurrence_count INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+)
+"""
+
+# Уникальность нормализованного имени — только среди живых шаблонов:
+# удалённый шаблон не блокирует повторное использование имени.
+CREATE_TEMPLATES_NAME_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_templates_active_name
+ON task_templates (normalized_name) WHERE deleted_at IS NULL
+"""
+
+CREATE_TEMPLATE_TAGS_TABLE = """
+CREATE TABLE IF NOT EXISTS template_tags (
+    template_uid TEXT NOT NULL,
+    tag_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (template_uid, tag_id),
+    FOREIGN KEY (template_uid) REFERENCES task_templates(uid) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+)
+"""
+
+CREATE_TEMPLATE_TAGS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_template_tags_template
+ON template_tags (template_uid)
+"""
+
+# Идентичность экземпляра серии уникальна, включая тумбстоуны и exception:
+# регенерация физически не может создать дубль слота.
+CREATE_TASK_OCCURRENCE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_series_occurrence
+ON tasks (series_uid, occurrence_key)
+WHERE series_uid IS NOT NULL AND occurrence_key IS NOT NULL
+"""
+
+CREATE_TASK_SERIES_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_tasks_series_uid
+ON tasks (series_uid) WHERE series_uid IS NOT NULL
+"""
+
 
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -156,6 +278,28 @@ def _migrate_completed_at(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_series_columns(connection: sqlite3.Connection) -> None:
+    """Аддитивные колонки привязки задач к локальной серии (v5 -> v6).
+
+    Идемпотентно: колонка добавляется, только если её нет. Существующие
+    строки остаются обычными задачами (series_uid = NULL); Google
+    recurring-метаданные не трогаются; TaskSeries из Google-повторений
+    НЕ строится.
+    """
+    existing = _column_names(connection, "tasks")
+    if "series_uid" not in existing:
+        connection.execute("ALTER TABLE tasks ADD COLUMN series_uid TEXT")
+    if "occurrence_key" not in existing:
+        connection.execute("ALTER TABLE tasks ADD COLUMN occurrence_key TEXT")
+    if "series_revision" not in existing:
+        connection.execute("ALTER TABLE tasks ADD COLUMN series_revision INTEGER")
+    if "is_series_exception" not in existing:
+        connection.execute(
+            "ALTER TABLE tasks ADD COLUMN is_series_exception INTEGER "
+            "NOT NULL DEFAULT 0"
+        )
+
+
 def create_schema(connection: sqlite3.Connection) -> None:
     """Создаёт таблицы, если их ещё нет (безопасно вызывать повторно).
 
@@ -175,6 +319,17 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_TASK_TAGS_TABLE)
     connection.execute(CREATE_TASK_TAGS_TASK_INDEX)
     connection.execute(CREATE_TASK_TAGS_TAG_INDEX)
+    connection.execute(CREATE_TASK_SERIES_TABLE)
+    connection.execute(CREATE_SERIES_ACTIVE_INDEX)
+    connection.execute(CREATE_SERIES_TAGS_TABLE)
+    connection.execute(CREATE_SERIES_TAGS_INDEX)
+    connection.execute(CREATE_TASK_TEMPLATES_TABLE)
+    connection.execute(CREATE_TEMPLATES_NAME_INDEX)
+    connection.execute(CREATE_TEMPLATE_TAGS_TABLE)
+    connection.execute(CREATE_TEMPLATE_TAGS_INDEX)
     _migrate_completed_at(connection)
+    _migrate_series_columns(connection)
+    connection.execute(CREATE_TASK_OCCURRENCE_INDEX)
+    connection.execute(CREATE_TASK_SERIES_INDEX)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

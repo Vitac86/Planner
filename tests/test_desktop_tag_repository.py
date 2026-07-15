@@ -23,7 +23,9 @@ def test_tag_migration_is_additive_and_idempotent(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"preserved", "tasks", "tags", "task_tags"} <= tables
         assert connection.execute("SELECT value FROM preserved").fetchone()[0] == "ok"
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        # Phase 3.2A подняла схему до v6 (серии/шаблоны) тем же аддитивным
+        # идемпотентным путём; теги остались нетронуты.
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_repository_reopen_persists_assignments_and_rename(tmp_path):
