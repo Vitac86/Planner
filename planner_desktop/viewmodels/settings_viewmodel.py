@@ -36,6 +36,10 @@ from planner_desktop.domain.templates import (
     TaskTemplate,
 )
 from planner_desktop.usecases.daily_task_service import DailyTaskService
+from planner_desktop.usecases.external_series_service import (
+    CATALOG_NOTE_RU,
+    ExternalSeriesService,
+)
 from planner_desktop.usecases.manual_sync_service import (
     LAST_SYNC_AT_KEY,
     LAST_SYNC_ERROR_KEY,
@@ -96,6 +100,7 @@ class SettingsViewModel(QObject):
     toastMessage = Signal(str)
     tagStateChanged = Signal()
     templateStateChanged = Signal()
+    externalSeriesStateChanged = Signal()
 
     def __init__(self, service: DesktopTaskService,
                  daily_service: DailyTaskService | None = None,
@@ -105,7 +110,8 @@ class SettingsViewModel(QObject):
                  tag_service: TagService | None = None,
                  connection_checker: Callable[[], Any] | None = None,
                  connector: Callable[[], Any] | None = None,
-                 executor: Any | None = None) -> None:
+                 executor: Any | None = None,
+                 external_series_service: ExternalSeriesService | None = None) -> None:
         super().__init__(parent)
         self._service = service
         self._daily = daily_service
@@ -114,6 +120,7 @@ class SettingsViewModel(QObject):
         self._connection_checker = connection_checker or _default_connection_checker
         self._connector = connector or _default_connector
         self._executor = executor  # лениво: QtBackgroundExecutor при первом действии
+        self._external_series = external_series_service
         self._busy_kind = ""       # "" | "connect" | "sync"
         self._live_error = ""      # ошибка текущей сессии (поверх сохранённой)
         self._live_error_set = False
@@ -295,6 +302,7 @@ class SettingsViewModel(QObject):
                 self.toastMessage.emit(outcome.summary)
         self.syncStateChanged.emit()
         self.stateChanged.emit()   # счётчики очереди/курсор изменились
+        self.externalSeriesStateChanged.emit()
         self.tasksMutated.emit()   # pull мог создать/обновить/удалить задачи
 
     @Slot()
@@ -303,6 +311,68 @@ class SettingsViewModel(QObject):
         self.syncStateChanged.emit()
         self.tagStateChanged.emit()
         self.templateStateChanged.emit()
+        self.externalSeriesStateChanged.emit()
+
+    # ---- обнаруженные повторяющиеся серии Google (Phase 3.2B1) ---------------
+
+    @Property(str, constant=True)
+    def externalSeriesNote(self) -> str:
+        return CATALOG_NOTE_RU
+
+    def _external_series_diagnostics(self) -> dict:
+        if self._external_series is None:
+            return {
+                "active_master_count": 0,
+                "unsupported_master_count": 0,
+                "cancelled_master_count": 0,
+                "possible_legacy_master_import_count": 0,
+                "last_catalog_refresh_at": None,
+            }
+        try:
+            return self._external_series.diagnostics()
+        except Exception:
+            logger.exception("Не удалось прочитать каталог Google-серий")
+            return {
+                "active_master_count": 0,
+                "unsupported_master_count": 0,
+                "cancelled_master_count": 0,
+                "possible_legacy_master_import_count": 0,
+                "last_catalog_refresh_at": None,
+            }
+
+    @Property("QVariantList", notify=externalSeriesStateChanged)
+    def externalSeriesRows(self):
+        if self._external_series is None:
+            return []
+        try:
+            return self._external_series.rows()
+        except Exception:
+            logger.exception("Не удалось прочитать строки Google-серий")
+            return []
+
+    @Property(int, notify=externalSeriesStateChanged)
+    def externalActiveSeriesCount(self) -> int:
+        return int(self._external_series_diagnostics()["active_master_count"])
+
+    @Property(int, notify=externalSeriesStateChanged)
+    def externalUnsupportedSeriesCount(self) -> int:
+        return int(self._external_series_diagnostics()["unsupported_master_count"])
+
+    @Property(int, notify=externalSeriesStateChanged)
+    def externalCancelledSeriesCount(self) -> int:
+        return int(self._external_series_diagnostics()["cancelled_master_count"])
+
+    @Property(int, notify=externalSeriesStateChanged)
+    def possibleLegacyMasterImportCount(self) -> int:
+        return int(self._external_series_diagnostics()[
+            "possible_legacy_master_import_count"
+        ])
+
+    @Property(str, notify=externalSeriesStateChanged)
+    def externalSeriesLastRefresh(self) -> str:
+        return _format_local(
+            self._external_series_diagnostics()["last_catalog_refresh_at"]
+        )
 
     # ---- локальные теги --------------------------------------------------------
 
@@ -692,5 +762,10 @@ class SettingsViewModel(QObject):
             f"Курсор pull-а: {self.syncCursor}",
             f"Google подключён: {'да' if self.googleConnected else 'нет'}",
             f"Последний синк: {self.lastSyncAt}",
+            f"Google-серий (активных): {self.externalActiveSeriesCount}",
+            f"Google-серий (неподдерживаемых): {self.externalUnsupportedSeriesCount}",
+            f"Google-серий (отменённых): {self.externalCancelledSeriesCount}",
+            f"Возможных старых импортов мастера: {self.possibleLegacyMasterImportCount}",
+            f"Обновление каталога Google-серий: {self.externalSeriesLastRefresh}",
         ]
         return "\n".join(lines)

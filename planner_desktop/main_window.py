@@ -12,12 +12,18 @@ from planner_desktop.repositories.daily_task_repository import (
     InMemoryDailyTaskRepository,
 )
 from planner_desktop.repositories.fake_task_repository import FakeTaskRepository
+from planner_desktop.repositories.external_series_repository import (
+    InMemoryExternalSeriesRepository,
+)
 from planner_desktop.repositories.series_repository import InMemorySeriesRepository
 from planner_desktop.repositories.tag_repository import InMemoryTagRepository
 from planner_desktop.repositories.template_repository import (
     InMemoryTemplateRepository,
 )
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
+from planner_desktop.storage.external_series_repository import (
+    SQLiteExternalSeriesRepository,
+)
 from planner_desktop.storage.series_repository import SQLiteSeriesRepository
 from planner_desktop.storage.sqlite_daily_task_repository import (
     SQLiteDailyTaskRepository,
@@ -26,6 +32,7 @@ from planner_desktop.storage.sqlite_task_repository import SQLiteTaskRepository
 from planner_desktop.storage.tag_repository import SQLiteTagRepository
 from planner_desktop.storage.template_repository import SQLiteTemplateRepository
 from planner_desktop.usecases.daily_task_service import DailyTaskService
+from planner_desktop.usecases.external_series_service import ExternalSeriesService
 from planner_desktop.usecases.occurrence_materializer import OccurrenceMaterializer
 from planner_desktop.usecases.recurrence_service import RecurrenceService
 from planner_desktop.usecases.task_service import DesktopTaskService
@@ -96,9 +103,18 @@ class MainWindow:
         if isinstance(self.repository, SQLiteTaskRepository):
             series_repository = SQLiteSeriesRepository(self.repository.db_path)
             template_repository = SQLiteTemplateRepository(self.repository.db_path)
+            self.external_series_repository = SQLiteExternalSeriesRepository(
+                self.repository.db_path
+            )
         else:
             series_repository = InMemorySeriesRepository()
             template_repository = InMemoryTemplateRepository()
+            self.external_series_repository = InMemoryExternalSeriesRepository(
+                self.repository
+            )
+        self.external_series_service = ExternalSeriesService(
+            self.external_series_repository
+        )
         self.recurrence_service = RecurrenceService(
             series_repository, self.repository, tag_service=self.tag_service)
         self.template_service = TemplateService(
@@ -115,7 +131,8 @@ class MainWindow:
         self.settings_viewmodel = SettingsViewModel(
             self.service, daily_service=self.daily_service,
             manual_sync_service=self._build_manual_sync_service(),
-            tag_service=self.tag_service)
+            tag_service=self.tag_service,
+            external_series_service=self.external_series_service)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
         self.search_viewmodel = SearchViewModel(self.service)

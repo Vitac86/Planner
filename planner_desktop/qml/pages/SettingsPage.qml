@@ -20,6 +20,11 @@ ScrollView {
             contentItem.contentY = Math.max(0, templateManagement.y - Theme.spacingLg)
     }
 
+    function scrollToGoogleSeries() {
+        if (contentItem)
+            contentItem.contentY = Math.max(0, googleSeriesCatalog.y - Theme.spacingLg)
+    }
+
     // Карточка «иконка + название настройки + значение».
     component SettingRow: Panel {
         property string name: ""
@@ -448,6 +453,99 @@ ScrollView {
                     Badge {
                         text: "Горизонт: " + settingsVm.materializationHorizonText
                     }
+                }
+            }
+        }
+
+        // ---- Read-only Google recurring-master catalog (Phase 3.2B1) ----
+        Panel {
+            id: googleSeriesCatalog
+            objectName: "settingsGoogleSeriesCatalog"
+            Layout.fillWidth: true
+            implicitHeight: googleSeriesColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: googleSeriesColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: Theme.spacingSm
+                    AppIcon { name: "repeat"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        spacing: 2
+                        Label {
+                            text: "Повторяющиеся серии Google"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: settingsVm.externalSeriesNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                        }
+                    }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    Badge { text: "Активных: " + settingsVm.externalActiveSeriesCount }
+                    Badge {
+                        text: "Не поддерживается: " + settingsVm.externalUnsupportedSeriesCount
+                        fg: Theme.warningText
+                        bg: Theme.warningSoft
+                    }
+                    Badge { text: "Отменённых: " + settingsVm.externalCancelledSeriesCount }
+                    Badge {
+                        text: "Возможных старых импортов: "
+                              + settingsVm.possibleLegacyMasterImportCount
+                    }
+                }
+
+                Label {
+                    text: "Последнее обновление локального каталога: "
+                          + settingsVm.externalSeriesLastRefresh
+                    font.pixelSize: Theme.fontCaption
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                }
+
+                Repeater {
+                    model: settingsVm.externalSeriesRows
+                    delegate: ExternalSeriesRow {
+                        required property var modelData
+                        seriesData: modelData
+                        compact: page.compact
+                    }
+                }
+
+                Label {
+                    visible: settingsVm.externalSeriesRows.length === 0
+                    text: "Серии ещё не обнаружены. Каталог заполняется только "
+                          + "после явной ручной синхронизации."
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                 }
             }
         }
