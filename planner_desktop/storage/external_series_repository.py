@@ -48,6 +48,9 @@ def _row_to_series(row: sqlite3.Row) -> ExternalCalendarSeries:
         first_seen_at=_text_to_dt(row["first_seen_at"]) or utc_now(),
         last_seen_at=_text_to_dt(row["last_seen_at"]) or utc_now(),
         deleted_at=_text_to_dt(row["deleted_at"]),
+        planner_owned=bool(row["planner_owned"]),
+        linked_series_uid=row["linked_series_uid"],
+        planner_payload_hash=row["planner_payload_hash"],
     )
 
 
@@ -80,7 +83,8 @@ class SQLiteExternalSeriesRepository:
             series.support_status, series.unsupported_reason,
             series.remote_status, _dt_to_text(series.remote_updated_at),
             _dt_to_text(series.first_seen_at), _dt_to_text(series.last_seen_at),
-            _dt_to_text(series.deleted_at),
+            _dt_to_text(series.deleted_at), int(series.planner_owned),
+            series.linked_series_uid, series.planner_payload_hash,
         )
 
     def upsert(self, series: ExternalCalendarSeries) -> ExternalCalendarSeries:
@@ -91,8 +95,9 @@ class SQLiteExternalSeriesRepository:
                 start_kind, start_value, end_value, timezone_name,
                 recurrence_lines_json, parsed_rule_json, support_status,
                 unsupported_reason, remote_status, remote_updated_at,
-                first_seen_at, last_seen_at, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                first_seen_at, last_seen_at, deleted_at, planner_owned,
+                linked_series_uid, planner_payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(provider, calendar_id, remote_event_id) DO UPDATE SET
                 etag = excluded.etag,
                 title = excluded.title,
@@ -108,7 +113,10 @@ class SQLiteExternalSeriesRepository:
                 remote_status = excluded.remote_status,
                 remote_updated_at = excluded.remote_updated_at,
                 last_seen_at = excluded.last_seen_at,
-                deleted_at = excluded.deleted_at
+                deleted_at = excluded.deleted_at,
+                planner_owned = excluded.planner_owned,
+                linked_series_uid = excluded.linked_series_uid,
+                planner_payload_hash = excluded.planner_payload_hash
             """,
             self._params(series),
         )

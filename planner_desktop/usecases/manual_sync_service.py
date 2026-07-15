@@ -59,6 +59,12 @@ class ManualSyncResult:
     recurring_instances_pulled: int = 0
     unsupported_masters: int = 0
     cancelled_masters: int = 0
+    series_masters_created: int = 0
+    series_masters_updated: int = 0
+    series_masters_deleted: int = 0
+    series_master_conflicts: int = 0
+    series_ops_terminal: int = 0
+    linked_instance_changes_quarantined: int = 0
     pending_before: int = 0
     pending_after: int = 0
     terminal_ops: int = 0
@@ -79,6 +85,14 @@ class ManualSyncResult:
             f"экземпляров серий {self.recurring_instances_pulled}",
             f"неподдерживаемых мастеров {self.unsupported_masters}",
             f"отменённых мастеров {self.cancelled_masters}",
+            f"мастеров создано {self.series_masters_created}",
+            f"мастеров обновлено {self.series_masters_updated}",
+            f"мастеров удалено {self.series_masters_deleted}",
+            f"конфликтов мастеров {self.series_master_conflicts}",
+            (
+                "изменений экземпляров в карантине "
+                f"{self.linked_instance_changes_quarantined}"
+            ),
         ])
         if self.pending_after:
             parts.append(f"в очереди осталось {self.pending_after}")
@@ -158,6 +172,10 @@ class ManualSyncService:
         from planner_desktop.storage.external_series_repository import (
             SQLiteExternalSeriesRepository,
         )
+        from planner_desktop.storage.calendar_series_sync_store import (
+            CalendarSeriesSyncStore,
+        )
+        from planner_desktop.storage.series_repository import SQLiteSeriesRepository
 
         repository = SQLiteTaskRepository(self._db_path)
         try:
@@ -165,7 +183,23 @@ class ManualSyncService:
             try:
                 external_series = SQLiteExternalSeriesRepository(self._db_path)
                 try:
-                    return self._run_cycle(repository, store, external_series)
+                    series_store = CalendarSeriesSyncStore(
+                        self._db_path, clock=self._clock
+                    )
+                    try:
+                        series_repository = SQLiteSeriesRepository(self._db_path)
+                        try:
+                            return self._run_cycle(
+                                repository,
+                                store,
+                                external_series,
+                                series_store=series_store,
+                                series_repository=series_repository,
+                            )
+                        finally:
+                            series_repository.close()
+                    finally:
+                        series_store.close()
                 finally:
                     external_series.close()
             finally:
@@ -173,8 +207,15 @@ class ManualSyncService:
         finally:
             repository.close()
 
-    def _run_cycle(self, repository: "TaskRepository",
-                   store: "CalendarSyncStore", external_series_repository=None) -> ManualSyncResult:
+    def _run_cycle(
+        self,
+        repository: "TaskRepository",
+        store: "CalendarSyncStore",
+        external_series_repository=None,
+        *,
+        series_store=None,
+        series_repository=None,
+    ) -> ManualSyncResult:
         started = self._clock()
         pending_before = store.count_pending_ops()
         cursor_before = store.get_sync_cursor()
@@ -192,8 +233,28 @@ class ManualSyncService:
         catalog = (external_series_repository
                    if external_series_repository is not None
                    else self._external_series_repository)
-        engine = CalendarSyncEngine(repository, store, gateway, catalog)
+        engine = CalendarSyncEngine(
+            repository,
+            store,
+            gateway,
+            catalog,
+            series_link_store=series_store,
+        )
+        series_result = None
         try:
+            if series_store is not None and series_repository is not None:
+                from planner_desktop.sync.calendar_series_sync_engine import (
+                    CalendarSeriesSyncEngine,
+                )
+
+                series_engine = CalendarSeriesSyncEngine(
+                    series_repository,
+                    repository,
+                    series_store,
+                    catalog,
+                    gateway,
+                )
+                series_result = series_engine.push_pending()
             pushed = engine.push_pending()
             pulled = engine.pull_remote_changes()
         except Exception as exc:
@@ -211,13 +272,23 @@ class ManualSyncService:
         cursor_after = store.get_sync_cursor()
         return self._finish(store, ManualSyncResult(
             ok=True,
-            pushed=pushed,
+            pushed=pushed + (series_result.pushed if series_result else 0),
             pulled=pulled,
             ordinary_events_pulled=engine.last_pull_stats.ordinary_events,
             recurring_masters_discovered=engine.last_pull_stats.recurring_masters,
             recurring_instances_pulled=engine.last_pull_stats.recurring_instances,
             unsupported_masters=engine.last_pull_stats.unsupported_masters,
             cancelled_masters=engine.last_pull_stats.cancelled_masters,
+            series_masters_created=(series_result.created if series_result else 0),
+            series_masters_updated=(series_result.updated if series_result else 0),
+            series_masters_deleted=(series_result.deleted if series_result else 0),
+            series_master_conflicts=(series_result.conflicts if series_result else 0),
+            series_ops_terminal=(
+                series_store.count_terminal_ops() if series_store is not None else 0
+            ),
+            linked_instance_changes_quarantined=(
+                engine.last_pull_stats.linked_instance_changes_quarantined
+            ),
             pending_before=pending_before,
             pending_after=store.count_pending_ops(),
             terminal_ops=store.count_terminal_ops(),

@@ -79,6 +79,9 @@ class ExternalCalendarSeries:
     first_seen_at: datetime = field(default_factory=utc_now)
     last_seen_at: datetime = field(default_factory=utc_now)
     deleted_at: Optional[datetime] = None
+    planner_owned: bool = False
+    linked_series_uid: Optional[str] = None
+    planner_payload_hash: Optional[str] = None
     id: Optional[int] = None
 
     @property
