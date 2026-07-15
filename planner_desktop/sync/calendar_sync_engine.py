@@ -62,6 +62,12 @@ from planner_desktop.domain.external_series import (
 )
 from planner_desktop.domain.google_recurrence import parse_google_recurrence
 from planner_desktop.domain.recurrence import SeriesSchedule
+from planner_desktop.domain.series_calendar_link import (
+    PLANNER_PAYLOAD_HASH_PROPERTY,
+    PLANNER_SERIES_UID_PROPERTY,
+    RemoteOccurrenceChange,
+    SeriesLinkStatus,
+)
 from planner_desktop.domain.task import Task
 from planner_desktop.domain.task import utc_now
 from planner_desktop.sync import calendar_mapper
@@ -136,6 +142,7 @@ class CalendarSyncEngine:
         *,
         external_series_provider: str = EXTERNAL_PROVIDER_GOOGLE,
         external_series_calendar_id: Optional[str] = None,
+        series_link_store=None,
     ) -> None:
         self._repository = repository
         self._store = store
@@ -148,6 +155,7 @@ class CalendarSyncEngine:
             or "primary"
         )
         self.last_pull_stats = CalendarPullStats()
+        self._series_link_store = series_link_store
 
     # ---- реакция на локальные изменения ---------------------------------------
 
@@ -242,15 +250,21 @@ class CalendarSyncEngine:
 
     def _apply_remote_event(self, event: CalendarEvent) -> None:
         known_master = self._known_external_master(event)
-        if event.is_recurring_master or known_master is not None:
+        linked_master = self._linked_master(event.id)
+        if event.is_recurring_master or known_master is not None or linked_master is not None:
             self.last_pull_stats.recurring_masters += 1
             if event.is_cancelled:
                 self.last_pull_stats.cancelled_masters += 1
-            self._apply_remote_master(event, known_master)
+            self._apply_remote_master(event, known_master, linked_master)
             return
 
         if event.is_recurring_instance:
             self.last_pull_stats.recurring_instances += 1
+            linked_parent = self._linked_master(event.recurring_event_id)
+            if linked_parent is not None:
+                self._quarantine_linked_instance(event, linked_parent)
+                self.last_pull_stats.linked_instance_changes_quarantined += 1
+                return
         else:
             self.last_pull_stats.ordinary_events += 1
 
@@ -303,6 +317,15 @@ class CalendarSyncEngine:
             event.id,
         )
 
+    def _linked_master(self, remote_event_id: Optional[str]):
+        if self._series_link_store is None or not remote_event_id:
+            return None
+        return self._series_link_store.get_link_by_remote(
+            self._external_series_provider,
+            self._external_series_calendar_id,
+            remote_event_id,
+        )
+
     @staticmethod
     def _event_schedule(event: CalendarEvent) -> Optional[SeriesSchedule]:
         recurrence_start = event.recurrence_start or event.start
@@ -331,6 +354,7 @@ class CalendarSyncEngine:
         self,
         event: CalendarEvent,
         existing: Optional[ExternalCalendarSeries],
+        linked=None,
     ) -> None:
         repository = self._external_series_repository
         # Compatibility mode for older engine construction: the classification
@@ -340,15 +364,25 @@ class CalendarSyncEngine:
         if not event.id:
             raise ValueError("Recurring master does not have a remote event id.")
         seen_at = utc_now()
-        if event.is_cancelled and existing is not None:
-            repository.mark_deleted(
-                self._external_series_provider,
-                self._external_series_calendar_id,
-                event.id,
-                etag=event.etag,
-                remote_updated_at=event.updated_at,
-                seen_at=seen_at,
-            )
+        if event.is_cancelled:
+            if existing is not None:
+                repository.mark_deleted(
+                    self._external_series_provider,
+                    self._external_series_calendar_id,
+                    event.id,
+                    etag=event.etag,
+                    remote_updated_at=event.updated_at,
+                    seen_at=seen_at,
+                )
+            if linked is not None:
+                self._series_link_store.cancel_pending_ops(linked.series_uid)
+                self._series_link_store.set_link_status(
+                    linked.series_uid,
+                    SeriesLinkStatus.REMOTE_DELETED,
+                    error="Связанный мастер Google удалён.",
+                    remote_etag=event.etag,
+                    remote_updated_at=event.updated_at,
+                )
             return
 
         schedule = self._event_schedule(event)
@@ -360,6 +394,12 @@ class CalendarSyncEngine:
         catalog_start = event.recurrence_start or event.start
         start_value = catalog_start.isoformat() if catalog_start is not None else ""
         end_value = event.end.isoformat() if event.end is not None else ""
+        remote_payload_hash = event.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        remote_series_uid = event.private_extended_properties.get(
+            PLANNER_SERIES_UID_PROPERTY
+        )
         repository.upsert(ExternalCalendarSeries(
             provider=self._external_series_provider,
             calendar_id=self._external_series_calendar_id,
@@ -381,4 +421,76 @@ class CalendarSyncEngine:
             first_seen_at=seen_at,
             last_seen_at=seen_at,
             deleted_at=seen_at if event.is_cancelled else None,
+            planner_owned=bool(remote_series_uid),
+            linked_series_uid=(linked.series_uid if linked is not None else None),
+            planner_payload_hash=remote_payload_hash,
         ))
+        if linked is not None:
+            etag_matches = (
+                linked.remote_etag is None or event.etag == linked.remote_etag
+            )
+            hash_matches = (
+                linked.last_synced_payload_hash is not None
+                and remote_payload_hash == linked.last_synced_payload_hash
+                and remote_series_uid == linked.series_uid
+            )
+            if etag_matches and hash_matches:
+                linked.remote_etag = event.etag
+                linked.remote_updated_at = event.updated_at
+                linked.last_error = None
+                # Preserve a pending local op; an echo cannot silently make it
+                # synced before its write succeeds.
+                if linked.link_status not in (
+                    SeriesLinkStatus.PENDING_CREATE,
+                    SeriesLinkStatus.PENDING_UPDATE,
+                    SeriesLinkStatus.PENDING_DELETE,
+                ):
+                    linked.link_status = SeriesLinkStatus.SYNCED
+                self._series_link_store.update_link(linked)
+            else:
+                self._series_link_store.cancel_pending_ops(linked.series_uid)
+                self._series_link_store.set_link_status(
+                    linked.series_uid,
+                    SeriesLinkStatus.CONFLICT,
+                    error=(
+                        "Мастер Google изменён вне Planner. Локальная серия "
+                        "сохранена; автоматическая перезапись отключена."
+                    ),
+                    remote_etag=event.etag,
+                    remote_updated_at=event.updated_at,
+                )
+
+    def _quarantine_linked_instance(self, event: CalendarEvent, linked) -> None:
+        if self._series_link_store is None or not event.id:
+            return
+        original_start = (
+            event.original_start.isoformat() if event.original_start is not None else ""
+        )
+        payload = {
+            "id": event.id,
+            "status": event.status,
+            "recurringEventId": event.recurring_event_id,
+            "originalStartTime": original_start,
+            "summary": event.summary,
+            "description": event.description,
+            "start": event.start.isoformat() if event.start is not None else None,
+            "end": event.end.isoformat() if event.end is not None else None,
+        }
+        seen = utc_now()
+        self._series_link_store.upsert_occurrence_change(
+            RemoteOccurrenceChange(
+                provider=linked.provider,
+                calendar_id=linked.calendar_id,
+                remote_master_event_id=linked.remote_event_id,
+                remote_instance_event_id=event.id,
+                original_start_value=original_start,
+                status=event.status,
+                payload_json=json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                remote_etag=event.etag,
+                remote_updated_at=event.updated_at,
+                first_seen_at=seen,
+                last_seen_at=seen,
+            )
+        )
