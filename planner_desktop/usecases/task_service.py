@@ -46,6 +46,9 @@ from planner_desktop.domain.commands import (
 )
 from planner_desktop.domain import scheduling
 from planner_desktop.domain.task import Task
+from planner_desktop.domain.series_calendar_link import (
+    LINKED_OCCURRENCE_CHANGE_ERROR,
+)
 from planner_desktop.repositories import TaskRepository
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.sync.calendar_sync_engine import (
@@ -129,6 +132,18 @@ class DesktopTaskService:
         сознательно этого не делает)."""
         return task.series_uid is not None
 
+    def _is_linked_series_occurrence(self, task: Task) -> bool:
+        if task.series_uid is None:
+            return False
+        recurrence = self.recurrence_service
+        links = getattr(recurrence, "series_link_service", None)
+        return bool(links is not None and links.is_linked(task.series_uid))
+
+    def _series_interaction_error(self, task: Task) -> str:
+        if self._is_linked_series_occurrence(task):
+            return LINKED_OCCURRENCE_CHANGE_ERROR
+        return SERIES_INTERACTION_ERROR
+
     def create_task(self, task: Task) -> Task:
         created = self.repository.add(task)
         if self._queue is not None and not self._is_local_series_occurrence(created):
@@ -154,6 +169,8 @@ class DesktopTaskService:
         task = self.repository.get(task_id)
         if task is None or task.is_deleted:
             return False
+        if self._is_linked_series_occurrence(task):
+            raise ValueError(LINKED_OCCURRENCE_CHANGE_ERROR)
         original = deepcopy(task)
         queue_snapshot = self._queue_snapshot(task.uid)
         try:
@@ -514,7 +531,7 @@ class DesktopTaskService:
         if self._is_recurring_instance(task):
             return TaskOperationResult(errors=[RECURRING_INTERACTION_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         if task.start is None or task.is_all_day:
             return TaskOperationResult(errors=[TIMED_TASK_REQUIRED_ERROR])
         current_minutes = (
@@ -549,7 +566,7 @@ class DesktopTaskService:
         if self._is_recurring_instance(task):
             return TaskOperationResult(errors=[RECURRING_INTERACTION_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         if task.start is None or task.is_all_day:
             return TaskOperationResult(errors=[TIMED_TASK_REQUIRED_ERROR])
         proposed_start = start or task.start
@@ -583,7 +600,7 @@ class DesktopTaskService:
         if self._is_recurring_instance(task):
             return TaskOperationResult(errors=[RECURRING_INTERACTION_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         span = 1
         if task.is_all_day and task.start is not None and task.end is not None:
             span = max(1, (task.end.date() - task.start.date()).days)
@@ -610,7 +627,7 @@ class DesktopTaskService:
         if self._is_recurring_instance(task):
             return TaskOperationResult(errors=[RECURRING_INTERACTION_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         end = start + timedelta(minutes=duration_minutes)
         error = self._validate_timed_interval(start, end)
         if error:
@@ -640,7 +657,7 @@ class DesktopTaskService:
         if self._is_recurring_instance(task):
             return TaskOperationResult(errors=[RECURRING_INTERACTION_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         if is_all_day:
             all_day_start = start.replace(hour=0, minute=0, second=0, microsecond=0)
             return self._commit_schedule_change(
@@ -707,7 +724,7 @@ class DesktopTaskService:
         if task.google_calendar_recurring_event_id is not None:
             return TaskOperationResult(errors=[RESCHEDULE_RECURRING_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         if preset == scheduling.PRESET_UNSCHEDULE and task.start is None:
             return TaskOperationResult(errors=[TASK_PRESET_UNAVAILABLE_ERROR])
         if preset == scheduling.PRESET_PLUS_HOUR and (
@@ -778,7 +795,7 @@ class DesktopTaskService:
         if task is None:
             return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         if action == scheduling.SNOOZE_UNSCHEDULE:
             return self.unschedule_task(uid)
         if task.google_calendar_recurring_event_id is not None:
@@ -820,7 +837,7 @@ class DesktopTaskService:
         if task is None:
             return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
         if self._is_local_series_occurrence(task):
-            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+            return TaskOperationResult(errors=[self._series_interaction_error(task)])
         if task.start is None:
             return TaskOperationResult(task=task)  # уже без даты
         if self._is_recurring_instance(task):

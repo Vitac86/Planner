@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 # Статусы события — как в Calendar API: cancelled означает удаление
 # (в том числе сделанное на телефоне в приложении Google Calendar).
@@ -67,6 +67,10 @@ class CalendarEvent:
     # Provider wall-clock DTSTART retained for lossless UTC UNTIL analysis.
     # ``start`` keeps the long-standing local-naive Task mapping semantics.
     recurrence_start: Optional[Union[date, datetime]] = None
+    # Hidden application metadata on the calendar-local event copy.  Ordinary
+    # Task mapping leaves it empty; B2 recurring-master writes use only the
+    # Planner ownership/revision/hash markers defined in series_calendar_link.
+    private_extended_properties: Dict[str, str] = field(default_factory=dict)
 
     @property
     def is_cancelled(self) -> bool:
@@ -97,6 +101,7 @@ class CalendarPullStats:
     recurring_instances: int = 0
     unsupported_masters: int = 0
     cancelled_masters: int = 0
+    linked_instance_changes_quarantined: int = 0
 
 
 @dataclass
@@ -144,3 +149,13 @@ class TerminalGatewayError(CalendarGatewayError):
     Операция сразу помечается terminal (dead-letter) и больше
     не выбирается в push.
     """
+
+
+class RemoteMasterConflictError(CalendarGatewayError):
+    """Remote recurring master no longer satisfies a safe-write precondition."""
+
+    def __init__(
+        self, message: str, remote_event: Optional[CalendarEvent] = None
+    ) -> None:
+        super().__init__(message)
+        self.remote_event = remote_event

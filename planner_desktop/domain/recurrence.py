@@ -61,6 +61,7 @@ class RecurrenceEndMode(str, Enum):
 class SeriesEditScope(str, Enum):
     THIS_OCCURRENCE = "this_occurrence"
     THIS_AND_FUTURE = "this_and_future"
+    ENTIRE_SERIES = "entire_series"
 
 
 # ---- пресеты ----------------------------------------------------------------

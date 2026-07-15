@@ -37,6 +37,9 @@ from planner_desktop.domain.recurrence import (
     replace_series,
     validate_rule,
 )
+from planner_desktop.domain.series_calendar_link import (
+    LINKED_OCCURRENCE_CHANGE_ERROR,
+)
 from planner_desktop.domain.task import Task
 from planner_desktop.repositories import TaskRepository
 from planner_desktop.repositories.series_repository import SeriesRepository
@@ -124,6 +127,9 @@ class RecurrenceService:
         self.series_repository = series_repository
         self.task_repository = task_repository
         self.tag_service = tag_service
+        # Attached by MainWindow after the schema-v8 store is built.  Kept
+        # optional so Phase 3.2A in-memory tests retain local-only behavior.
+        self.series_link_service = None
         #: Слушатели «серии изменились» (материализатор сбрасывает кэш).
         self._change_listeners: List[Callable[[], None]] = []
 
@@ -214,6 +220,8 @@ class RecurrenceService:
                 removed = self._remove_replaceable_occurrences(
                     uid, from_slot=None
                 )
+            if self.series_link_service is not None:
+                self.series_link_service.on_series_updated(original, updated)
         except Exception as exc:
             self._restore_series(original)
             self._restore_tasks(removed)
@@ -254,6 +262,8 @@ class RecurrenceService:
             removed = self._remove_replaceable_occurrences(
                 uid, from_slot=boundary
             )
+            if self.series_link_service is not None:
+                self.series_link_service.on_series_updated(original, stopped)
         except Exception as exc:
             self._restore_series(original)
             self._restore_tasks(removed)
@@ -269,6 +279,14 @@ class RecurrenceService:
         series = self.series_repository.get_by_uid(uid)
         if series is None or series.is_deleted:
             return SeriesOperationResult(errors=[SERIES_NOT_FOUND_ERROR])
+        if (
+            self.series_link_service is not None
+            and self.series_link_service.is_linked(uid)
+        ):
+            from planner_desktop.usecases.series_calendar_link_service import (
+                SERIES_DELETE_REQUIRES_INTENT,
+            )
+            return SeriesOperationResult(errors=[SERIES_DELETE_REQUIRES_INTENT])
         original = replace_series(series)
         removed: List[Task] = []
         try:
@@ -408,6 +426,13 @@ class RecurrenceService:
             return OccurrenceOperationResult(
                 errors=[NOT_A_SERIES_OCCURRENCE_ERROR]
             )
+        if (
+            self.series_link_service is not None
+            and self.series_link_service.is_linked(task.series_uid)
+        ):
+            return OccurrenceOperationResult(
+                errors=[LINKED_OCCURRENCE_CHANGE_ERROR]
+            )
         errors = validate_editor(command)
         if errors:
             return OccurrenceOperationResult(errors=errors)
@@ -458,6 +483,11 @@ class RecurrenceService:
         series = self.series_repository.get_by_uid(task.series_uid)
         if series is None or series.is_deleted:
             return SeriesSplitResult(errors=[SERIES_NOT_FOUND_ERROR])
+        if (
+            self.series_link_service is not None
+            and self.series_link_service.is_linked(series.uid)
+        ):
+            return SeriesSplitResult(errors=[LINKED_OCCURRENCE_CHANGE_ERROR])
         errors = validate_editor(command)
         if errors:
             return SeriesSplitResult(errors=errors)
@@ -605,6 +635,11 @@ class RecurrenceService:
         task = self.task_repository.get_by_uid(uid)
         if task is None or task.series_uid is None:
             return SeriesOperationResult(errors=[OCCURRENCE_NOT_FOUND_ERROR])
+        if (
+            self.series_link_service is not None
+            and self.series_link_service.is_linked(task.series_uid)
+        ):
+            return SeriesOperationResult(errors=[LINKED_OCCURRENCE_CHANGE_ERROR])
         boundary = slot_date_from_key(task.occurrence_key)
         if boundary is None:
             return SeriesOperationResult(

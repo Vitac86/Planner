@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -304,6 +304,113 @@ ON external_calendar_series (last_seen_at)
 """
 
 
+# Explicit local TaskSeries <-> Google recurring-master links (Phase 3.2B2).
+# Rows are retained after detach for diagnostics/history.  There is deliberately
+# no cascading foreign key: deleting a link or tombstoning a series must never
+# remove materialized Task history.
+CREATE_TASK_SERIES_CALENDAR_LINKS_TABLE = """
+CREATE TABLE IF NOT EXISTS task_series_calendar_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_uid TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    calendar_id TEXT NOT NULL,
+    remote_event_id TEXT NOT NULL,
+    remote_etag TEXT,
+    remote_updated_at TEXT,
+    link_status TEXT NOT NULL CHECK (link_status IN (
+        'pending_create','synced','pending_update','pending_delete',
+        'conflict','remote_deleted','detached','terminal_error'
+    )),
+    last_synced_series_revision INTEGER,
+    last_synced_payload_hash TEXT,
+    linked_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    detached_at TEXT,
+    last_error TEXT
+)
+"""
+
+CREATE_ACTIVE_SERIES_LINK_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_series_calendar_links_active_series
+ON task_series_calendar_links (series_uid)
+WHERE link_status <> 'detached'
+"""
+
+CREATE_ACTIVE_REMOTE_LINK_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_series_calendar_links_active_remote
+ON task_series_calendar_links (provider, calendar_id, remote_event_id)
+WHERE link_status <> 'detached'
+"""
+
+CREATE_SERIES_LINK_STATUS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_series_calendar_links_status
+ON task_series_calendar_links (link_status, updated_at)
+"""
+
+
+# Independent dead-letter queue for recurring-master writes.  At most one
+# pending row exists per series; terminal rows remain visible and are never
+# selected automatically again.
+CREATE_PENDING_CALENDAR_SERIES_OPS_TABLE = """
+CREATE TABLE IF NOT EXISTS pending_calendar_series_ops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_uid TEXT NOT NULL,
+    op TEXT NOT NULL CHECK (op IN ('create','update','delete')),
+    remote_event_id TEXT,
+    desired_revision INTEGER,
+    desired_payload_hash TEXT,
+    payload_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','terminal')),
+    created_at TEXT NOT NULL,
+    next_try_at TEXT NOT NULL
+)
+"""
+
+CREATE_PENDING_SERIES_OP_UNIQUE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_series_ops_one_per_series
+ON pending_calendar_series_ops (series_uid)
+WHERE status = 'pending'
+"""
+
+CREATE_PENDING_SERIES_OP_DUE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_pending_series_ops_due
+ON pending_calendar_series_ops (status, next_try_at, id)
+"""
+
+
+# Changed/cancelled Google instances of a linked local master are quarantined
+# until B3 rather than being imported as ordinary Tasks.
+CREATE_EXTERNAL_SERIES_OCCURRENCE_CHANGES_TABLE = """
+CREATE TABLE IF NOT EXISTS external_series_occurrence_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    calendar_id TEXT NOT NULL,
+    remote_master_event_id TEXT NOT NULL,
+    remote_instance_event_id TEXT NOT NULL,
+    original_start_value TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT,
+    remote_etag TEXT,
+    remote_updated_at TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (
+        provider, calendar_id, remote_master_event_id,
+        remote_instance_event_id, original_start_value
+    )
+)
+"""
+
+CREATE_EXTERNAL_OCCURRENCE_STATUS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_external_occurrence_changes_status
+ON external_series_occurrence_changes (resolved_at, last_seen_at)
+"""
+
+
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
@@ -346,6 +453,24 @@ def _migrate_series_columns(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_external_series_link_columns(connection: sqlite3.Connection) -> None:
+    """Add B2 ownership diagnostics without rewriting B1 catalog rows."""
+    existing = _column_names(connection, "external_calendar_series")
+    if "planner_owned" not in existing:
+        connection.execute(
+            "ALTER TABLE external_calendar_series ADD COLUMN planner_owned "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    if "linked_series_uid" not in existing:
+        connection.execute(
+            "ALTER TABLE external_calendar_series ADD COLUMN linked_series_uid TEXT"
+        )
+    if "planner_payload_hash" not in existing:
+        connection.execute(
+            "ALTER TABLE external_calendar_series ADD COLUMN planner_payload_hash TEXT"
+        )
+
+
 def create_schema(connection: sqlite3.Connection) -> None:
     """Создаёт таблицы, если их ещё нет (безопасно вызывать повторно).
 
@@ -378,8 +503,18 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_TASK_OCCURRENCE_INDEX)
     connection.execute(CREATE_TASK_SERIES_INDEX)
     connection.execute(CREATE_EXTERNAL_CALENDAR_SERIES_TABLE)
+    _migrate_external_series_link_columns(connection)
     connection.execute(CREATE_EXTERNAL_SERIES_REMOTE_INDEX)
     connection.execute(CREATE_EXTERNAL_SERIES_STATUS_INDEX)
     connection.execute(CREATE_EXTERNAL_SERIES_LAST_SEEN_INDEX)
+    connection.execute(CREATE_TASK_SERIES_CALENDAR_LINKS_TABLE)
+    connection.execute(CREATE_ACTIVE_SERIES_LINK_INDEX)
+    connection.execute(CREATE_ACTIVE_REMOTE_LINK_INDEX)
+    connection.execute(CREATE_SERIES_LINK_STATUS_INDEX)
+    connection.execute(CREATE_PENDING_CALENDAR_SERIES_OPS_TABLE)
+    connection.execute(CREATE_PENDING_SERIES_OP_UNIQUE_INDEX)
+    connection.execute(CREATE_PENDING_SERIES_OP_DUE_INDEX)
+    connection.execute(CREATE_EXTERNAL_SERIES_OCCURRENCE_CHANGES_TABLE)
+    connection.execute(CREATE_EXTERNAL_OCCURRENCE_STATUS_INDEX)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

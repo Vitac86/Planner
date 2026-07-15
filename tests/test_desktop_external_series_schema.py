@@ -57,7 +57,7 @@ def test_schema_v7_migration_is_additive_and_idempotent(tmp_path):
     create_schema(connection)
     create_schema(connection)
 
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
     columns = {
         row[1] for row in connection.execute(
             "PRAGMA table_info(external_calendar_series)"
@@ -91,4 +91,3 @@ def test_external_catalog_has_no_foreign_key_to_tasks_or_local_series(tmp_path):
         "PRAGMA foreign_key_list(external_calendar_series)"
     ).fetchall() == []
     connection.close()
-
