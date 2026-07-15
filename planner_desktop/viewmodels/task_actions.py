@@ -39,6 +39,9 @@ from planner_desktop.domain.recurrence import (
     recurrence_presets,
     validate_rule,
 )
+from planner_desktop.domain.series_calendar_link import (
+    readable_series_link_status,
+)
 from planner_desktop.domain.task import Task
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.usecases.bulk_task_service import (
@@ -271,6 +274,8 @@ class TaskActionsViewModel(QObject):
         data.setdefault("seriesSummary", "")
         data.setdefault("rule", rule_to_map(None))
         data.setdefault("timezoneName", "")
+        data.setdefault("seriesLinkStatus", "")
+        data.setdefault("seriesLinkedToGoogle", False)
         recurrence = getattr(self._service, "recurrence_service", None)
         if data.get("isSeriesOccurrence") and recurrence is not None:
             series = recurrence.get_series(data.get("seriesUid", ""))
@@ -278,7 +283,118 @@ class TaskActionsViewModel(QObject):
                 data["seriesSummary"] = series.summary()
                 data["rule"] = rule_to_map(series.rule)
                 data["timezoneName"] = series.schedule.timezone_name
+                links = getattr(recurrence, "series_link_service", None)
+                link = links.get_link(series.uid) if links is not None else None
+                data["seriesLinkedToGoogle"] = link is not None
+                data["seriesLinkStatus"] = (
+                    readable_series_link_status(link.link_status)
+                    if link is not None
+                    else readable_series_link_status(None)
+                )
         return data
+
+    def _series_links(self):
+        recurrence = getattr(self._service, "recurrence_service", None)
+        return getattr(recurrence, "series_link_service", None)
+
+    @Slot(str, result="QVariantMap")
+    def seriesGoogleLinkData(self, series_uid: str) -> Dict[str, Any]:
+        links = self._series_links()
+        recurrence = getattr(self._service, "recurrence_service", None)
+        series = recurrence.get_series(series_uid) if recurrence is not None else None
+        if links is None or series is None:
+            return {
+                "seriesUid": series_uid,
+                "available": False,
+                "statusText": "Локальная серия",
+                "validationErrors": ["Сервис связи с Google недоступен."],
+            }
+        link = links.get_link(series_uid)
+        validation = (
+            links.validate_connection(series_uid) if link is None else None
+        )
+        pending = links.store.get_pending_op(series_uid)
+        return {
+            "seriesUid": series_uid,
+            "available": True,
+            "title": series.title,
+            "statusText": readable_series_link_status(
+                link.link_status if link is not None else None
+            ),
+            "linked": link is not None,
+            "canConnect": link is None and validation is not None and validation.ok,
+            "validationErrors": list(validation.errors) if validation else [],
+            "remoteEventId": link.remote_event_id if link is not None else "",
+            "lastError": link.last_error or "" if link is not None else "",
+            "pendingOperation": pending.op.value if pending is not None else "",
+            "whatSent": "Название, заметки, расписание и правило повторения.",
+            "whatLocal": "Теги, выполненность, приоритет и история.",
+        }
+
+    def _run_series_link_action(self, key: str, series_uid: str, action, toast: str) -> bool:
+        if not self._begin(key, series_uid, dedupe=True):
+            return False
+        try:
+            result = action(series_uid)
+        except Exception as exc:
+            self.toastError.emit(f"Операция связи Google не выполнена: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(result.error or "Операция связи Google не выполнена.")
+            return False
+        self._notify_mutation(toast)
+        return True
+
+    @Slot(str, result=bool)
+    def connectSeriesToGoogle(self, series_uid: str) -> bool:
+        links = self._series_links()
+        if links is None:
+            self.toastError.emit("Сервис связи с Google недоступен.")
+            return False
+        return self._run_series_link_action(
+            "connectSeriesGoogle",
+            series_uid,
+            links.connect_to_google,
+            "Создание серии Google поставлено в очередь ручной синхронизации",
+        )
+
+    @Slot(str, result=bool)
+    def disconnectSeriesKeepGoogle(self, series_uid: str) -> bool:
+        links = self._series_links()
+        if links is None:
+            return False
+        return self._run_series_link_action(
+            "disconnectSeriesGoogle",
+            series_uid,
+            links.disconnect_keep_remote,
+            "Связь отключена; серия Google сохранена",
+        )
+
+    @Slot(str, result=bool)
+    def deleteGoogleSeriesKeepLocal(self, series_uid: str) -> bool:
+        links = self._series_links()
+        if links is None:
+            return False
+        return self._run_series_link_action(
+            "deleteGoogleSeries",
+            series_uid,
+            links.request_remote_delete_keep_local,
+            "Удаление серии Google поставлено в очередь; локальная сохранена",
+        )
+
+    @Slot(str, result=bool)
+    def deleteLocalAndGoogleSeries(self, series_uid: str) -> bool:
+        links = self._series_links()
+        if links is None:
+            return False
+        return self._run_series_link_action(
+            "deleteLocalGoogleSeries",
+            series_uid,
+            links.request_delete_local_and_remote,
+            "Удаление локальной и Google-серии подтверждено",
+        )
 
     @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
     def saveEditor(self, uid: str, title: str, notes: str, priority: int,
@@ -814,7 +930,7 @@ class TaskActionsViewModel(QObject):
                 errors = result.errors
                 target_uid = result.task.uid if result.task is not None else ""
                 toast = "Экземпляр изменён"
-            else:
+            elif edit_scope == SeriesEditScope.THIS_AND_FUTURE:
                 rule = None
                 if payload.get("rule") is not None:
                     schedule = self._schedule_from_payload(payload)
@@ -832,6 +948,33 @@ class TaskActionsViewModel(QObject):
                     split.moved_task.uid if split.moved_task is not None else ""
                 )
                 toast = "Серия изменена с этого экземпляра"
+            else:
+                task = self._service.get_task(uid)
+                if task is None or task.series_uid is None:
+                    self._set_editor_error("Экземпляр серии не найден.")
+                    return False
+                schedule = self._schedule_from_payload(payload)
+                if schedule is None:
+                    self._set_editor_error(
+                        "У повторяющейся серии должна быть дата начала."
+                    )
+                    return False
+                rule = rule_from_map(
+                    payload.get("rule") or {}, schedule.start_date
+                )
+                result = recurrence.update_series(
+                    task.series_uid,
+                    title=command.title,
+                    notes=command.notes,
+                    priority=command.priority,
+                    schedule=schedule,
+                    rule=rule,
+                    tag_ids=tag_ids,
+                )
+                ok = result.ok
+                errors = result.errors
+                target_uid = uid
+                toast = "Определение серии изменено"
         except Exception as exc:
             self._set_editor_error(f"Не удалось сохранить изменения: {exc}")
             return False

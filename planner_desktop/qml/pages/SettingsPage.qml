@@ -457,7 +457,133 @@ ScrollView {
             }
         }
 
-        // ---- Read-only Google recurring-master catalog (Phase 3.2B1) ----
+        // ---- Explicit linked Google series diagnostics (Phase 3.2B2) ----
+        Panel {
+            id: linkedGoogleSeries
+            objectName: "settingsLinkedGoogleSeries"
+            Layout.fillWidth: true
+            implicitHeight: linkedGoogleSeriesColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: linkedGoogleSeriesColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    AppIcon { name: "repeat"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: "Связанные серии Google"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+                        Label {
+                            text: settingsVm.linkedSeriesNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    Badge { text: "Связано: " + settingsVm.linkedSeriesCount }
+                    Badge { text: "Создание: " + settingsVm.pendingSeriesCreateCount }
+                    Badge { text: "Обновление: " + settingsVm.pendingSeriesUpdateCount }
+                    Badge { text: "Удаление: " + settingsVm.pendingSeriesDeleteCount }
+                    Badge { text: "Конфликты: " + settingsVm.conflictedSeriesCount }
+                    Badge { text: "Удалено в Google: " + settingsVm.remoteDeletedSeriesCount }
+                    Badge { text: "Ошибки: " + settingsVm.terminalSeriesOpsCount }
+                    Badge { text: "Экземпляры в карантине: "
+                                  + settingsVm.quarantinedSeriesInstanceCount }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    visible: settingsVm.linkedSeriesRows.length > 0
+                    Repeater {
+                        model: settingsVm.linkedSeriesRows
+                        delegate: Rectangle {
+                            id: linkedSeriesRow
+                            required property var modelData
+                            Layout.fillWidth: true
+                            implicitHeight: linkedSeriesRowColumn.implicitHeight
+                                            + 2 * Theme.spacingSm
+                            radius: Theme.radiusSmall
+                            color: Theme.surfaceMuted
+                            border.color: Theme.border
+                            border.width: 1
+                            Accessible.name: modelData.title + ". " + modelData.statusText
+
+                            ColumnLayout {
+                                id: linkedSeriesRowColumn
+                                anchors.fill: parent
+                                anchors.margins: Theme.spacingSm
+                                spacing: 2
+                                Label {
+                                    text: linkedSeriesRow.modelData.title
+                                    font.pixelSize: Theme.fontBody
+                                    font.family: Theme.fontFamily
+                                    font.weight: Font.Medium
+                                    color: Theme.textPrimary
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+                                Label {
+                                    text: linkedSeriesRow.modelData.statusText
+                                          + (linkedSeriesRow.modelData.pendingOperation
+                                             ? " · операция: "
+                                               + linkedSeriesRow.modelData.pendingOperation
+                                             : "")
+                                    font.pixelSize: Theme.fontCaption
+                                    font.family: Theme.fontFamily
+                                    color: Theme.textSecondary
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.WordWrap
+                                }
+                                Label {
+                                    visible: linkedSeriesRow.modelData.lastError.length > 0
+                                    text: linkedSeriesRow.modelData.lastError
+                                    font.pixelSize: Theme.fontCaption
+                                    font.family: Theme.fontFamily
+                                    color: Theme.danger
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.WordWrap
+                                    Accessible.role: Accessible.AlertMessage
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Label {
+                    visible: settingsVm.linkedSeriesRows.length === 0
+                    text: "Связанных серий пока нет. Подключение выполняется "
+                          + "из редактора локальной серии."
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.textMuted
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+
+        // ---- Read-only Google recurring-master catalog (Phase 3.2B1/B2) ----
         Panel {
             id: googleSeriesCatalog
             objectName: "settingsGoogleSeriesCatalog"

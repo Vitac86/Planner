@@ -35,6 +35,8 @@ Dialog {
     property string seriesUid: ""
     property string seriesSummaryText: ""
     property string seriesTimezone: ""
+    property bool seriesLinkedToGoogle: false
+    property string seriesLinkStatus: "Локальная серия"
     // Повторение для НОВОЙ задачи: включается тумблером, сохраняется
     // как локальная серия (vm.saveEditorAsSeries).
     property bool recurEnabled: false
@@ -44,6 +46,7 @@ Dialog {
     property var _scopeDialogObject: null
     property var _deleteSeriesConfirmObject: null
     property var _templatePickerObject: null
+    property var _seriesGoogleLinkObject: null
 
     // Режим планирования: "none" | "allday" | "timed" (domain/scheduling.py).
     property string schedMode: "none"
@@ -114,6 +117,9 @@ Dialog {
         if (!taskEditorDialog._templatePickerObject)
             taskEditorDialog._templatePickerObject =
                 templatePickerFactory.createObject(taskEditorDialog.parent)
+        if (!taskEditorDialog._seriesGoogleLinkObject)
+            taskEditorDialog._seriesGoogleLinkObject =
+                seriesGoogleLinkFactory.createObject(taskEditorDialog.parent)
     }
 
     function _resetForm(data) {
@@ -133,6 +139,8 @@ Dialog {
         taskEditorDialog.seriesUid = data.seriesUid || ""
         taskEditorDialog.seriesSummaryText = data.seriesSummary || ""
         taskEditorDialog.seriesTimezone = data.timezoneName || ""
+        taskEditorDialog.seriesLinkedToGoogle = !!data.seriesLinkedToGoogle
+        taskEditorDialog.seriesLinkStatus = data.seriesLinkStatus || "Локальная серия"
         taskEditorDialog.recurEnabled = !!data.recurring || taskEditorDialog.seriesOccurrence
         ruleEditor.reset(data.rule || {},
                          (data.recurring || data.isSeriesOccurrence) ? "custom" : "")
@@ -306,7 +314,8 @@ Dialog {
             var ruleChanged =
                 JSON.stringify(ruleEditor.ruleMap()) !== taskEditorDialog._origRuleJson
             taskEditorDialog._scopeDialogObject.openForSave(
-                scheduleChanged, ruleChanged)
+                scheduleChanged, ruleChanged,
+                taskEditorDialog.seriesLinkedToGoogle)
             return
         }
         // Новая задача с включённым повторением -> локальная серия.
@@ -337,6 +346,13 @@ Dialog {
         SeriesScopeDialog {
             objectName: "seriesScopeDialog"
             onScopeChosen: scope => taskEditorDialog._saveScoped(scope)
+        }
+    }
+
+    Component {
+        id: seriesGoogleLinkFactory
+        SeriesGoogleLinkDialog {
+            vm: taskEditorDialog.vm
         }
     }
 
@@ -613,6 +629,34 @@ Dialog {
             color: Theme.textSecondary
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
+        }
+
+        RowLayout {
+            visible: taskEditorDialog.isEdit && taskEditorDialog.seriesOccurrence
+            Layout.fillWidth: true
+            spacing: Theme.spacingSm
+            Label {
+                text: "Google: " + taskEditorDialog.seriesLinkStatus
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.textSecondary
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                Accessible.name: text
+            }
+            AppButton {
+                text: "Google Calendar…"
+                iconName: "repeat"
+                variant: "secondary"
+                enabled: taskEditorDialog.vm ? !taskEditorDialog.vm.busy : true
+                Accessible.description:
+                    "Предпросмотр данных и явные действия связи серии с Google Calendar"
+                onClicked: {
+                    taskEditorDialog._prepareNestedPopups()
+                    taskEditorDialog._seriesGoogleLinkObject.openFor(
+                        taskEditorDialog.seriesUid)
+                }
+            }
         }
 
         RecurrenceRuleEditor {

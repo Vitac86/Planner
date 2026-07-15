@@ -53,6 +53,13 @@ Panel {
                 cancelled: Boolean(root.seriesData.cancelled)
                 Layout.alignment: Qt.AlignTop
             }
+            Badge {
+                text: root.seriesData.ownershipText || "Внешняя серия"
+                fg: root.seriesData.plannerOwned ? Theme.accent : Theme.textSecondary
+                bg: root.seriesData.plannerOwned ? Theme.accentSoft : Theme.surfaceMuted
+                Layout.alignment: Qt.AlignTop
+                Accessible.name: text
+            }
         }
 
         ExternalSeriesDetails {

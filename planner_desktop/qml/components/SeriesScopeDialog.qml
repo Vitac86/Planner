@@ -17,6 +17,7 @@ Dialog {
     // (экземпляр станет exception), но описания подчёркивают последствия.
     property bool scheduleChanged: false
     property bool ruleChanged: false
+    property bool linkedGoogle: false
 
     signal scopeChosen(string scope)
 
@@ -49,9 +50,10 @@ Dialog {
         }
     }
 
-    function openForSave(scheduleChangedFlag, ruleChangedFlag) {
+    function openForSave(scheduleChangedFlag, ruleChangedFlag, linkedGoogleFlag) {
         dialog.scheduleChanged = !!scheduleChangedFlag
         dialog.ruleChanged = !!ruleChangedFlag
+        dialog.linkedGoogle = !!linkedGoogleFlag
         open()
         onlyThisButton.forceActiveFocus()
     }
@@ -92,6 +94,7 @@ Dialog {
             id: onlyThisButton
             text: "Только этот экземпляр"
             variant: "secondary"
+            enabled: !dialog.linkedGoogle
             Layout.fillWidth: true
             Accessible.description:
                 "Изменится только выбранный экземпляр; он станет исключением "
@@ -102,8 +105,10 @@ Dialog {
             }
         }
         Label {
-            text: "Изменится только выбранный экземпляр. Он станет "
-                  + "исключением: правки серии его больше не перезапишут."
+            text: dialog.linkedGoogle
+                  ? "Изменение отдельных экземпляров серии Google будет добавлено на следующем этапе."
+                  : "Изменится только выбранный экземпляр. Он станет "
+                    + "исключением: правки серии его больше не перезапишут."
             font.pixelSize: Theme.fontCaption
             font.family: Theme.fontFamily
             color: Theme.textMuted
@@ -116,6 +121,7 @@ Dialog {
             id: allFutureButton
             text: "Этот и все будущие"
             variant: "secondary"
+            enabled: !dialog.linkedGoogle
             Layout.fillWidth: true
             Accessible.description:
                 "Серия разделится: прошлые экземпляры и история сохранятся, "
@@ -126,9 +132,34 @@ Dialog {
             }
         }
         Label {
-            text: "Серия разделится на этом экземпляре: прошлые экземпляры и "
-                  + "выполненная история сохранятся, будущие невыполненные "
-                  + "будут заменены по новому правилу."
+            text: dialog.linkedGoogle
+                  ? "Удалённое разделение «этот и все будущие» отложено до Phase 3.2B3."
+                  : "Серия разделится на этом экземпляре: прошлые экземпляры и "
+                    + "выполненная история сохранятся, будущие невыполненные "
+                    + "будут заменены по новому правилу."
+            font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
+            color: Theme.textMuted
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        AppButton {
+            id: entireSeriesButton
+            text: "Вся серия"
+            variant: "primary"
+            Layout.fillWidth: true
+            Accessible.description:
+                "Изменить локальное определение серии; для связанной серии будет поставлено одно обновление мастера Google"
+            onClicked: {
+                dialog.close()
+                dialog.scopeChosen("entire_series")
+            }
+        }
+        Label {
+            text: "Название, заметки, расписание и правило изменятся у всей "
+                  + "локальной серии. Если серия связана, будет поставлено "
+                  + "одно обновление мастера для следующего ручного синка."
             font.pixelSize: Theme.fontCaption
             font.family: Theme.fontFamily
             color: Theme.textMuted

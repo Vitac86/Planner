@@ -21,6 +21,9 @@ from planner_desktop.repositories.template_repository import (
     InMemoryTemplateRepository,
 )
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
+from planner_desktop.storage.calendar_series_sync_store import (
+    CalendarSeriesSyncStore,
+)
 from planner_desktop.storage.external_series_repository import (
     SQLiteExternalSeriesRepository,
 )
@@ -35,6 +38,9 @@ from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.external_series_service import ExternalSeriesService
 from planner_desktop.usecases.occurrence_materializer import OccurrenceMaterializer
 from planner_desktop.usecases.recurrence_service import RecurrenceService
+from planner_desktop.usecases.series_calendar_link_service import (
+    SeriesCalendarLinkService,
+)
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.usecases.tag_service import TagService
 from planner_desktop.usecases.template_service import TemplateService
@@ -106,17 +112,31 @@ class MainWindow:
             self.external_series_repository = SQLiteExternalSeriesRepository(
                 self.repository.db_path
             )
+            self.series_sync_store = CalendarSeriesSyncStore(
+                self.repository.db_path
+            )
         else:
             series_repository = InMemorySeriesRepository()
             template_repository = InMemoryTemplateRepository()
             self.external_series_repository = InMemoryExternalSeriesRepository(
                 self.repository
             )
+            self.series_sync_store = None
         self.external_series_service = ExternalSeriesService(
             self.external_series_repository
         )
         self.recurrence_service = RecurrenceService(
             series_repository, self.repository, tag_service=self.tag_service)
+        self.series_link_service = (
+            SeriesCalendarLinkService(
+                series_repository,
+                self.repository,
+                self.series_sync_store,
+            )
+            if self.series_sync_store is not None
+            else None
+        )
+        self.recurrence_service.series_link_service = self.series_link_service
         self.template_service = TemplateService(
             template_repository, tag_service=self.tag_service)
         self.materializer = OccurrenceMaterializer(self.recurrence_service)
@@ -132,7 +152,9 @@ class MainWindow:
             self.service, daily_service=self.daily_service,
             manual_sync_service=self._build_manual_sync_service(),
             tag_service=self.tag_service,
-            external_series_service=self.external_series_service)
+            external_series_service=self.external_series_service,
+            series_link_service=self.series_link_service,
+            series_sync_store=self.series_sync_store)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
         self.search_viewmodel = SearchViewModel(self.service)

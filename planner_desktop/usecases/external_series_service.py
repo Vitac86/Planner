@@ -10,8 +10,8 @@ from planner_desktop.repositories.external_series_repository import (
 
 
 CATALOG_NOTE_RU = (
-    "Серии обнаружены при ручной синхронизации. Изменение и подключение "
-    "серий будет добавлено на следующем этапе."
+    "Серии обнаружены при ручной синхронизации. Мастера, созданные Planner, "
+    "помечены отдельно; принятие чужих серий остаётся в Phase 3.2B3."
 )
 
 
@@ -60,6 +60,13 @@ class ExternalSeriesService:
                 "lastRemoteUpdate": _format_stamp(item.remote_updated_at),
                 "cancelled": item.is_cancelled,
                 "stateText": "Отменена" if item.is_cancelled else "Активна",
+                "plannerOwned": item.planner_owned,
+                "linkedSeriesUid": item.linked_series_uid or "",
+                "ownershipText": (
+                    "Создана Planner"
+                    if item.planner_owned
+                    else "Внешняя серия (только чтение)"
+                ),
             })
         return rows
 

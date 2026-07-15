@@ -35,6 +35,10 @@ from planner_desktop.domain.templates import (
     TEMPLATE_KIND_RECURRING,
     TaskTemplate,
 )
+from planner_desktop.domain.series_calendar_link import (
+    SeriesLinkStatus,
+    readable_series_link_status,
+)
 from planner_desktop.usecases.daily_task_service import DailyTaskService
 from planner_desktop.usecases.external_series_service import (
     CATALOG_NOTE_RU,
@@ -101,6 +105,7 @@ class SettingsViewModel(QObject):
     tagStateChanged = Signal()
     templateStateChanged = Signal()
     externalSeriesStateChanged = Signal()
+    seriesLinksStateChanged = Signal()
 
     def __init__(self, service: DesktopTaskService,
                  daily_service: DailyTaskService | None = None,
@@ -111,7 +116,9 @@ class SettingsViewModel(QObject):
                  connection_checker: Callable[[], Any] | None = None,
                  connector: Callable[[], Any] | None = None,
                  executor: Any | None = None,
-                 external_series_service: ExternalSeriesService | None = None) -> None:
+                 external_series_service: ExternalSeriesService | None = None,
+                 series_link_service=None,
+                 series_sync_store=None) -> None:
         super().__init__(parent)
         self._service = service
         self._daily = daily_service
@@ -121,6 +128,8 @@ class SettingsViewModel(QObject):
         self._connector = connector or _default_connector
         self._executor = executor  # лениво: QtBackgroundExecutor при первом действии
         self._external_series = external_series_service
+        self._series_links = series_link_service
+        self._series_sync_store = series_sync_store
         self._busy_kind = ""       # "" | "connect" | "sync"
         self._live_error = ""      # ошибка текущей сессии (поверх сохранённой)
         self._live_error_set = False
@@ -303,6 +312,7 @@ class SettingsViewModel(QObject):
         self.syncStateChanged.emit()
         self.stateChanged.emit()   # счётчики очереди/курсор изменились
         self.externalSeriesStateChanged.emit()
+        self.seriesLinksStateChanged.emit()
         self.tasksMutated.emit()   # pull мог создать/обновить/удалить задачи
 
     @Slot()
@@ -312,6 +322,7 @@ class SettingsViewModel(QObject):
         self.tagStateChanged.emit()
         self.templateStateChanged.emit()
         self.externalSeriesStateChanged.emit()
+        self.seriesLinksStateChanged.emit()
 
     # ---- обнаруженные повторяющиеся серии Google (Phase 3.2B1) ---------------
 
@@ -373,6 +384,85 @@ class SettingsViewModel(QObject):
         return _format_local(
             self._external_series_diagnostics()["last_catalog_refresh_at"]
         )
+
+    # ---- explicit local-series links (schema v8, local reads only) ---------
+
+    @Property(str, constant=True)
+    def linkedSeriesNote(self) -> str:
+        return (
+            "Здесь показаны локальные связи и очередь мастеров. Страница не "
+            "обращается к Google; сеть вызывается только кнопкой ручного синка."
+        )
+
+    def _series_link_diagnostics(self) -> dict:
+        if self._series_sync_store is None:
+            return {
+                **{status.value: 0 for status in SeriesLinkStatus},
+                "quarantined": 0,
+                "series_ops_terminal": 0,
+            }
+        try:
+            return self._series_sync_store.diagnostics()
+        except Exception:
+            logger.exception("Не удалось прочитать диагностику связей серий")
+            return {
+                **{status.value: 0 for status in SeriesLinkStatus},
+                "quarantined": 0,
+                "series_ops_terminal": 0,
+            }
+
+    @Property("QVariantList", notify=seriesLinksStateChanged)
+    def linkedSeriesRows(self):
+        if self._series_links is None:
+            return []
+        rows = []
+        for link in self._series_links.list_links(include_detached=True):
+            series = self._series_links.series_repository.get_by_uid(link.series_uid)
+            pending = self._series_links.store.get_pending_op(link.series_uid)
+            rows.append({
+                "seriesUid": link.series_uid,
+                "title": series.title if series is not None else "(локальная серия удалена)",
+                "status": link.link_status.value,
+                "statusText": readable_series_link_status(link.link_status),
+                "remoteEventId": link.remote_event_id,
+                "pendingOperation": pending.op.value if pending is not None else "",
+                "lastError": link.last_error or "",
+                "detached": link.link_status is SeriesLinkStatus.DETACHED,
+            })
+        return rows
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def linkedSeriesCount(self) -> int:
+        diag = self._series_link_diagnostics()
+        return int(diag.get(SeriesLinkStatus.SYNCED.value, 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def pendingSeriesCreateCount(self) -> int:
+        return int(self._series_link_diagnostics().get("pending_create", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def pendingSeriesUpdateCount(self) -> int:
+        return int(self._series_link_diagnostics().get("pending_update", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def pendingSeriesDeleteCount(self) -> int:
+        return int(self._series_link_diagnostics().get("pending_delete", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def conflictedSeriesCount(self) -> int:
+        return int(self._series_link_diagnostics().get("conflict", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def remoteDeletedSeriesCount(self) -> int:
+        return int(self._series_link_diagnostics().get("remote_deleted", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def terminalSeriesOpsCount(self) -> int:
+        return int(self._series_link_diagnostics().get("series_ops_terminal", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def quarantinedSeriesInstanceCount(self) -> int:
+        return int(self._series_link_diagnostics().get("quarantined", 0))
 
     # ---- локальные теги --------------------------------------------------------
 
