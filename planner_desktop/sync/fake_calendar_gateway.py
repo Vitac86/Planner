@@ -39,13 +39,25 @@ _PATCHABLE_FIELDS = ("summary", "description", "start", "end", "is_all_day")
 class FakeCalendarGateway:
     """Календарь в памяти процесса. Никакой сети, никаких Google-импортов."""
 
-    def __init__(self, base_time: Optional[datetime] = None) -> None:
+    def __init__(self, base_time: Optional[datetime] = None,
+                 calendar_id: str = "primary") -> None:
         self._events: Dict[str, CalendarEvent] = {}
         self._change_log: List[str] = []  # id событий в порядке изменений
         self._next_id = 1
         self._base_time = base_time or utc_now()
         self._ticks = 0
         self._pending_errors: List[Exception] = []
+        self._calendar_id = calendar_id
+        self.list_call_count = 0
+        self.write_call_count = 0
+
+    @property
+    def calendar_id(self) -> str:
+        return self._calendar_id
+
+    def reset_call_counts(self) -> None:
+        self.list_call_count = 0
+        self.write_call_count = 0
 
     # ---- управление фейком из тестов ------------------------------------------
 
@@ -82,6 +94,7 @@ class FakeCalendarGateway:
     # ---- контракт CalendarGateway ------------------------------------------------
 
     def insert_event(self, event: CalendarEvent) -> CalendarEvent:
+        self.write_call_count += 1
         self._maybe_fail()
         stored = replace(event)
         stored.id = f"evt-{self._next_id}"
@@ -93,6 +106,7 @@ class FakeCalendarGateway:
         return replace(stored)
 
     def patch_event(self, event_id: str, patch: Mapping[str, Any]) -> CalendarEvent:
+        self.write_call_count += 1
         self._maybe_fail()
         event = self._events.get(event_id)
         if event is None:
@@ -116,6 +130,7 @@ class FakeCalendarGateway:
         return replace(event)
 
     def delete_event(self, event_id: str) -> None:
+        self.write_call_count += 1
         self._maybe_fail()
         event = self._events.get(event_id)
         if event is None or event.is_cancelled:
@@ -126,6 +141,7 @@ class FakeCalendarGateway:
         self._record_change(event)
 
     def list_changes(self, cursor: Optional[str]) -> RemoteChangeBatch:
+        self.list_call_count += 1
         start_index = int(cursor) if cursor else 0
         changed_ids: List[str] = []
         for event_id in self._change_log[start_index:]:

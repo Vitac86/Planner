@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 # Статусы события — как в Calendar API: cancelled означает удаление
 # (в том числе сделанное на телефоне в приложении Google Calendar).
@@ -61,6 +61,12 @@ class CalendarEvent:
     updated_at: Optional[datetime] = None
     recurring_event_id: Optional[str] = None
     original_start: Optional[datetime] = None
+    recurrence_lines: Tuple[str, ...] = field(default_factory=tuple)
+    start_timezone: Optional[str] = None
+    end_timezone: Optional[str] = None
+    # Provider wall-clock DTSTART retained for lossless UTC UNTIL analysis.
+    # ``start`` keeps the long-standing local-naive Task mapping semantics.
+    recurrence_start: Optional[Union[date, datetime]] = None
 
     @property
     def is_cancelled(self) -> bool:
@@ -69,6 +75,28 @@ class CalendarEvent:
     @property
     def is_recurring_instance(self) -> bool:
         return self.recurring_event_id is not None
+
+    @property
+    def is_recurring_master(self) -> bool:
+        # An instance wins classification even if a provider returns extra
+        # recurrence metadata on it.
+        return bool(self.recurrence_lines) and self.recurring_event_id is None
+
+    @property
+    def is_ordinary_event(self) -> bool:
+        return not self.is_recurring_master and not self.is_recurring_instance
+
+
+@dataclass
+class CalendarPullStats:
+    """Additive classification counts for one explicit pull."""
+
+    total_events: int = 0
+    ordinary_events: int = 0
+    recurring_masters: int = 0
+    recurring_instances: int = 0
+    unsupported_masters: int = 0
+    cancelled_masters: int = 0
 
 
 @dataclass

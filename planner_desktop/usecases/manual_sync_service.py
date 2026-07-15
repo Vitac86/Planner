@@ -54,6 +54,11 @@ class ManualSyncResult:
     ok: bool
     pushed: int = 0
     pulled: int = 0
+    ordinary_events_pulled: int = 0
+    recurring_masters_discovered: int = 0
+    recurring_instances_pulled: int = 0
+    unsupported_masters: int = 0
+    cancelled_masters: int = 0
     pending_before: int = 0
     pending_after: int = 0
     terminal_ops: int = 0
@@ -68,6 +73,13 @@ class ManualSyncResult:
         if not self.ok:
             return self.error or "Синхронизация не выполнена."
         parts = [f"отправлено {self.pushed}", f"получено {self.pulled}"]
+        parts.extend([
+            f"обычных событий {self.ordinary_events_pulled}",
+            f"мастеров серий {self.recurring_masters_discovered}",
+            f"экземпляров серий {self.recurring_instances_pulled}",
+            f"неподдерживаемых мастеров {self.unsupported_masters}",
+            f"отменённых мастеров {self.cancelled_masters}",
+        ])
         if self.pending_after:
             parts.append(f"в очереди осталось {self.pending_after}")
         if self.terminal_ops:
@@ -95,11 +107,13 @@ class ManualSyncService:
         gateway_provider: Callable[[], object],
         *,
         clock: Callable[[], datetime] = utc_now,
+        external_series_repository=None,
     ) -> None:
         self._repository = repository
         self._store = store
         self._gateway_provider = gateway_provider
         self._clock = clock
+        self._external_series_repository = external_series_repository
         self._db_path: Optional[Path] = None
         self._lock = threading.Lock()
 
@@ -141,19 +155,26 @@ class ManualSyncService:
         from planner_desktop.storage.sqlite_task_repository import (
             SQLiteTaskRepository,
         )
+        from planner_desktop.storage.external_series_repository import (
+            SQLiteExternalSeriesRepository,
+        )
 
         repository = SQLiteTaskRepository(self._db_path)
         try:
             store = CalendarSyncStore(self._db_path, clock=self._clock)
             try:
-                return self._run_cycle(repository, store)
+                external_series = SQLiteExternalSeriesRepository(self._db_path)
+                try:
+                    return self._run_cycle(repository, store, external_series)
+                finally:
+                    external_series.close()
             finally:
                 store.close()
         finally:
             repository.close()
 
     def _run_cycle(self, repository: "TaskRepository",
-                   store: "CalendarSyncStore") -> ManualSyncResult:
+                   store: "CalendarSyncStore", external_series_repository=None) -> ManualSyncResult:
         started = self._clock()
         pending_before = store.count_pending_ops()
         cursor_before = store.get_sync_cursor()
@@ -168,7 +189,10 @@ class ManualSyncService:
                 error=str(exc), started_at=started,
             ))
 
-        engine = CalendarSyncEngine(repository, store, gateway)
+        catalog = (external_series_repository
+                   if external_series_repository is not None
+                   else self._external_series_repository)
+        engine = CalendarSyncEngine(repository, store, gateway, catalog)
         try:
             pushed = engine.push_pending()
             pulled = engine.pull_remote_changes()
@@ -189,6 +213,11 @@ class ManualSyncService:
             ok=True,
             pushed=pushed,
             pulled=pulled,
+            ordinary_events_pulled=engine.last_pull_stats.ordinary_events,
+            recurring_masters_discovered=engine.last_pull_stats.recurring_masters,
+            recurring_instances_pulled=engine.last_pull_stats.recurring_instances,
+            unsupported_masters=engine.last_pull_stats.unsupported_masters,
+            cancelled_masters=engine.last_pull_stats.cancelled_masters,
             pending_before=pending_before,
             pending_after=store.count_pending_ops(),
             terminal_ops=store.count_terminal_ops(),

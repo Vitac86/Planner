@@ -14,6 +14,7 @@ from .calendar_sync_engine import CalendarSyncEngine
 from .fake_calendar_gateway import FakeCalendarGateway
 from .sync_types import (
     CalendarEvent,
+    CalendarPullStats,
     CalendarGatewayError,
     OpKind,
     OpStatus,
@@ -26,6 +27,7 @@ from .sync_types import (
 __all__ = [
     "CalendarEvent",
     "CalendarEventMapper",
+    "CalendarPullStats",
     "CalendarGateway",
     "CalendarGatewayError",
     "CalendarSyncEngine",

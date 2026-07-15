@@ -45,6 +45,10 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from planner_desktop.domain.google_recurrence import (
+    recurrence_to_google_lines as _pure_recurrence_to_google_lines,
+)
+from planner_desktop.domain.recurrence import RecurrenceRule, SeriesSchedule
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CONFIRMED,
     CalendarEvent,
@@ -150,6 +154,40 @@ def event_to_insert_body(event: CalendarEvent) -> Dict[str, Any]:
     return body
 
 
+def recurrence_to_google_lines(
+    rule: RecurrenceRule,
+    *,
+    schedule: Optional[SeriesSchedule] = None,
+    extra_lines: Tuple[str, ...] = (),
+) -> Tuple[str, ...]:
+    """Pure future-write helper. Production insert/patch does not call it in B1."""
+    return _pure_recurrence_to_google_lines(
+        rule, schedule=schedule, extra_lines=extra_lines
+    )
+
+
+def recurring_master_to_insert_body(event: CalendarEvent) -> Dict[str, Any]:
+    """Build a future recurring-master insert body without performing IO.
+
+    Deliberately separate from :func:`event_to_insert_body`: real B1 inserts
+    remain ordinary-only even when a caller constructs recurrence metadata.
+    """
+    if not event.is_recurring_master:
+        raise ValueError("CalendarEvent is not a recurring master.")
+    body = event_to_insert_body(event)
+    body["recurrence"] = list(event.recurrence_lines)
+    return body
+
+
+def recurring_master_patch_to_body(event: CalendarEvent) -> Dict[str, Any]:
+    """Pure future master patch body; unused by real patch_event in B1."""
+    if not event.is_recurring_master:
+        raise ValueError("CalendarEvent is not a recurring master.")
+    body = event_to_insert_body(event)
+    body["recurrence"] = list(event.recurrence_lines)
+    return body
+
+
 def patch_to_body(patch: Mapping[str, Any]) -> Dict[str, Any]:
     """Частичный патч в именах полей CalendarEvent -> тело events.patch.
 
@@ -210,12 +248,18 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
 
     start: Any = None
     end: Any = None
+    recurrence_start: Any = None
     if is_all_day:
         start = date.fromisoformat(start_raw["date"])
+        recurrence_start = start
         end = (date.fromisoformat(end_raw["date"])
                if end_raw.get("date") else start + timedelta(days=1))
     elif start_raw.get("dateTime"):
         start = _parse_timed(start_raw["dateTime"])
+        # Keep the provider's wall-clock DTSTART separately.  The existing
+        # ``start`` field remains local-naive for Task compatibility, while
+        # recurrence UTC UNTIL must be compared in start.timeZone semantics.
+        recurrence_start = _parse_rfc3339(start_raw["dateTime"]).replace(tzinfo=None)
         end = _parse_timed(end_raw["dateTime"]) if end_raw.get("dateTime") else None
 
     return CalendarEvent(
@@ -230,6 +274,10 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
         updated_at=_parse_updated(item.get("updated")),
         recurring_event_id=item.get("recurringEventId"),
         original_start=_parse_original_start(item),
+        recurrence_lines=tuple(str(line) for line in (item.get("recurrence") or ())),
+        start_timezone=start_raw.get("timeZone"),
+        end_timezone=end_raw.get("timeZone"),
+        recurrence_start=recurrence_start,
     )
 
 
@@ -246,6 +294,10 @@ class GoogleCalendarGateway:
     def __init__(self, service: Any, calendar_id: str = DEFAULT_CALENDAR_ID) -> None:
         self._service = service
         self._calendar_id = calendar_id
+
+    @property
+    def calendar_id(self) -> str:
+        return self._calendar_id
 
     # ---- push -------------------------------------------------------------------
 
@@ -339,5 +391,8 @@ __all__ = [
     "event_to_insert_body",
     "patch_to_body",
     "payload_to_event",
+    "recurrence_to_google_lines",
+    "recurring_master_patch_to_body",
+    "recurring_master_to_insert_body",
     "times_to_body",
 ]
