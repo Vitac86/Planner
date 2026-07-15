@@ -44,5 +44,9 @@ class TaskRepository(Protocol):
 
     def list_undated(self) -> List[Task]: ...
 
+    def list_by_series(self, series_uid: str) -> List[Task]: ...
+
+    def hard_delete_by_uid(self, uid: str) -> bool: ...
+
 
 __all__ = ["FakeTaskRepository", "TaskRepository"]
