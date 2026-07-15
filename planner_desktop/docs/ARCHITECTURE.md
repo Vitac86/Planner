@@ -302,6 +302,9 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | HistoryPage | журнал выполненного по датам, фильтр 7/30/всё, restore/edit/delete через общий контракт действий; полностью локально |
 | HistoryService + Task.completed_at | готовы: миграция схемы v3 → v4 аддитивно добавляет tasks.completed_at и заполняет для уже выполненных задач их updated_at |
 | DailyTaskService / ежедневные задачи | готовы (локально, в Calendar не уходят); отметки хранят момент выполнения — «История» показывает их по датам |
+| TaskSeries / RecurrenceService | готовы для Phase 3.2A: локальные определения серий отдельно от DailyTask, идемпотентная материализация `Task`-экземпляров, exception/tombstone, transactional SQLite split и нулевая Calendar-очередь; подробности в `RECURRENCE_ARCHITECTURE.md` |
+| OccurrenceMaterializer | готов: Today запрашивает сегодня, Calendar — видимый диапазон, буфер 14 дней, предел 366 экземпляров на серию за вызов; History генерацию не запускает |
+| TemplateService | готов: локальные ordinary/recurring шаблоны, NFKC+casefold уникальность имени, Settings CRUD/duplicate и неперсистентный editor prefill |
 | TaskEditorDialog (создание/правка) | готов: режимы «Без даты»/«Весь день»/«Со временем», native date/time/duration controls, scheduling presets, приоритет/completed, inline validation, busy guard и отдельное delete-действие |
 | DesktopTaskService (usecases/) | готов: create/update/delete/restore, schedule/unschedule/postpone и Phase 2.2 move/resize/conversion; linked change enqueue update, undated schedule enqueue create, linked unschedule enqueue delete; recurring instance rejected before mutation; прямого Google-вызова из UI нет |
 | Unschedule (запланирована -> без даты) | реализован для непушенных и привязанных одиночных задач; для экземпляров повторяющихся серий — запрещён с ошибкой |
@@ -320,21 +323,22 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 ## Тесты
 
 Чистая Python-логика тестируется без видимого окна. Каноническая
-верификация Phase 3.1:
+верификация Phase 3.2A:
 
 ```
 python -m compileall . -q
 python -m pytest --collect-only -q
-python -m pytest -q tests/test_desktop_tags.py tests/test_desktop_tag_repository.py tests/test_desktop_tag_service.py tests/test_desktop_task_search.py tests/test_desktop_search_viewmodel.py tests/test_desktop_task_duplicate.py tests/test_desktop_task_selection.py tests/test_desktop_bulk_actions.py tests/test_desktop_search_keyboard.py
+python -m pytest -q tests/test_desktop_recurrence_rules.py tests/test_desktop_recurrence_generation.py tests/test_desktop_series_repository.py tests/test_desktop_recurrence_service.py tests/test_desktop_series_edit_scope.py tests/test_desktop_occurrence_materializer.py tests/test_desktop_series_sync_isolation.py tests/test_desktop_templates.py tests/test_desktop_template_service.py tests/test_desktop_recurrence_viewmodel.py tests/test_desktop_recurrence_keyboard.py
 python -m pytest -q
 ```
 
-Focused Phase 3.1 тесты покрывают schema/tags/persistence/no-queue, Unicode
-search/ranking/filters, duplicate stripping, visible selection, все bulk actions,
-busy guard, partial failure и per-item rollback. Все Calendar Phase 2 и desktop
+Focused Phase 3.2A тесты покрывают rules/DST/month-end,
+schema v6/reopen/idempotence, occurrence identity/materialization, exception/tombstone,
+transactional split/rollback, templates, ViewModel/QML и нулевую Calendar-queue delta.
+Все focused Phase 3.1, Calendar Phase 2 и desktop
 sync regression файлы дополнительно запускаются отдельными срезами; существующие
 Phase 1/2/sync тесты не удаляются и входят в полный прогон. На Windows известен отдельный
 платформенный провал `tests/test_settings_paths.py::test_macos_data_dir`; он не
-исправляется в Phase 3.1. Фактический статус финального прогона фиксируется в
+исправляется в Phase 3.2A. Фактический статус финального прогона фиксируется в
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md), а не объявляется архитектурной
 гарантией заранее.

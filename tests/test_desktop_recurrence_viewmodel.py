@@ -130,4 +130,3 @@ def test_template_prefill_is_non_persisting_and_change_signal_refreshes_list():
     assert prefill["recurring"] is True
     assert prefill["dateText"] == date(2026, 7, 15).isoformat()
     assert len(tasks.list_all()) == before
-

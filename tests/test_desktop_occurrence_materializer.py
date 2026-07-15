@@ -79,4 +79,3 @@ def test_concurrent_requests_share_one_materialization_call():
         thread.join()
     assert stub.calls == 1
     assert sum(result.created for result in results) == 1
-

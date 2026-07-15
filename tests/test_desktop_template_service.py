@@ -86,4 +86,3 @@ def test_change_listener_fires_once_per_successful_mutation():
     ))
     service.delete_template(created.template.uid)
     assert calls == ["changed", "changed", "changed"]
-

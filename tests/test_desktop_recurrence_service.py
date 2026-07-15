@@ -76,4 +76,3 @@ def test_deleted_occurrence_is_a_permanent_materialization_tombstone():
     result = service.ensure_occurrences(date(2026, 7, 1), date(2026, 7, 1))
     assert (result.created, result.skipped) == (0, 1)
     assert len(tasks.list_by_series(series.uid)) == 1
-

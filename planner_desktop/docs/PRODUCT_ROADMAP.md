@@ -396,18 +396,57 @@ gestures и горизонтальная auto-scroll недели.
 
 ---
 
-## Фаза 3.2 — Повторяющиеся задачи и шаблоны (план)
+## Фаза 3.2A — Локальные повторяющиеся задачи и шаблоны (готово)
 
-### Scope
+Phase 3.2A реализует отдельную локальную модель `TaskSeries`, не смешивая её с
+`DailyTask` и импортированными экземплярами Google-серий. Схема v6 аддитивно
+добавляет определения серий, их теги, шаблоны и неизменяемую идентичность
+экземпляра `(series_uid, occurrence_key)`.
 
-- правила повторения и редактор серии;
-- шаблоны задач;
-- безопасный выбор «только этот / все будущие»;
-- отдельные правила sync/rollback для recurrence linkage.
+Реализовано:
 
-Не входят в Phase 3.2 сложные reminder rules и скрытый/автоматический Google
-sync. Phase 3.1 duplicate всегда создаёт независимую ordinary task и не является
-редактором серии.
+- daily/weekly/monthly/yearly правила, interval, окончание по дате/числу,
+  детерминированные month-end и DST политики;
+- ограниченная идемпотентная материализация обычных `Task`-строк для Today и
+  видимого Calendar-диапазона; History никогда не генерирует будущее;
+- явные области «только этот экземпляр» и «этот и все будущие» с exception и
+  транзакционным split/rollback;
+- tombstone одного слота, остановка/удаление серии с сохранением выполненной
+  истории;
+- ordinary и recurring шаблоны, управление ими в Settings, меню новой задачи,
+  действие «Из шаблона» и `Ctrl+Alt+N`;
+- локальные бейджи/сводки в Today, Calendar, Search, History и Inspector;
+- нулевая дельта Calendar-очереди для всех операций локальной серии.
+
+Дублирование экземпляра по-прежнему создаёт независимую ordinary task без
+series/Google linkage. Автоматический sync остаётся выключенным.
+
+Статус приёмки на 15 июля 2026 года:
+
+| Проверка | Статус | Результат |
+|---|---|---|
+| Focused Phase 3.2A | PASS | `82 passed`: rules/generation/DST, schema/repositories, materialization, scopes/rollback, sync isolation, templates, ViewModel/QML contracts |
+| Phase 3.1 + Calendar Phase 2 + desktop sync | PASS | `365 passed` |
+| Compile + collection + полный pytest | PASS с известным исключением | compileall — без ошибок; `859 tests collected`; `858 passed`, единственный сбой — `test_macos_data_dir` на Windows |
+| Изолированный smoke + restart | PASS | 7 видов серий, exception, tombstone, split, история, 2 шаблона; `qml_warnings=0`, tombstone сохранён после restart |
+| Google safety | PASS | local series queue delta = 0; ordinary drag создаёт ожидающую Calendar-операцию; local drag отклонён; ручные sync-контролы доступны; автоматических Google-вызовов нет |
+
+Скриншоты приёмки:
+
+- [редактор серии](screenshots/recurrence_editor_phase3_2a.png);
+- [явный выбор области](screenshots/recurrence_scope_dialog_phase3_2a.png);
+- [локальные серии в Calendar](screenshots/calendar_local_series_phase3_2a.png);
+- [exception-экземпляр](screenshots/recurrence_exception_phase3_2a.png);
+- [выбор шаблона](screenshots/template_picker_phase3_2a.png);
+- [шаблоны в Settings](screenshots/settings_templates_phase3_2a.png);
+- [compact-редактор](screenshots/recurrence_compact_phase3_2a.png).
+
+## Фаза 3.2B — Интеграция повторений Google (план)
+
+Отложены перевод правил в/из Google RRULE, создание и изменение Google
+recurring events, синхронизация exception/split и осознанное усыновление
+импортированных экземпляров. До этой фазы локальные серии и их
+материализованные экземпляры не отправляются в Google как отдельные события.
 
 ---
 

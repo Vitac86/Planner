@@ -67,4 +67,3 @@ def test_template_delete_does_not_delete_unrelated_tasks_or_series(tmp_path):
     assert templates.delete(template.uid)
     assert tasks.get_by_uid(task.uid) is not None
     assert series_repository.get_by_uid(series.uid) is not None
-

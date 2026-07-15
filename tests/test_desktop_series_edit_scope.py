@@ -130,4 +130,3 @@ def test_sqlite_split_failure_rolls_back_series_tasks_and_associations(
     assert after == before
     series_repository.close()
     tasks.close()
-
