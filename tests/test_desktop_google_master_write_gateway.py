@@ -146,6 +146,44 @@ def test_foreign_collision_and_unexpected_etag_are_not_overwritten():
         )
 
 
+def test_stale_markers_after_foreign_edit_do_not_fake_patch_success():
+    """Live-pilot finding (Phase 3.2B3A): чужая правка (например, summary с
+    телефона) не обновляет приватные Planner-маркеры, поэтому совпадение
+    маркеров само по себе не доказывает применённую запись. Явная перезапись
+    Keep Planner с подтверждённым etag обязана отправить настоящий PATCH."""
+    service = Service()
+    gateway = GoogleCalendarGateway(service)
+    master = _master()
+    remote_id = deterministic_remote_event_id("s1")
+    gateway.insert_recurring_master(remote_id, master)
+
+    service.resource.items[remote_id]["summary"] = "Foreign title"
+    service.resource.items[remote_id]["etag"] = '"external"'
+
+    written = gateway.patch_recurring_master(
+        remote_id, master, expected_etag='"external"'
+    )
+    assert service.resource.patch_bodies, "явная перезапись должна слать PATCH"
+    assert service.resource.patch_bodies[-1]["summary"] == "Daily"
+    assert written.summary == "Daily"
+
+
+def test_identical_content_retry_still_skips_second_patch():
+    """Повтор после remote-успеха/локального сбоя: маркеры И фактическое
+    содержимое совпадают — второй PATCH не отправляется."""
+    service = Service()
+    gateway = GoogleCalendarGateway(service)
+    master = _master()
+    remote_id = deterministic_remote_event_id("s1")
+    created = gateway.insert_recurring_master(remote_id, master)
+
+    reconciled = gateway.patch_recurring_master(
+        remote_id, master, expected_etag=created.etag
+    )
+    assert not service.resource.patch_bodies
+    assert reconciled.etag == created.etag
+
+
 def test_ordinary_insert_behavior_still_ignores_master_contract():
     service = Service()
     gateway = GoogleCalendarGateway(service)

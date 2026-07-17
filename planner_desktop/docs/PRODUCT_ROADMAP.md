@@ -574,7 +574,7 @@ Google — ноль, все вызовы происходили из явных 
 
 Подробный контракт: [`GOOGLE_SERIES_SYNC_ARCHITECTURE.md`](GOOGLE_SERIES_SYNC_ARCHITECTURE.md).
 
-## Фаза 3.2B3A — явное разрешение конфликтов и восстановление после удаления (готово, fake-приёмка)
+## Фаза 3.2B3A — явное разрешение конфликтов и восстановление после удаления (готово, live-пилот PASS)
 
 Для связанного Planner-owned master пользователь теперь получает явные и
 безопасные выборы; ни одна сторона никогда не перезаписывается молча.
@@ -637,12 +637,76 @@ ordinary task sync, `occurrence_event_flood=0`, `settings_gateway_calls=0`,
 
 | Проверка | Статус | Результат |
 |---|---|---|
-| Focused Phase 3.2B3A (12 файлов) | PASS | `90 passed` |
-| Регрессии B2/B1/3.2A/3.1/Phase 2/ordinary sync | PASS | в составе полного прогона |
-| Compile + collection | PASS | compileall без ошибок; `1039 tests collected` |
-| Полный pytest | PASS с известным Windows-исключением | `1038 passed`, единственный сбой `tests/test_settings_paths.py::test_macos_data_dir`; не относится к B3A и не исправлялся |
+| Focused Phase 3.2B3A (12 файлов + real-gateway regression) | PASS | `95 passed` |
+| Focused Phase 3.2B2 | PASS | `27 passed` |
+| Ordinary/manual-sync regression | PASS | `199 passed` |
+| Compile | PASS | compileall без ошибок |
+| Полный pytest | PASS с известным Windows-исключением | `1040 passed`, единственный сбой `tests/test_settings_paths.py::test_macos_data_dir`; не относится к B3A и не исправлялся |
 | QML/fake visual smoke | PASS | 7 screenshots, compact/normal/wide, restart, `qml_warnings=0`, network calls on page-open = 0 |
-| Live-пилот B3A (реальный Calendar API) | **НЕ ПРОЙДЕН — отдельная задача** | обязательный внешний gate перед продакшн-использованием разрешения конфликтов |
+| Live-пилот B3A (реальный Calendar API) | **PASS** | conflict → Keep Planner → second-edit race → Use Google → remote_deleted → generation 1 → explicit cleanup; `occurrence_event_flood=0` |
+
+Live-пилот **пройден 17 июля 2026 года** в изолированном профиле
+`D:\planner-desktop-google-series-live-pilot` (собственные `client_secret.json`,
+`token.json` и `app_desktop.db`). Токен принадлежит личному Google-аккаунту,
+а не выделенному тестовому; этот факт и Calendar selector `primary` были явно
+сообщены пользователю, и перед финальной Google-записью получено отдельное
+явное подтверждение. Идентичность аккаунта, содержимое OAuth-файлов и полный
+Calendar payload в документацию не записывались. Старые Flet `app.db` /
+`token.json` не читались и не изменялись.
+
+Пилот использовал локальную серию `b3a-live-abf24e6bcb`: timed
+09:00–09:15, `Europe/Moscow`, 20 июля 2026 года,
+`RRULE:FREQ=DAILY;INTERVAL=1;COUNT=3`, без гостей и чувствительных заметок.
+Generation 0 получил id
+`plr00kqaul5iqtu843ahjihbf3gmlfjjkpcj3fdup1j6oap9pc9j6vg`, generation 1 —
+`plrfnoq93370s646bvha6gmvqbupfskfco6rfath7h427o66tdla9b0`; random fallback
+не использовался. После remote deletion generation 0 сохранился исторической
+строкой (`remote_deleted` → `detached`, `resolution_kind=recreate`), повторное
+нажатие recreate не создало generation 2, один CREATE создал generation 1,
+а следующий ручной sync выполнил 0 create / 0 patch.
+
+Реальный conflict/resolve сценарий подтвердил:
+
+- первый conflict имел etag `"3568551433515006"`. Он обнаружил дефект:
+  private payload marker после внешней правки оставался прежним, поэтому
+  gateway ошибочно считал Keep Planner уже применённым и пропускал PATCH;
+- минимальное исправление требует совпадения не только marker, но и
+  канонического фактического содержимого мастера. Focused fake-тест
+  воспроизводит stale-marker случай и сохраняет идемпотентный retry при
+  действительно одинаковом содержимом;
+- после исправления повторный Keep Planner с acknowledged etag
+  `"3568552575396638"` выполнил реальный PATCH того же id; итоговый etag
+  `"3568552585835230"`, recurrence/timezone не изменились, audit завершён;
+- в second-edit race решение с acknowledged etag `"3568552683058430"`
+  стало `superseded`, потому что вторая внешняя правка уже имела etag
+  `"3568552688963390"`. Planner её не перезаписал и потребовал новое решение;
+- «Использовать версию Google» выполнилось целиком локально с 0 Google writes:
+  title стал `TEST Planner Phase 3.2B3A — REMOTE RACE TWO`, завершённая история
+  сохранилась, будущие replaceable occurrences регенерированы, следующий
+  ручной pull распознал echo без PATCH;
+- прямое удаление generation 0 перевело связь в `remote_deleted`, не
+  воскресило master автоматически и не удалило локальную серию/историю;
+- явное «Удалить серию в Google, оставить локальной» для generation 1
+  выполнило ровно `events.get + events.delete + events.list`. Оба id после
+  этого имеют remote status `cancelled`, catalog содержит оба tombstone,
+  обе связи исторические/detached, обе очереди и оба terminal/dead-letter
+  счётчика равны 0, unresolved quarantine равен 0;
+- финальный lookup (`events.get` для обоих id и отдельные master/expanded
+  list) дал 0 активных masters, 0 активных instances и 0 ordinary events с
+  префиксом `TEST Planner Phase 3.2B3A`. Ни один из трёх materialized
+  occurrences не получил Google event id: `occurrence_event_flood=0`.
+
+Google-write accounting пилота: master insert — 2 (generation 0/1), master
+patch — 4 (три явные внешние title-правки и один успешный Keep Planner),
+master delete — 2 (generation 0/1); Use Google — 0 writes. Каждый Planner
+push/pull выполнялся только отдельным ручным действием; automatic/background/
+page-open/timer calls — 0, Settings/dialog-opening calls — 0. В финальной
+инструментированной части зафиксированы один OAuth refresh, один
+`calendarList.get`, пять `events.get`, один `events.delete` и пять
+`events.list` (один pull + четыре verification reads), без insert/patch.
+Более ранние verification-only reads не сохранялись в durable ledger, поэтому
+для них не заявляется выдуманный точный итог; write-счётчики подтверждаются
+фактическими поколениями, audit/link-состоянием и remote tombstones.
 
 Скриншоты fake-приёмки:
 

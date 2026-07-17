@@ -56,6 +56,7 @@ from planner_desktop.domain.series_calendar_link import (
 )
 from planner_desktop.sync.calendar_series_mapper import (
     master_event_to_owned_payload,
+    master_payload_hash,
 )
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CONFIRMED,
@@ -302,6 +303,17 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
     )
 
 
+def _master_content_matches(current: CalendarEvent, desired_hash: str) -> bool:
+    """True только когда фактическое Planner-owned содержимое мастера равно
+    каноническому желаемому payload. Любой сбой канонизации (в т.ч. чужая
+    нормализация Google) считается несовпадением и безопасно деградирует к
+    etag-проверке вызывающего кода — молчаливого «успеха» без записи нет."""
+    try:
+        return master_payload_hash(current) == desired_hash
+    except (TypeError, ValueError):
+        return False
+
+
 # ---- сам шлюз -----------------------------------------------------------------------
 
 class GoogleCalendarGateway:
@@ -451,8 +463,18 @@ class GoogleCalendarGateway:
         current_hash = current.private_extended_properties.get(
             PLANNER_PAYLOAD_HASH_PROPERTY
         )
-        if desired_hash and current_hash == desired_hash:
-            return current  # remote-success/local-persistence-failure retry
+        # Повтор после remote-успеха/локального сбоя: одних маркеров
+        # недостаточно — чужая правка (например, summary с телефона) НЕ
+        # обновляет приватные маркеры, и устаревший маркер не должен выдавать
+        # неотправленный PATCH за применённый (перезапись Keep Planner обязана
+        # реально перезаписать мастер). Требуем совпадения и маркеров, и
+        # фактического содержимого.
+        if (
+            desired_hash
+            and current_hash == desired_hash
+            and _master_content_matches(current, desired_hash)
+        ):
+            return current
         if expected_etag and current.etag != expected_etag:
             raise RemoteMasterConflictError(
                 "Мастер Google изменён вне Planner; автоматическая перезапись запрещена.",
