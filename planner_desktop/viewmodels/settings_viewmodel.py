@@ -118,7 +118,8 @@ class SettingsViewModel(QObject):
                  executor: Any | None = None,
                  external_series_service: ExternalSeriesService | None = None,
                  series_link_service=None,
-                 series_sync_store=None) -> None:
+                 series_sync_store=None,
+                 series_conflict_service=None) -> None:
         super().__init__(parent)
         self._service = service
         self._daily = daily_service
@@ -130,6 +131,7 @@ class SettingsViewModel(QObject):
         self._external_series = external_series_service
         self._series_links = series_link_service
         self._series_sync_store = series_sync_store
+        self._series_conflicts = series_conflict_service
         self._busy_kind = ""       # "" | "connect" | "sync"
         self._live_error = ""      # ошибка текущей сессии (поверх сохранённой)
         self._live_error_set = False
@@ -428,6 +430,9 @@ class SettingsViewModel(QObject):
                 "pendingOperation": pending.op.value if pending is not None else "",
                 "lastError": link.last_error or "",
                 "detached": link.link_status is SeriesLinkStatus.DETACHED,
+                "generation": int(getattr(link, "link_generation", 0)),
+                "conflictReason": link.conflict_reason or "",
+                "resolutionKind": link.resolution_kind or "",
             })
         return rows
 
@@ -463,6 +468,55 @@ class SettingsViewModel(QObject):
     @Property(int, notify=seriesLinksStateChanged)
     def quarantinedSeriesInstanceCount(self) -> int:
         return int(self._series_link_diagnostics().get("quarantined", 0))
+
+    # ---- explicit conflict resolution diagnostics (Phase 3.2B3A) -----------
+
+    @Property(str, constant=True)
+    def conflictResolutionNote(self) -> str:
+        return (
+            "Разрешение конфликтов выполняется только явными действиями "
+            "пользователя. «Оставить версию Planner» и пересоздание серии "
+            "выполняются следующей ручной синхронизацией; «Использовать "
+            "версию Google» и отключение — локальные операции без сети."
+        )
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def pendingResolutionCount(self) -> int:
+        return int(self._series_link_diagnostics().get("resolutions_pending", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def failedResolutionCount(self) -> int:
+        return int(self._series_link_diagnostics().get("resolutions_failed", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def supersededResolutionCount(self) -> int:
+        return int(
+            self._series_link_diagnostics().get("resolutions_superseded", 0)
+        )
+
+    @Property("QVariantList", notify=seriesLinksStateChanged)
+    def resolutionHistoryRows(self):
+        if self._series_conflicts is None:
+            return []
+        try:
+            history = self._series_conflicts.list_resolution_history()
+        except Exception:
+            logger.exception("Не удалось прочитать историю разрешений")
+            return []
+        rows = []
+        for item in history[:50]:
+            rows.append({
+                "id": item.id,
+                "seriesUid": item.series_uid,
+                "kind": item.resolution_kind,
+                "kindText": item.kind_text,
+                "status": item.status,
+                "statusText": item.status_text,
+                "createdAt": _format_local(item.created_at),
+                "completedAt": _format_local(item.completed_at),
+                "error": item.error or "",
+            })
+        return rows
 
     # ---- локальные теги --------------------------------------------------------
 

@@ -509,6 +509,12 @@ ScrollView {
                     Badge { text: "Ошибки: " + settingsVm.terminalSeriesOpsCount }
                     Badge { text: "Экземпляры в карантине: "
                                   + settingsVm.quarantinedSeriesInstanceCount }
+                    Badge { text: "Решений ожидает: "
+                                  + settingsVm.pendingResolutionCount }
+                    Badge { text: "Решений с ошибкой: "
+                                  + settingsVm.failedResolutionCount }
+                    Badge { text: "Решений устарело: "
+                                  + settingsVm.supersededResolutionCount }
                 }
 
                 ColumnLayout {
@@ -579,6 +585,54 @@ ScrollView {
                     color: Theme.textMuted
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
+                }
+            }
+        }
+
+        // ---- Explicit conflict resolution history (Phase 3.2B3A) ----
+        Panel {
+            id: conflictResolutionPanel
+            objectName: "settingsConflictResolutions"
+            Layout.fillWidth: true
+            implicitHeight: conflictResolutionColumn.implicitHeight
+                            + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: conflictResolutionColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    AppIcon { name: "edit"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: "Разрешение конфликтов серий"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+                        Label {
+                            text: settingsVm.conflictResolutionNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                ConflictResolutionHistory {
+                    Layout.fillWidth: true
+                    rows: settingsVm.resolutionHistoryRows
                 }
             }
         }

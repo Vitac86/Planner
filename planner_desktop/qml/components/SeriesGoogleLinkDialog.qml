@@ -129,6 +129,31 @@ Dialog {
             Accessible.role: Accessible.AlertMessage
         }
 
+        // Phase 3.2B3A: explicit resolution entry points.
+        AppButton {
+            visible: dialog.linkData.status === "conflict"
+            text: "Разрешить конфликт…"
+            iconName: "edit"
+            variant: "primary"
+            enabled: dialog.vm && !dialog.vm.busy
+            Layout.fillWidth: true
+            Accessible.description:
+                "Откроет сравнение версий Planner и Google и явные действия."
+            onClicked: conflictDialog.openFor(dialog.seriesUid)
+        }
+        AppButton {
+            visible: dialog.linkData.status === "remote_deleted"
+            text: "Восстановление после удаления в Google…"
+            iconName: "edit"
+            variant: "primary"
+            enabled: dialog.vm && !dialog.vm.busy
+            Layout.fillWidth: true
+            Accessible.description:
+                "Откроет явный выбор: оставить локальной, пересоздать в Google "
+                + "или удалить локальную серию."
+            onClicked: recoveryDialog.openFor(dialog.seriesUid)
+        }
+
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.spacingSm
@@ -210,5 +235,18 @@ Dialog {
                 dialog.close()
             }
         }
+    }
+
+    SeriesConflictDialog {
+        id: conflictDialog
+        objectName: "seriesConflictDialog"
+        vm: dialog.vm
+        onClosed: dialog.refreshData()
+    }
+    RemoteDeletedRecoveryDialog {
+        id: recoveryDialog
+        objectName: "remoteDeletedRecoveryDialog"
+        vm: dialog.vm
+        onClosed: dialog.refreshData()
     }
 }

@@ -137,6 +137,21 @@ class MainWindow:
             else None
         )
         self.recurrence_service.series_link_service = self.series_link_service
+        if self.series_sync_store is not None:
+            from planner_desktop.usecases.series_conflict_service import (
+                SeriesConflictService,
+            )
+
+            self.series_conflict_service = SeriesConflictService(
+                series_repository,
+                self.repository,
+                self.series_sync_store,
+            )
+        else:
+            self.series_conflict_service = None
+        self.recurrence_service.series_conflict_service = (
+            self.series_conflict_service
+        )
         self.template_service = TemplateService(
             template_repository, tag_service=self.tag_service)
         self.materializer = OccurrenceMaterializer(self.recurrence_service)
@@ -154,7 +169,8 @@ class MainWindow:
             tag_service=self.tag_service,
             external_series_service=self.external_series_service,
             series_link_service=self.series_link_service,
-            series_sync_store=self.series_sync_store)
+            series_sync_store=self.series_sync_store,
+            series_conflict_service=self.series_conflict_service)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
         self.search_viewmodel = SearchViewModel(self.service)

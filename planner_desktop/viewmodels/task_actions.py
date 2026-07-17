@@ -318,6 +318,7 @@ class TaskActionsViewModel(QObject):
             "seriesUid": series_uid,
             "available": True,
             "title": series.title,
+            "status": link.link_status.value if link is not None else "",
             "statusText": readable_series_link_status(
                 link.link_status if link is not None else None
             ),
@@ -394,6 +395,125 @@ class TaskActionsViewModel(QObject):
             series_uid,
             links.request_delete_local_and_remote,
             "Удаление локальной и Google-серии подтверждено",
+        )
+
+    # ---- explicit conflict / remote-deleted resolution (Phase 3.2B3A) -------
+
+    def _series_conflicts(self):
+        recurrence = getattr(self._service, "recurrence_service", None)
+        return getattr(recurrence, "series_conflict_service", None)
+
+    @Slot(str, result="QVariantMap")
+    def seriesConflictData(self, series_uid: str) -> Dict[str, Any]:
+        """Local-only comparison data for SeriesConflictDialog (no network)."""
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return {
+                "seriesUid": series_uid,
+                "available": False,
+                "statusText": "Сервис разрешения конфликтов недоступен.",
+            }
+        return conflicts.get_conflict(series_uid)
+
+    @Slot(str, result="QVariantMap")
+    def seriesRemoteDeletedData(self, series_uid: str) -> Dict[str, Any]:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return {"seriesUid": series_uid, "available": False}
+        return conflicts.get_remote_deleted(series_uid)
+
+    def _run_conflict_action(self, key: str, series_uid: str, action, toast: str) -> bool:
+        if not self._begin(key, series_uid, dedupe=True):
+            return False
+        try:
+            result = action(series_uid)
+        except Exception as exc:
+            self.toastError.emit(f"Действие с конфликтом не выполнено: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self.toastError.emit(
+                result.error or "Действие с конфликтом не выполнено."
+            )
+            return False
+        self._notify_mutation(toast)
+        return True
+
+    @Slot(str, result=bool)
+    def resolveConflictKeepPlanner(self, series_uid: str) -> bool:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return False
+        return self._run_conflict_action(
+            "resolveKeepPlanner",
+            series_uid,
+            lambda uid: conflicts.resolve_keep_planner(uid, confirmed=True),
+            "Перезапись мастера Google поставлена в очередь ручной синхронизации",
+        )
+
+    @Slot(str, result=bool)
+    def resolveConflictUseGoogle(self, series_uid: str) -> bool:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return False
+        return self._run_conflict_action(
+            "resolveUseGoogle",
+            series_uid,
+            lambda uid: conflicts.resolve_use_google(uid, confirmed=True),
+            "Локальная серия обновлена по версии Google",
+        )
+
+    @Slot(str, result=bool)
+    def resolveConflictDisconnect(self, series_uid: str) -> bool:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return False
+        return self._run_conflict_action(
+            "resolveDisconnect",
+            series_uid,
+            conflicts.resolve_disconnect,
+            "Связь отключена; обе версии сохранены",
+        )
+
+    @Slot(str, result=bool)
+    def recoverRemoteDeletedKeepLocal(self, series_uid: str) -> bool:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return False
+        return self._run_conflict_action(
+            "recoverKeepLocal",
+            series_uid,
+            conflicts.recover_remote_deleted_keep_local,
+            "Серия осталась локальной; мёртвая связь отключена",
+        )
+
+    @Slot(str, result=bool)
+    def recoverRemoteDeletedRecreate(self, series_uid: str) -> bool:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return False
+        return self._run_conflict_action(
+            "recoverRecreate",
+            series_uid,
+            lambda uid: conflicts.recover_remote_deleted_recreate(
+                uid, confirmed=True
+            ),
+            "Пересоздание серии Google поставлено в очередь ручной синхронизации",
+        )
+
+    @Slot(str, result=bool)
+    def deleteRemoteDeletedLocalSeries(self, series_uid: str) -> bool:
+        conflicts = self._series_conflicts()
+        if conflicts is None:
+            return False
+        return self._run_conflict_action(
+            "deleteRemoteDeletedLocal",
+            series_uid,
+            lambda uid: conflicts.delete_remote_deleted_local_series(
+                uid, confirmed=True
+            ),
+            "Локальная серия удалена; выполненная история сохранена",
         )
 
     @Slot(str, str, str, int, bool, bool, str, str, str, bool, result=bool)
