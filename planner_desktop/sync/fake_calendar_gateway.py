@@ -226,7 +226,20 @@ class FakeCalendarGateway:
         current_hash = current.private_extended_properties.get(
             PLANNER_PAYLOAD_HASH_PROPERTY
         )
-        if desired_hash and desired_hash == current_hash:
+        # Идемпотентный повтор идентичной записи не меняет etag.  Одних
+        # маркеров недостаточно: чужая правка (например, summary с телефона)
+        # НЕ обновляет приватные маркеры, и «свежий» маркер не должен
+        # блокировать явную перезапись Keep-Planner (Phase 3.2B3A).
+        same_content = (
+            current.summary == master_payload.summary
+            and current.description == master_payload.description
+            and current.start == master_payload.start
+            and current.end == master_payload.end
+            and current.is_all_day == master_payload.is_all_day
+            and tuple(current.recurrence_lines)
+                == tuple(master_payload.recurrence_lines)
+        )
+        if desired_hash and desired_hash == current_hash and same_content:
             return self.get_recurring_master(remote_event_id)
         if expected_etag and current.etag != expected_etag:
             raise RemoteMasterConflictError(

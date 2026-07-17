@@ -65,6 +65,17 @@ class ManualSyncResult:
     series_master_conflicts: int = 0
     series_ops_terminal: int = 0
     linked_instance_changes_quarantined: int = 0
+    # Phase 3.2B3A additive resolution counters.  Keep Planner, superseded
+    # attempts, failures and recreation execute inside this push cycle.
+    # Use Google and disconnect are LOCAL actions performed outside sync;
+    # their counters report resolutions completed since the previous manual
+    # sync, i.e. they surface in the NEXT summary after the local action.
+    conflicts_resolved_keep_planner: int = 0
+    conflicts_resolved_use_google: int = 0
+    conflicts_disconnected: int = 0
+    remote_deleted_recreated: int = 0
+    resolution_attempts_superseded: int = 0
+    resolution_failures: int = 0
     pending_before: int = 0
     pending_after: int = 0
     terminal_ops: int = 0
@@ -94,6 +105,24 @@ class ManualSyncResult:
                 f"{self.linked_instance_changes_quarantined}"
             ),
         ])
+        if self.conflicts_resolved_keep_planner:
+            parts.append(
+                f"конфликтов решено (Planner) {self.conflicts_resolved_keep_planner}"
+            )
+        if self.conflicts_resolved_use_google:
+            parts.append(
+                f"конфликтов решено (Google) {self.conflicts_resolved_use_google}"
+            )
+        if self.conflicts_disconnected:
+            parts.append(f"связей отключено {self.conflicts_disconnected}")
+        if self.remote_deleted_recreated:
+            parts.append(f"серий пересоздано {self.remote_deleted_recreated}")
+        if self.resolution_attempts_superseded:
+            parts.append(
+                f"решений устарело {self.resolution_attempts_superseded}"
+            )
+        if self.resolution_failures:
+            parts.append(f"ошибок разрешения {self.resolution_failures}")
         if self.pending_after:
             parts.append(f"в очереди осталось {self.pending_after}")
         if self.terminal_ops:
@@ -219,6 +248,7 @@ class ManualSyncService:
         started = self._clock()
         pending_before = store.count_pending_ops()
         cursor_before = store.get_sync_cursor()
+        previous_sync_at = self._parse_stamp(store.get_state(LAST_SYNC_AT_KEY))
 
         try:
             gateway = self._gateway_provider()
@@ -270,6 +300,19 @@ class ManualSyncService:
             ))
 
         cursor_after = store.get_sync_cursor()
+        local_use_google = 0
+        local_disconnected = 0
+        if series_store is not None:
+            counter = getattr(
+                series_store, "count_resolutions_completed_after", None
+            )
+            if callable(counter):
+                # Local actions (Use Google / disconnect / keep-local) finished
+                # outside sync; the next summary reports them.
+                local_use_google = counter(previous_sync_at, ("use_google",))
+                local_disconnected = counter(
+                    previous_sync_at, ("disconnect", "keep_local")
+                )
         return self._finish(store, ManualSyncResult(
             ok=True,
             pushed=pushed + (series_result.pushed if series_result else 0),
@@ -289,12 +332,35 @@ class ManualSyncService:
             linked_instance_changes_quarantined=(
                 engine.last_pull_stats.linked_instance_changes_quarantined
             ),
+            conflicts_resolved_keep_planner=(
+                series_result.resolved_keep_planner if series_result else 0
+            ),
+            conflicts_resolved_use_google=local_use_google,
+            conflicts_disconnected=local_disconnected,
+            remote_deleted_recreated=(
+                series_result.remote_deleted_recreated if series_result else 0
+            ),
+            resolution_attempts_superseded=(
+                series_result.resolution_superseded if series_result else 0
+            ),
+            resolution_failures=(
+                series_result.resolution_failed if series_result else 0
+            ),
             pending_before=pending_before,
             pending_after=store.count_pending_ops(),
             terminal_ops=store.count_terminal_ops(),
             cursor_updated=cursor_after != cursor_before,
             started_at=started,
         ))
+
+    @staticmethod
+    def _parse_stamp(raw: Optional[str]) -> Optional[datetime]:
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
 
     def _finish(self, store: "CalendarSyncStore",
                 result: ManualSyncResult) -> ManualSyncResult:

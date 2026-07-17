@@ -375,14 +375,27 @@ class CalendarSyncEngine:
                     seen_at=seen_at,
                 )
             if linked is not None:
-                self._series_link_store.cancel_pending_ops(linked.series_uid)
-                self._series_link_store.set_link_status(
-                    linked.series_uid,
-                    SeriesLinkStatus.REMOTE_DELETED,
-                    error="Связанный мастер Google удалён.",
-                    remote_etag=event.etag,
-                    remote_updated_at=event.updated_at,
+                mark_remote_deleted = getattr(
+                    self._series_link_store, "mark_remote_deleted", None
                 )
+                if callable(mark_remote_deleted):
+                    # v9: one transaction cancels pending work, supersedes a
+                    # pending explicit resolution and records the dead master.
+                    mark_remote_deleted(
+                        linked.series_uid,
+                        error="Связанный мастер Google удалён.",
+                        remote_etag=event.etag,
+                        remote_updated_at=event.updated_at,
+                    )
+                else:  # pragma: no cover - legacy store compatibility
+                    self._series_link_store.cancel_pending_ops(linked.series_uid)
+                    self._series_link_store.set_link_status(
+                        linked.series_uid,
+                        SeriesLinkStatus.REMOTE_DELETED,
+                        error="Связанный мастер Google удалён.",
+                        remote_etag=event.etag,
+                        remote_updated_at=event.updated_at,
+                    )
             return
 
         schedule = self._event_schedule(event)
@@ -435,6 +448,15 @@ class CalendarSyncEngine:
                 and remote_series_uid == linked.series_uid
             )
             if etag_matches and hash_matches:
+                # A recorded conflict or dead master never self-heals from an
+                # echo: foreign edits do not update the private markers, so a
+                # marker match here proves nothing.  Only an explicit user
+                # resolution (Phase 3.2B3A) clears these states.
+                if linked.link_status in (
+                    SeriesLinkStatus.CONFLICT,
+                    SeriesLinkStatus.REMOTE_DELETED,
+                ):
+                    return
                 linked.remote_etag = event.etag
                 linked.remote_updated_at = event.updated_at
                 linked.last_error = None
@@ -448,17 +470,58 @@ class CalendarSyncEngine:
                     linked.link_status = SeriesLinkStatus.SYNCED
                 self._series_link_store.update_link(linked)
             else:
-                self._series_link_store.cancel_pending_ops(linked.series_uid)
-                self._series_link_store.set_link_status(
-                    linked.series_uid,
-                    SeriesLinkStatus.CONFLICT,
-                    error=(
-                        "Мастер Google изменён вне Planner. Локальная серия "
-                        "сохранена; автоматическая перезапись отключена."
-                    ),
-                    remote_etag=event.etag,
-                    remote_updated_at=event.updated_at,
-                )
+                self._persist_linked_master_mismatch(event, linked)
+
+    def _persist_linked_master_mismatch(self, event: CalendarEvent, linked) -> None:
+        """Unexpected remote master state for an active link (Phase 3.2B3A).
+
+        Never overwrites the local series and never queues an automatic
+        UPDATE.  A live conflict gets its stored snapshot/etag/hash base
+        refreshed (a stale acknowledged decision becomes superseded inside
+        ``record_conflict``); a ``remote_deleted`` master that reappeared at
+        the old id is only recorded as a diagnostic — no automatic relink.
+        """
+        from planner_desktop.sync.calendar_series_mapper import (
+            remote_master_snapshot_json,
+        )
+
+        record_conflict = getattr(self._series_link_store, "record_conflict", None)
+        if not callable(record_conflict):  # pragma: no cover - legacy store
+            self._series_link_store.cancel_pending_ops(linked.series_uid)
+            self._series_link_store.set_link_status(
+                linked.series_uid,
+                SeriesLinkStatus.CONFLICT,
+                error=(
+                    "Мастер Google изменён вне Planner. Локальная серия "
+                    "сохранена; автоматическая перезапись отключена."
+                ),
+                remote_etag=event.etag,
+                remote_updated_at=event.updated_at,
+            )
+            return
+        snapshot_json = remote_master_snapshot_json(event)
+        remote_payload_hash = event.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        if linked.link_status is SeriesLinkStatus.REMOTE_DELETED:
+            self._series_link_store.note_remote_reappeared(
+                linked.series_uid,
+                remote_etag=event.etag,
+                remote_updated_at=event.updated_at,
+                remote_snapshot_json=snapshot_json,
+            )
+            return
+        record_conflict(
+            linked.series_uid,
+            reason=(
+                "Мастер Google изменён вне Planner. Локальная серия "
+                "сохранена; автоматическая перезапись отключена."
+            ),
+            remote_etag=event.etag,
+            remote_payload_hash=remote_payload_hash,
+            remote_snapshot_json=snapshot_json,
+            remote_updated_at=event.updated_at,
+        )
 
     def _quarantine_linked_instance(self, event: CalendarEvent, linked) -> None:
         if self._series_link_store is None or not event.id:
