@@ -341,6 +341,9 @@ Deferred explicitly to **Phase 3.2B3C**:
 - adoption of unrelated external Google masters.
 
 Automatic merge, automatic restoration of deleted masters and any automatic
-sync remain out of scope entirely.  The real-Google live pilot for B3A is a
-separate, explicitly gated task; everything above was accepted against
-`FakeCalendarGateway` only.
+sync remain out of scope entirely. The B3B occurrence implementation was
+accepted both against `FakeCalendarGateway` and in the explicitly confirmed
+17 July 2026 real-Google pilot. That pilot used one owned `COUNT=3` TEST master,
+performed no master PATCH or ordinary event write, and ended with zero active
+TEST resources, empty queues/terminal state, no unresolved quarantine, and
+`occurrence_event_flood=0`.

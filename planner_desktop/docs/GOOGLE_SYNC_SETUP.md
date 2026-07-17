@@ -148,11 +148,23 @@ Planner / Keep both locally / Ignore. Keep Planner подтверждает те
 
 Adoption существующего master и «этот и все будущие» остаются Phase 3.2B3C.
 Открытие Settings/editor/диалогов читает только SQLite; автоматического Google
-sync нет. Реальный B3B live-пилот — отдельная явно подтверждаемая задача и до
-нового подтверждения не запускался.
+sync нет.
+
+Контролируемый B3B live-пилот выполнен 17 июля 2026 года только после явного
+подтверждения, на личном аккаунте и `primary`, из соседнего изолированного
+профиля `D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot`.
+Пилотный runner — `planner_desktop/scripts/run_phase3_2b3b_live_pilot.py`;
+обычный запуск без `PLANNER_DESKTOP_DATA_DIR` или с другим профилем
+отклоняется. Итог: один finite `COUNT=3` TEST-master, ETag race защищён, Use
+Google и принятие remote cancellation дали нулевой write delta, master не
+изменялся occurrence-операциями, ordinary writes/flood равны нулю. Cleanup и
+restart-проверка подтвердили 0 active TEST masters/instances/ordinary events,
+0 pending/terminal ops и 0 unresolved quarantine. Account identity, token,
+OAuth secrets, remote IDs и payloads runner не печатает и в отчёт не пишет.
 
 Fake-smoke B3B использует только
-`D:\Users\v.pyatakov\myspace\planner-desktop-occurrence-sync-smoke` и `FakeCalendarGateway`: один
-instance update, одна cancellation, неизменный master, нулевой flood ordinary
-occurrence events, restart persistence и `qml_warnings=0`. Это не результат
-реального Calendar API; live-пилот честно остаётся неподтверждённым.
+`D:\Users\v.pyatakov\myspace\planner-desktop-occurrence-sync-smoke` и
+`FakeCalendarGateway`: один instance update, одна cancellation, неизменный
+master, нулевой flood ordinary occurrence events, restart persistence и
+`qml_warnings=0`. Он остаётся отдельной детерминированной проверкой, а
+real-Google результат зафиксирован выше.

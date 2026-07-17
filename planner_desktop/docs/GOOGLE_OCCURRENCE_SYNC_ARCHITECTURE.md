@@ -195,5 +195,26 @@ Still deferred:
 - attendee, reminder, or location mutation;
 - bulk remote occurrence writes.
 
-The controlled real-account pilot is reported separately and must not start
-without a new explicit confirmation for the isolated live-pilot profile.
+## Controlled real-Google pilot
+
+The explicitly confirmed pilot passed on 17 July 2026 against the personal
+account's `primary` selector, using only the isolated sibling profile
+`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot`. It
+created one future `COUNT=3`, Europe/Moscow, 15-minute TEST master with no
+guests or sensitive notes. The second occurrence was moved and retitled, a
+remote conflict and a second-edit ETag race were exercised, Keep Planner was
+confirmed again, Use Google applied locally with zero write, the third
+occurrence was cancelled locally, and a separate remote cancellation was
+accepted locally.
+
+Before cleanup the master canonical content was unchanged and no master PATCH
+or ordinary event write occurred. Cleanup and a restart verification found
+zero active TEST masters, instances, and ordinary events; zero pending or
+terminal master/occurrence/ordinary operations; zero unresolved quarantine;
+and `occurrence_event_flood=0`. The runner and its report redact account
+identity and never emit OAuth secrets, token contents, remote IDs, or remote
+payloads. A first harness execution exposed an invalid cleanup-only diagnostic
+method after remote cleanup had already succeeded; zero residue was verified,
+the harness was fixed, and a fresh preflight plus complete rerun passed.
+
+Any future real-account pilot still requires a new explicit confirmation.
