@@ -1,4 +1,4 @@
-# Архитектура повторяющихся задач Planner Desktop (Phase 3.2A–3.2B2)
+# Архитектура повторяющихся задач Planner Desktop (Phase 3.2A–3.2B3A)
 
 Документ фиксирует продуктовые и технические решения локальных
 повторяющихся серий (`TaskSeries`), материализации экземпляров и шаблонов
@@ -287,7 +287,7 @@ RRULE. В каталоге чужих master нет adopt/repair/materialize con
 connect доступен только из редактора локальной TaskSeries и создаёт новый master.
 Открытие страницы не строит gateway и не делает Google call. ManualSyncResult
 аддитивно сообщает ordinary events, masters, instances, unsupported/cancelled,
-а также B2 create/update/delete/conflict/terminal/quarantine. Автоматического
+а также B2 create/update/delete/conflict/terminal/quarantine и B3A resolved/recreated/superseded/failure counts. Автоматического
 sync по-прежнему нет.
 
 ## 13. Phase 3.2B2: явная связь с новым master
@@ -314,13 +314,39 @@ keep local либо recoverable delete local+remote. Полный lifecycle, coa
 non-atomic recovery и markers описаны в
 [`GOOGLE_SERIES_SYNC_ARCHITECTURE.md`](GOOGLE_SERIES_SYNC_ARCHITECTURE.md).
 
-## 14. Граница Phase 3.2B3 (явно отложено)
+## 14. Phase 3.2B3A: явное разрешение конфликтов и восстановление
 
-- adoption существующего внешнего master;
-- запись локальных exceptions и перенос/отмена одного Google occurrence;
-- remote split «этот и все будущие»;
-- UI разрешения local-series ↔ remote-master conflict;
-- восстановление удалённого в Google master.
+Schema v9 добавляет durable conflict base на link (etag/hash/полный JSON-
+снимок remote master), audit-таблицу `series_conflict_resolutions` и link
+generations. Разрешение — только явные действия пользователя:
+
+- **Оставить версию Planner** — audit + ровно одна conflict-resolution
+  UPDATE; ручной sync перезаписывает master ТОЛЬКО при равенстве текущего
+  remote etag зафиксированному; новая внешняя правка supersede-ит решение и
+  освежает снимок; чужой master не перезаписывается никогда;
+- **Использовать версию Google** — только lossless-снимок (без EXDATE/
+  RDATE); одна SQLite-транзакция (`accept_remote_master_atomic`) обновляет
+  серию (revision +1), заменяет только будущие невыполненные не-exception
+  строки и завершает audit; история/exceptions/тумбстоуны/теги сохраняются;
+  Google-записи нет, следующий pull — echo;
+- **Отключить и сохранить обе** — detach + отмена очереди; обе версии и
+  catalog/history нетронуты;
+- remote_deleted: keep local / recreate (link generation N+1 с
+  детерминированным id от `series_uid + separator + generation`, ровно один
+  CREATE, повторные нажатия идемпотентны, старая строка — история) /
+  delete local без Google-операции; «воскресший» master по старому id не
+  переподключается автоматически.
+
+Материализация, occurrence identity, история и правила «только этот / этот
+и будущие» не изменились; conflict никогда не перезаписывает локальные
+Task-строки автоматически.
+
+## 14a. Граница Phase 3.2B3B / 3.2B3C (явно отложено)
+
+Phase 3.2B3B: запись локальных exceptions/EXDATE, перенос/отмена одного
+Google occurrence, разрешение linked-instance quarantine.
+Phase 3.2B3C: remote split «этот и все будущие», adoption существующего
+внешнего master.
 
 ## 15. Шаблоны задач
 

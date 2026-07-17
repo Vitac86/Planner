@@ -296,7 +296,16 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 - materialized local occurrences всегда дают нулевую дельту ordinary Calendar
   queue. Только series-level owned поля ставят coalesced master op;
 - linked occurrence schedule/delete/split/bulk schedule mutations блокируются
-  до Phase 3.2B3; completion/tags остаются локальными.
+  до Phase 3.2B3B; completion/tags остаются локальными;
+- Phase 3.2B3A (schema v9): durable conflict base на link (etag/hash/полный
+  remote snapshot JSON), audit-таблица `series_conflict_resolutions`,
+  resolution-метаданные на queue rows и link generations. Разрешение
+  конфликта — ТОЛЬКО явные действия пользователя: Keep Planner (перезапись
+  строго при равенстве текущего remote etag зафиксированному), Use Google
+  (одна SQLite-транзакция `accept_remote_master_atomic`, без Google-записи),
+  Disconnect; remote_deleted восстанавливается keep local / recreate
+  (generation N+1, детерминированный id) / delete local. Конфликт никогда не
+  self-heal-ится от pull echo и не перезаписывается автоматически.
 
 ## Правила маппинга Task ↔ событие Calendar (закреплены заранее)
 
@@ -339,7 +348,8 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | GoogleRecurrence codec | Phase 3.2B1 готов: canonical daily/weekly/monthly/yearly subset, interval/BYDAY/BYMONTHDAY/BYMONTH/COUNT/UNTIL/safe WKST, EXDATE/RDATE/TZID transport, structured unsupported reasons и timezone-safe inclusive UNTIL |
 | External series catalog | B1 schema v7 сохранена; B2 добавляет Planner ownership/link metadata, но чужие masters не усыновляются |
 | Series link/queue/quarantine | Phase 3.2B2 schema v8: separate historical links, independent coalescing queue/dead-letter и changed-instance quarantine; additive/idempotent/reopen-safe |
-| CalendarSeriesSyncEngine | готов: deterministic create, etag-safe update, explicit delete, catalog/link persistence и idempotent reconciliation после non-atomic failure |
+| Series conflict resolution (Phase 3.2B3A) | готов: schema v9 conflict base/audit/generations, чистая policy `domain/series_conflict_resolution.py`, `SeriesConflictService` без сети, etag-race protection в engine, транзакционный Use Google, recreate по generations; UI — SeriesConflictDialog/RemoteDeletedRecoveryDialog/ConflictResolutionHistory |
+| CalendarSeriesSyncEngine | готов: deterministic create, etag-safe update, explicit delete, catalog/link persistence и idempotent reconciliation после non-atomic failure; B3A добавляет keep-planner overwrite строго по acknowledged etag, supersede при новой внешней правке и завершение recreate-audit |
 | OccurrenceMaterializer | готов: Today запрашивает сегодня, Calendar — видимый диапазон, буфер 14 дней, предел 366 экземпляров на серию за вызов; History генерацию не запускает |
 | TemplateService | готов: локальные ordinary/recurring шаблоны, NFKC+casefold уникальность имени, Settings CRUD/duplicate и неперсистентный editor prefill |
 | TaskEditorDialog (создание/правка) | готов: режимы «Без даты»/«Весь день»/«Со временем», native date/time/duration controls, scheduling presets, приоритет/completed, inline validation, busy guard и отдельное delete-действие |
@@ -351,7 +361,7 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | FakeCalendarGateway | готов: deterministic change journal/cursor, etag, masters + changed/cancelled instances, без expansion, инъекция ошибок |
 | GoogleCalendarGateway (реальный) | ordinary behavior неизменён; отдельные master insert/get/patch/delete используют supplied id, recurrence/timezone/private markers, etag validation и retryable/terminal classification |
 | Изолированный OAuth десктопа (sync/google_auth.py) | token.json и secrets/client_secret.json в профиле PlannerDesktop (учитывает PLANNER_DESKTOP_DATA_DIR); старый профиль не читается; вход только явным действием, рекомендуется тестовый аккаунт |
-| Ручной синк (usecases/manual_sync_service.py + scripts/desktop_calendar_sync_once.py + кнопка в настройках) | series push → ordinary push → pull, concurrency guard и persisted summary; B2 result добавляет created/updated/deleted/conflict/terminal/quarantine counts |
+| Ручной синк (usecases/manual_sync_service.py + scripts/desktop_calendar_sync_once.py + кнопка в настройках) | series push → ordinary push → pull, concurrency guard и persisted summary; B2 result добавляет created/updated/deleted/conflict/terminal/quarantine counts; B3A — resolved keep-planner/use-google/disconnected, recreated, superseded и failure counts |
 | Автоматический/фоновый синк | НЕ реализован сознательно: ни при старте, ни по таймеру — только явные действия пользователя |
 
 Подробная инвентаризация фич относительно старого приложения —
@@ -360,7 +370,13 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 ## Тесты
 
 Чистая Python-логика тестируется без видимого окна. Каноническая
-верификация Phase 3.2B2:
+верификация Phase 3.2B3A:
+
+```
+python -m pytest -q tests/test_desktop_series_conflict_schema.py tests/test_desktop_series_conflict_policy.py tests/test_desktop_series_conflict_repository.py tests/test_desktop_series_conflict_service.py tests/test_desktop_series_conflict_keep_planner.py tests/test_desktop_series_conflict_use_google.py tests/test_desktop_series_conflict_disconnect.py tests/test_desktop_series_remote_deleted_recovery.py tests/test_desktop_series_link_generations.py tests/test_desktop_series_conflict_pull.py tests/test_desktop_series_conflict_viewmodel.py tests/test_desktop_series_conflict_sync_isolation.py
+```
+
+Каноническая верификация Phase 3.2B2:
 
 ```
 python -m compileall . -q
@@ -381,6 +397,6 @@ transactional split/rollback, templates, ViewModel/QML и нулевую Calenda
 sync regression файлы дополнительно запускаются отдельными срезами; существующие
 Phase 1/2/sync тесты не удаляются и входят в полный прогон. На Windows известен отдельный
 платформенный провал `tests/test_settings_paths.py::test_macos_data_dir`; он не
-исправляется в Phase 3.2B2. Фактический статус финального прогона фиксируется в
+исправляется в Phase 3.2B2/3.2B3A. Фактический статус финального прогона фиксируется в
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md), а не объявляется архитектурной
 гарантией заранее.

@@ -1,4 +1,4 @@
-# Google recurring-master sync — Phase 3.2B2
+# Google recurring-master sync — Phase 3.2B2 / 3.2B3A
 
 ## Scope and authority
 
@@ -208,13 +208,139 @@ Opening Settings, Calendar, Today, an inspector, or a series editor only reads
 local SQLite data. No startup, page-open, timer, or background Google sync is
 introduced.
 
-## Phase 3.2B3 boundary
+## Phase 3.2B3A — explicit conflict resolution and remote-deleted recovery
 
-Deferred explicitly:
+### Pre-implementation audit (recorded)
 
-- adoption of an existing external master;
+- **Conflict state retained by B2:** only `link_status='conflict'`,
+  `last_error`, `remote_etag`, `remote_updated_at` on the link plus the
+  latest catalog row in `external_calendar_series`; pending ops were removed.
+- **Complete remote snapshot:** was NOT self-contained; B3A adds
+  `conflict_remote_snapshot_json` (deterministic JSON of id/etag/summary/
+  description/start/end/recurrence/updated/private Planner markers).
+- **Etag/hash comparison:** pull treated etag match (or unknown local etag)
+  plus `planner_payload_hash` marker match plus series-uid marker match as an
+  echo; push UPDATE refused when the stored link etag differed.  B3A keeps
+  this but a recorded conflict/remote_deleted can never self-heal from an
+  echo, because a foreign edit does not update private markers.
+- **Pending UPDATE during conflict:** removed at detection; `enqueue_update`
+  refused for conflict/remote_deleted/pending_delete/terminal links.
+- **remote_deleted lifecycle:** a dead end in B2 — no recovery, updates
+  refused, reconnect blocked by "already linked".
+- **Deterministic id formula:** `plr + lowercase base32hex(SHA-256(uid))`.
+- **Transactional local acceptance:** placed at the storage layer following
+  the `split_series_atomic` precedent
+  (`SQLiteSeriesRepository.accept_remote_master_atomic`).
+
+### Conflict base
+
+`task_series_calendar_links` (schema v9) stores a durable conflict base:
+`conflict_detected_at`, `conflict_reason`, `conflict_remote_etag`,
+`conflict_remote_payload_hash`, `conflict_remote_snapshot_json`, plus
+`resolved_at`/`resolution_kind` once resolved and `link_generation`.
+`series_conflict_resolutions` is the append-only audit history
+(pending/completed/failed/superseded) with revisions and etags before/after
+and the acknowledged conflict etag.  Neither table cascades into
+`task_series` or historical `tasks` rows.
+
+### Explicit resolution actions
+
+`SeriesConflictService` (no gateway, zero network):
+
+1. **Оставить версию Planner** — requires explicit confirmation; records an
+   audit row acknowledging `conflict_remote_etag`; queues exactly one
+   conflict-resolution UPDATE (op `update` + `resolution_id` +
+   `acknowledged_remote_etag`).  The link stays `conflict` until the remote
+   write and local persistence both succeed.  Duplicate presses refresh the
+   single queue row; later local edits refresh the desired payload while
+   preserving the acknowledged base.
+2. **Использовать версию Google** — allowed only when the snapshot maps
+   losslessly (supported RRULE subset, valid DTSTART/end/all-day-or-timed
+   form/IANA timezone, no EXDATE/RDATE, ownership markers matching).  Applies
+   the snapshot to the local TaskSeries in ONE SQLite transaction (series row
+   + replaced future uncompleted non-exception occurrences + link + queue +
+   audit); in-memory repositories get compensation semantics with full
+   restore on failure.  Completed history, past exceptions, tombstones and
+   local tags are untouched; no Google write happens; the stored remote
+   etag/marker hash make the next pull an echo.
+3. **Отключить и сохранить обе** — detaches the link, cancels pending series
+   operations, leaves both definitions untouched, preserves the catalog
+   entry and the conflict history on the detached row.
+
+### Etag race protection
+
+Keep-Planner execution during manual sync fetches the current master,
+verifies ownership markers and series uid, then patches ONLY when the
+current remote etag still equals the acknowledged conflict etag.  Any newer
+remote edit refreshes the stored snapshot/base, marks the audit superseded
+and keeps the link in conflict — a new user decision is required; nothing is
+ever overwritten silently.  Remote-success/local-failure replays reconcile
+by ownership markers AND actual canonical content (stale markers alone are
+never trusted) and finish persistence without a second patch.
+
+### Supported versus unsupported remote acceptance
+
+"Использовать версию Google" is disabled for any snapshot that does not map
+losslessly; the raw recurrence lines and the unsupported reason stay visible
+in the dialog and rules are never simplified silently.  "Оставить версию
+Planner" remains available only with verified ownership; disconnect is
+always available for a conflict.
+
+### Remote-deleted recovery and link generations
+
+1. **Оставить локальной** — detaches the dead link; the series stays active
+   and local-only with its history.
+2. **Создать серию в Google заново** — explicit confirmation required; one
+   transaction retires the old row (detached, `resolution_kind='recreate'`,
+   fully queryable history), inserts an active `pending_create` link with
+   `link_generation = max(existing) + 1`, one audit row and exactly one
+   CREATE.  The remote id is `plr + base32hex(SHA-256(uid + "::planner-link-
+   generation::" + decimal generation))` (generation 0 keeps the B2 formula):
+   stable across retries/restarts, never random or time-based.  Rapid
+   duplicate presses return the in-flight link; generation N+2 is impossible
+   while N+1 is pending; the active-uniqueness indexes stay valid.
+3. **Удалить локальную серию** — existing safe local deletion semantics; no
+   Google operation (the master is already absent); completed history rows
+   survive.
+
+A cancelled master that unexpectedly reappears at the old id is never
+relinked automatically: the link stays `remote_deleted` with a
+`remote_reappeared` diagnostic and refreshed snapshot for user review.
+
+### Pull behaviour and cursor safety
+
+While a conflict is unresolved every new remote change only refreshes the
+stored snapshot/etag/hash/time; the local series is never overwritten and no
+automatic UPDATE is queued; a pending acknowledged decision becomes
+superseded.  Catalog/link/conflict/audit persistence completes before the
+pull cursor advances, so failures replay safely.
+
+### Audit history and reporting
+
+Settings shows conflict/remote-deleted counts, pending/failed/superseded
+resolution counts, unresolved quarantine, per-link generation and the local
+resolution history.  `ManualSyncResult` gains additive counters:
+`conflicts_resolved_keep_planner`, `remote_deleted_recreated`,
+`resolution_attempts_superseded` and `resolution_failures` count work done
+by this push cycle; `conflicts_resolved_use_google` and
+`conflicts_disconnected` are local actions and report resolutions completed
+since the previous manual sync — i.e. in the NEXT summary.
+
+### Phase 3.2B3B / 3.2B3C boundary
+
+Deferred explicitly to **Phase 3.2B3B**:
+
 - editing/cancelling one Google occurrence;
-- synchronization of local exceptions/EXDATE/instance writes;
+- synchronization of local exceptions/EXDATE/RDATE/instance writes;
+- resolution of the linked-instance quarantine (it remains visible and
+  unresolved).
+
+Deferred explicitly to **Phase 3.2B3C**:
+
 - remote "this and future" split;
-- conflict-resolution UI and automatic merge policy;
-- restoring a remotely deleted master.
+- adoption of unrelated external Google masters.
+
+Automatic merge, automatic restoration of deleted masters and any automatic
+sync remain out of scope entirely.  The real-Google live pilot for B3A is a
+separate, explicitly gated task; everything above was accepted against
+`FakeCalendarGateway` only.

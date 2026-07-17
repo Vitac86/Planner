@@ -574,13 +574,96 @@ Google — ноль, все вызовы происходили из явных 
 
 Подробный контракт: [`GOOGLE_SERIES_SYNC_ARCHITECTURE.md`](GOOGLE_SERIES_SYNC_ARCHITECTURE.md).
 
-### Фаза 3.2B3 — явно отложено
+## Фаза 3.2B3A — явное разрешение конфликтов и восстановление после удаления (готово, fake-приёмка)
 
-- adoption существующего внешнего master;
-- изменение/отмена одного Google occurrence и запись локальных exceptions;
+Для связанного Planner-owned master пользователь теперь получает явные и
+безопасные выборы; ни одна сторона никогда не перезаписывается молча.
+
+Реализованы:
+
+- schema v9 (аддитивно/идемпотентно): durable conflict base на link
+  (etag/hash/полный JSON-снимок remote master), `link_generation`,
+  resolution-метаданные на строках очереди и audit-таблица
+  `series_conflict_resolutions` (pending/completed/failed/superseded);
+  v8-links мигрируют с `link_generation = 0`;
+- **«Оставить версию Planner»** — явное подтверждение, audit-строка с
+  зафиксированным (acknowledged) etag конфликтной версии, ровно одна
+  conflict-resolution UPDATE-операция; при ручном sync master
+  перезаписывается ТОЛЬКО если текущий remote etag всё ещё равен
+  зафиксированному; новая внешняя правка обновляет снимок, помечает решение
+  superseded и требует нового решения; чужой/неподтверждённый master не
+  перезаписывается никогда; конфликт снимается только после успеха remote
+  update и локальной персистентности; retry после remote-успеха/локального
+  сбоя не делает второй patch;
+- **«Использовать версию Google»** — только для lossless-снимка
+  (поддерживаемое правило, валидные DTSTART/end/форма/IANA timezone, без
+  EXDATE/RDATE); одна SQLite-транзакция обновляет серию, заменяет только
+  будущие невыполненные не-exception occurrences, чистит очередь и завершает
+  audit; выполненная история, прошлые exceptions, тумбстоуны и локальные теги
+  сохраняются; Google-запись не выполняется; следующий pull — echo; при сбое
+  все строки откатываются (compensation для in-memory);
+- **«Отключить и сохранить обе»** — link detach + отмена pending операций;
+  обе версии и catalog/history нетронуты;
+- remote_deleted: **«Оставить локальной»**, **«Создать серию в Google
+  заново»** (link generation N+1 с детерминированным id
+  `plr+base32hex(SHA-256(uid + separator + generation))`, ровно один CREATE,
+  повторные нажатия не создают поколений, старая строка сохраняется как
+  история) и **«Удалить локальную серию»** (без Google-операции, история
+  сохраняется); внезапно «воскресший» master по старому id НЕ переподключается
+  автоматически — только диагностика;
+- pull при неразрешённом конфликте лишь освежает снимок/etag/hash, локальная
+  серия не перезаписывается, автоматический UPDATE не ставится, устаревшее
+  решение становится superseded; курсор не продвигается до персистентности;
+- QML: SeriesConflictDialog + SeriesConflictComparison (Planner ↔ Google,
+  поддержка/владение текстом, raw RRULE при неподдерживаемом правиле),
+  RemoteDeletedRecoveryDialog, ConflictResolutionHistory в Settings;
+  деструктивные действия без выбора по умолчанию, подтверждение обязательно,
+  Esc отменяет, Enter с начального фокуса не подтверждает; compact/normal/wide;
+- `ManualSyncResult` аддитивно: conflicts_resolved_keep_planner /
+  use_google / disconnected, remote_deleted_recreated,
+  resolution_attempts_superseded, resolution_failures (use_google/disconnect —
+  локальные действия, попадают в следующую сводку).
+
+Fake/injected smoke в `D:\Users\v.pyatakov\backup\planner-desktop-series-conflict-smoke`
+подтвердил: create+link, конфликт заголовка, Keep Planner success, гонку
+второй правки (stale решение НЕ перезаписало master), Use Google success,
+неподдерживаемое правило (действие заблокировано, raw RRULE виден),
+disconnect, remote deletion → keep local / recreate generation 1 (другой
+стабильный id) / delete local с сохранением истории, restart persistence,
+ordinary task sync, `occurrence_event_flood=0`, `settings_gateway_calls=0`,
+`qml_warnings=0`, реальных вызовов Google — ноль.
+
+Статус проверки на 17 июля 2026 года:
+
+| Проверка | Статус | Результат |
+|---|---|---|
+| Focused Phase 3.2B3A (12 файлов) | PASS | `90 passed` |
+| Регрессии B2/B1/3.2A/3.1/Phase 2/ordinary sync | PASS | в составе полного прогона |
+| Compile + collection | PASS | compileall без ошибок; `1039 tests collected` |
+| Полный pytest | PASS с известным Windows-исключением | `1038 passed`, единственный сбой `tests/test_settings_paths.py::test_macos_data_dir`; не относится к B3A и не исправлялся |
+| QML/fake visual smoke | PASS | 7 screenshots, compact/normal/wide, restart, `qml_warnings=0`, network calls on page-open = 0 |
+| Live-пилот B3A (реальный Calendar API) | **НЕ ПРОЙДЕН — отдельная задача** | обязательный внешний gate перед продакшн-использованием разрешения конфликтов |
+
+Скриншоты fake-приёмки:
+
+- [сравнение версий](screenshots/series_conflict_compare_phase3_2b3a.png);
+- [решение «Оставить версию Planner» ожидает sync](screenshots/series_conflict_keep_planner_phase3_2b3a.png);
+- [подтверждение «Использовать версию Google»](screenshots/series_conflict_use_google_phase3_2b3a.png);
+- [неподдерживаемое правило](screenshots/series_conflict_unsupported_phase3_2b3a.png);
+- [восстановление после удаления в Google](screenshots/series_remote_deleted_recovery_phase3_2b3a.png);
+- [Settings: диагностика и история решений](screenshots/series_conflict_settings_phase3_2b3a.png);
+- [compact](screenshots/series_conflict_compact_phase3_2b3a.png).
+
+### Фаза 3.2B3B — явно отложено
+
+- изменение/отмена одного Google occurrence;
+- синхронизация локальных exceptions/EXDATE;
+- разрешение карантина изменённых linked instances (он остаётся видимым).
+
+### Фаза 3.2B3C — явно отложено
+
 - remote split «этот и все будущие»;
-- UI разрешения конфликтов;
-- восстановление удалённого в Google master.
+- adoption несвязанных внешних Google masters.
 
 ---
 
