@@ -125,6 +125,15 @@ class HistoryViewModel(TaskActionsViewModel):
                 task = None if entry.is_daily else self._service.get_task(entry.uid)
                 row["tags"] = list(task.tags[:3]) if task is not None else []
                 row["tagOverflow"] = max(0, len(task.tags) - 3) if task is not None else 0
+                occurrence = (
+                    self.editorDataFor(task.uid) if task is not None else {}
+                )
+                row["occurrenceSyncStatus"] = occurrence.get(
+                    "occurrenceSyncStatus", ""
+                )
+                row["occurrenceSyncStatusText"] = occurrence.get(
+                    "occurrenceSyncStatusText", ""
+                )
                 rows.append(row)
             result.append({
                 "dateISO": group.day.isoformat(),

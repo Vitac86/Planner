@@ -119,6 +119,8 @@ class SettingsViewModel(QObject):
                  external_series_service: ExternalSeriesService | None = None,
                  series_link_service=None,
                  series_sync_store=None,
+                 occurrence_sync_store=None,
+                 occurrence_resolution_service=None,
                  series_conflict_service=None) -> None:
         super().__init__(parent)
         self._service = service
@@ -131,6 +133,8 @@ class SettingsViewModel(QObject):
         self._external_series = external_series_service
         self._series_links = series_link_service
         self._series_sync_store = series_sync_store
+        self._occurrence_sync_store = occurrence_sync_store
+        self._occurrence_resolutions = occurrence_resolution_service
         self._series_conflicts = series_conflict_service
         self._busy_kind = ""       # "" | "connect" | "sync"
         self._live_error = ""      # ошибка текущей сессии (поверх сохранённой)
@@ -468,6 +472,174 @@ class SettingsViewModel(QObject):
     @Property(int, notify=seriesLinksStateChanged)
     def quarantinedSeriesInstanceCount(self) -> int:
         return int(self._series_link_diagnostics().get("quarantined", 0))
+
+    # ---- linked occurrence diagnostics and explicit quarantine actions ----
+
+    def _occurrence_diagnostics(self) -> dict:
+        if self._occurrence_sync_store is None:
+            return {
+                "occurrence_pending_update": 0,
+                "occurrence_pending_cancel": 0,
+                "occurrence_terminal": 0,
+                "occurrence_quarantined": 0,
+                "occurrence_remote_cancelled": 0,
+                "occurrence_resolved_history": 0,
+                "occurrence_exceptions": 0,
+            }
+        try:
+            return self._occurrence_sync_store.diagnostics()
+        except Exception:
+            logger.exception("Could not read occurrence sync diagnostics")
+            return {}
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def pendingOccurrenceUpdateCount(self) -> int:
+        return int(self._occurrence_diagnostics().get(
+            "occurrence_pending_update", 0
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def pendingOccurrenceCancelCount(self) -> int:
+        return int(self._occurrence_diagnostics().get(
+            "occurrence_pending_cancel", 0
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def terminalOccurrenceOpsCount(self) -> int:
+        return int(self._occurrence_diagnostics().get("occurrence_terminal", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def unresolvedOccurrenceQuarantineCount(self) -> int:
+        return int(self._occurrence_diagnostics().get(
+            "occurrence_quarantined", 0
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def remoteCancelledOccurrenceCount(self) -> int:
+        return int(self._occurrence_diagnostics().get(
+            "occurrence_remote_cancelled", 0
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def resolvedOccurrenceHistoryCount(self) -> int:
+        return int(self._occurrence_diagnostics().get(
+            "occurrence_resolved_history", 0
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def linkedOccurrenceExceptionCount(self) -> int:
+        return int(self._occurrence_diagnostics().get(
+            "occurrence_exceptions", 0
+        ))
+
+    @Property("QVariantList", notify=seriesLinksStateChanged)
+    def quarantinedOccurrenceRows(self):
+        if self._occurrence_sync_store is None:
+            return []
+        rows = []
+        for change in self._occurrence_sync_store.list_occurrence_changes(
+            unresolved_only=True
+        ):
+            supported = False
+            reason = change.resolution_error or ""
+            if self._occurrence_resolutions is not None:
+                supported, support_reason = (
+                    self._occurrence_resolutions.use_google_support(change.id)
+                )
+                reason = support_reason or reason
+            payload = change.payload
+            local = {}
+            if (
+                self._occurrence_resolutions is not None
+                and change.matched_series_uid
+            ):
+                repository = self._occurrence_resolutions.task_repository
+                task = next(
+                    (
+                        item for item in repository.list_by_series(
+                            change.matched_series_uid
+                        )
+                        if item.occurrence_key == change.matched_occurrence_key
+                    ),
+                    None,
+                )
+                if task is not None:
+                    local = {
+                        "title": task.title,
+                        "schedule": (
+                            f"{task.start} - {task.end}"
+                            if task.start is not None else ""
+                        ),
+                    }
+            rows.append({
+                "id": int(change.id or 0),
+                "seriesUid": change.matched_series_uid or "",
+                "occurrenceKey": change.matched_occurrence_key or "",
+                "remoteInstanceId": change.remote_instance_event_id,
+                "status": change.status,
+                "title": str(payload.get("summary") or ""),
+                "remoteCancelled": change.status == "cancelled",
+                "remoteEtag": change.remote_etag or "",
+                "resolutionStatus": change.resolution_status,
+                "canUseGoogle": bool(supported),
+                "useGoogleDisabledReason": reason,
+                "local": local,
+                "google": {
+                    "title": str(payload.get("summary") or ""),
+                    "schedule": (
+                        f"{payload.get('start') or ''} - "
+                        f"{payload.get('end') or ''}"
+                    ),
+                },
+            })
+        return rows
+
+    def _run_occurrence_resolution(self, result, *, mutates_tasks: bool) -> bool:
+        if not result.ok:
+            self.toastMessage.emit(result.error)
+            return False
+        self.seriesLinksStateChanged.emit()
+        if mutates_tasks:
+            self.tasksMutated.emit()
+        return True
+
+    @Slot(int, result=bool)
+    def useGoogleOccurrence(self, change_id: int) -> bool:
+        if self._occurrence_resolutions is None:
+            return False
+        return self._run_occurrence_resolution(
+            self._occurrence_resolutions.use_google(change_id),
+            mutates_tasks=True,
+        )
+
+    @Slot(int, bool, result=bool)
+    def keepPlannerOccurrence(self, change_id: int, confirmed: bool) -> bool:
+        if self._occurrence_resolutions is None:
+            return False
+        return self._run_occurrence_resolution(
+            self._occurrence_resolutions.keep_planner(
+                change_id, confirmed=confirmed
+            ),
+            mutates_tasks=False,
+        )
+
+    @Slot(int, result=bool)
+    def keepBothOccurrence(self, change_id: int) -> bool:
+        if self._occurrence_resolutions is None:
+            return False
+        return self._run_occurrence_resolution(
+            self._occurrence_resolutions.keep_both_as_local_copy(change_id),
+            mutates_tasks=True,
+        )
+
+    @Slot(int, result=bool)
+    def ignoreOccurrenceForNow(self, change_id: int) -> bool:
+        if self._occurrence_resolutions is None:
+            return False
+        return self._run_occurrence_resolution(
+            self._occurrence_resolutions.ignore_for_now(change_id),
+            mutates_tasks=False,
+        )
 
     # ---- explicit conflict resolution diagnostics (Phase 3.2B3A) -----------
 

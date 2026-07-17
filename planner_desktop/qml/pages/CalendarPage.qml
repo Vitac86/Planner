@@ -17,6 +17,7 @@ Item {
     readonly property bool dialogsOpen: editorDialog.visible
                                         || confirmDeleteDialog.visible
                                         || confirmBulkDeleteDialog.visible
+                                        || occurrenceMoveConfirm.visible
                                         || snoozeMenu.visible
                                         || newTaskMenu.visible
                                         || undatedDrawer.visible
@@ -35,6 +36,14 @@ Item {
         repeat: true
         running: page.visible
         onTriggered: calendarVm.refreshCurrentTime()
+    }
+
+    Connections {
+        target: calendarVm
+        function onOccurrenceScheduleConfirmationRequested() {
+            occurrenceMoveConfirm.accepted = false
+            occurrenceMoveConfirm.openFor(calendarVm.selectedUid)
+        }
     }
 
     function restoreFocus() {
@@ -746,6 +755,25 @@ Item {
         vm: calendarVm
         onPickRequested: uid => page.editEvent(uid)
         onClosed: if (!editorDialog.visible) page.restoreFocus()
+    }
+
+    ConfirmDialog {
+        id: occurrenceMoveConfirm
+        objectName: "occurrenceMoveConfirm"
+        property bool accepted: false
+        headerText: "\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e \u044d\u0442\u043e\u0442 \u044d\u043a\u0437\u0435\u043c\u043f\u043b\u044f\u0440"
+        message: "\u041c\u0430\u0441\u0442\u0435\u0440 \u0441\u0435\u0440\u0438\u0438 \u043d\u0435 \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u0441\u044f. \u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435 \u043e\u0434\u043d\u043e\u0433\u043e \u044d\u043a\u0437\u0435\u043c\u043f\u043b\u044f\u0440\u0430 \u0431\u0443\u0434\u0435\u0442 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u0439 \u0440\u0443\u0447\u043d\u043e\u0439 \u0441\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u0438."
+        confirmText: "\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u044d\u043a\u0437\u0435\u043c\u043f\u043b\u044f\u0440"
+        onConfirmed: uid => {
+            accepted = true
+            calendarVm.confirmOccurrenceScheduleChange()
+        }
+        onClosed: {
+            if (!accepted)
+                calendarVm.cancelInteraction()
+            accepted = false
+            page.restoreFocus()
+        }
     }
 
     TaskEditorDialog {

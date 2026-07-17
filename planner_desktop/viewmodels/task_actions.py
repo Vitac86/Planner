@@ -276,6 +276,10 @@ class TaskActionsViewModel(QObject):
         data.setdefault("timezoneName", "")
         data.setdefault("seriesLinkStatus", "")
         data.setdefault("seriesLinkedToGoogle", False)
+        data.setdefault("occurrenceSyncStatus", "")
+        data.setdefault("occurrenceSyncStatusText", "")
+        data.setdefault("occurrenceOriginalSlot", data.get("occurrenceKey", ""))
+        data.setdefault("occurrenceRemoteStatus", "")
         recurrence = getattr(self._service, "recurrence_service", None)
         if data.get("isSeriesOccurrence") and recurrence is not None:
             series = recurrence.get_series(data.get("seriesUid", ""))
@@ -291,6 +295,35 @@ class TaskActionsViewModel(QObject):
                     if link is not None
                     else readable_series_link_status(None)
                 )
+                occurrence_store = getattr(
+                    recurrence, "occurrence_sync_store", None
+                )
+                if link is not None and occurrence_store is not None:
+                    occurrence_link = occurrence_store.get_occurrence_link(
+                        series.uid, data.get("occurrenceKey", "")
+                    )
+                    if occurrence_link is not None:
+                        status = occurrence_link.sync_status.value
+                        data["occurrenceSyncStatus"] = status
+                        data["occurrenceSyncStatusText"] = {
+                            "local_only": "Локальное исключение",
+                            "pending_update": "Ожидает обновления Google",
+                            "synced_exception": "Исключение синхронизировано",
+                            "pending_cancel": "Ожидает отмены Google",
+                            "cancelled": "Экземпляр отменён",
+                            "conflict": "Конфликт экземпляра",
+                            "remote_changed": "Изменён в Google",
+                            "remote_cancelled": "Отменён в Google",
+                            "terminal_error": "Ошибка синхронизации экземпляра",
+                        }.get(status, status)
+                        data["occurrenceOriginalSlot"] = (
+                            occurrence_link.original_start_value
+                        )
+                        data["occurrenceRemoteStatus"] = (
+                            "cancelled"
+                            if occurrence_link.is_cancelled_remote
+                            else "confirmed"
+                        )
         return data
 
     def _series_links(self):
@@ -818,7 +851,15 @@ class TaskActionsViewModel(QObject):
         if not self._begin("delete", uid, dedupe=True):
             return False
         try:
-            deleted = self._service.delete_task_by_uid(uid)
+            task = self._service.get_task(uid)
+            recurrence = getattr(self._service, "recurrence_service", None)
+            deleted = (
+                recurrence.delete_occurrence(uid)
+                if task is not None
+                and task.is_series_occurrence
+                and recurrence is not None
+                else self._service.delete_task_by_uid(uid)
+            )
         except Exception as exc:
             self.toastError.emit(f"Не удалось удалить задачу: {exc}")
             return False

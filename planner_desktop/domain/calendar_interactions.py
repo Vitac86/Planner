@@ -275,6 +275,7 @@ def propose_drag(
     task: Task,
     target: CalendarDropTarget,
     *,
+    allow_series_occurrence: bool = False,
     default_timed_duration: int = DEFAULT_TIMED_DURATION_MINUTES,
     minimum_timed_duration: int = MIN_TIMED_DURATION_MINUTES,
     maximum_timed_duration: int = MAX_DURATION_MINUTES,
@@ -289,7 +290,7 @@ def propose_drag(
         return _drag_rejection(
             task, target, RECURRING_INTERACTION_ERROR, "recurring_instance"
         )
-    if task.series_uid is not None:
+    if task.series_uid is not None and not allow_series_occurrence:
         # Прямой drag экземпляра локальной серии запрещён в Phase 3.2A:
         # область изменений («только этот» / «этот и все будущие»)
         # выбирается только явно в редакторе.
@@ -389,6 +390,7 @@ def propose_resize(
     edge: ResizeEdge,
     target: CalendarDropTarget,
     *,
+    allow_series_occurrence: bool = False,
     minimum_timed_duration: int = MIN_TIMED_DURATION_MINUTES,
     maximum_timed_duration: int = MAX_DURATION_MINUTES,
 ) -> CalendarResizeProposal:
@@ -397,7 +399,7 @@ def propose_resize(
         return _resize_rejection(
             task, edge, RECURRING_INTERACTION_ERROR, "recurring_instance"
         )
-    if task.series_uid is not None:
+    if task.series_uid is not None and not allow_series_occurrence:
         return _resize_rejection(
             task, edge, SERIES_INTERACTION_ERROR, "local_series_occurrence"
         )

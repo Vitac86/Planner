@@ -139,6 +139,14 @@ class DesktopTaskService:
         links = getattr(recurrence, "series_link_service", None)
         return bool(links is not None and links.is_linked(task.series_uid))
 
+    def is_linked_series_occurrence(self, task_or_uid) -> bool:
+        task = (
+            self.get_task(task_or_uid)
+            if isinstance(task_or_uid, str)
+            else task_or_uid
+        )
+        return bool(task is not None and self._is_linked_series_occurrence(task))
+
     def _series_interaction_error(self, task: Task) -> str:
         if self._is_linked_series_occurrence(task):
             return LINKED_OCCURRENCE_CHANGE_ERROR
@@ -681,6 +689,14 @@ class DesktopTaskService:
             return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
         if not proposal.changed:
             return TaskOperationResult(task=task)
+        if self._is_local_series_occurrence(task):
+            return self._apply_linked_occurrence_schedule(
+                task,
+                start=proposal.proposed_start,
+                end=proposal.proposed_end,
+                duration_minutes=proposal.proposed_duration_minutes,
+                is_all_day=proposal.proposed_all_day,
+            )
         if proposal.proposed_start is None:
             return self.unschedule_task(task.uid)
         return self._commit_schedule_change(
@@ -701,6 +717,14 @@ class DesktopTaskService:
             return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
         if not proposal.changed:
             return TaskOperationResult(task=task)
+        if self._is_local_series_occurrence(task):
+            return self._apply_linked_occurrence_schedule(
+                task,
+                start=proposal.proposed_start,
+                end=proposal.proposed_end,
+                duration_minutes=proposal.proposed_duration_minutes,
+                is_all_day=False,
+            )
         return self._commit_schedule_change(
             task,
             start=proposal.proposed_start,
@@ -708,6 +732,55 @@ class DesktopTaskService:
             duration_minutes=proposal.proposed_duration_minutes,
             is_all_day=False,
         )
+
+    def _apply_linked_occurrence_schedule(
+        self,
+        task: Task,
+        *,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        duration_minutes: Optional[int],
+        is_all_day: bool,
+    ) -> TaskOperationResult:
+        """Route an explicitly confirmed Calendar gesture through B3B.
+
+        The ordinary Task queue is deliberately bypassed.  Unlinked local
+        series keep their Phase 3.2A editor-only restriction.
+        """
+        if not self._is_linked_series_occurrence(task):
+            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+        if start is None or end is None:
+            return TaskOperationResult(errors=[SERIES_INTERACTION_ERROR])
+        recurrence = self.recurrence_service
+        if recurrence is None:
+            return TaskOperationResult(errors=[LINKED_OCCURRENCE_CHANGE_ERROR])
+        series = recurrence.get_series(str(task.series_uid))
+        if series is None or bool(is_all_day) != bool(series.schedule.all_day):
+            return TaskOperationResult(errors=[
+                "Timed/all-day conversion for one linked occurrence is deferred to Phase 3.2B3C."
+            ])
+        if not is_all_day and start.date() != end.date():
+            return TaskOperationResult(errors=[
+                "Multi-day timed occurrence exceptions are deferred to Phase 3.2B3C."
+            ])
+        minutes = None if is_all_day else int(
+            duration_minutes
+            if duration_minutes is not None
+            else (end - start).total_seconds() // 60
+        )
+        command = TaskEditorCommand(
+            title=task.title,
+            notes=task.notes,
+            priority=task.priority,
+            completed=task.completed,
+            add_to_calendar=True,
+            is_all_day=is_all_day,
+            date_text=start.strftime("%Y-%m-%d"),
+            time_text="" if is_all_day else start.strftime("%H:%M"),
+            duration_text="" if is_all_day else str(minutes),
+        )
+        result = recurrence.edit_occurrence(task.uid, command)
+        return TaskOperationResult(task=result.task, errors=list(result.errors))
 
     def apply_scheduling_preset(
         self, uid: str, preset: str, now: Optional[datetime] = None

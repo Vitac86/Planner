@@ -95,7 +95,17 @@ class SearchViewModel(TaskActionsViewModel):
         rows: List[Dict[str, Any]] = []
         for match in self._matches:
             row = task_to_row(match.task, pending)
-            row.update({"rank": match.rank, "matchedFields": list(match.matched_fields)})
+            occurrence = self.editorDataFor(match.task.uid)
+            row.update({
+                "rank": match.rank,
+                "matchedFields": list(match.matched_fields),
+                "occurrenceSyncStatus": occurrence.get(
+                    "occurrenceSyncStatus", ""
+                ),
+                "occurrenceSyncStatusText": occurrence.get(
+                    "occurrenceSyncStatusText", ""
+                ),
+            })
             rows.append(row)
         return rows
 

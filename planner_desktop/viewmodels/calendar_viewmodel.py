@@ -102,6 +102,7 @@ class CalendarViewModel(TaskActionsViewModel):
     gridChanged = Signal()
     editEventRequested = Signal(str)
     interactionChanged = Signal()
+    occurrenceScheduleConfirmationRequested = Signal()
     responsiveModeChanged = Signal()
 
     def __init__(self, repository: TaskRepository | None = None,
@@ -668,7 +669,11 @@ class CalendarViewModel(TaskActionsViewModel):
             visible_start_minute=self._grid_config.visible_start_minute,
             visible_end_minute=self._grid_config.visible_end_minute,
         )
-        self._drag_proposal = propose_drag(task, target)
+        self._drag_proposal = propose_drag(
+            task,
+            target,
+            allow_series_occurrence=self._service.is_linked_series_occurrence(task),
+        )
         self.interactionChanged.emit()
 
     @Slot(str, str, float, float, bool)
@@ -704,11 +709,15 @@ class CalendarViewModel(TaskActionsViewModel):
         if task is None:
             self.cancelDrag()
             return
-        self._drag_proposal = propose_drag(task, CalendarDropTarget(
-            zone, target_date, minute,
-            self._grid_config.visible_start_minute,
-            self._grid_config.visible_end_minute,
-        ))
+        self._drag_proposal = propose_drag(
+            task,
+            CalendarDropTarget(
+                zone, target_date, minute,
+                self._grid_config.visible_start_minute,
+                self._grid_config.visible_end_minute,
+            ),
+            allow_series_occurrence=self._service.is_linked_series_occurrence(task),
+        )
         self.interactionChanged.emit()
 
     @Slot()
@@ -720,6 +729,18 @@ class CalendarViewModel(TaskActionsViewModel):
 
     @Slot(result=bool)
     def commitDrop(self) -> bool:
+        task = self._service.get_task(self._dragged_uid)
+        if (
+            task is not None
+            and self._service.is_linked_series_occurrence(task)
+            and self._drag_proposal is not None
+            and self._drag_proposal.changed
+        ):
+            self.occurrenceScheduleConfirmationRequested.emit()
+            return False
+        return self._commit_drop_confirmed()
+
+    def _commit_drop_confirmed(self) -> bool:
         proposal = self._drag_proposal
         uid = self._dragged_uid
         dedupe_key = (
@@ -803,7 +824,12 @@ class CalendarViewModel(TaskActionsViewModel):
             self._grid_config.visible_start_minute,
             self._grid_config.visible_end_minute,
         )
-        self._resize_proposal = propose_resize(task, self._resize_edge, target)
+        self._resize_proposal = propose_resize(
+            task,
+            self._resize_edge,
+            target,
+            allow_series_occurrence=self._service.is_linked_series_occurrence(task),
+        )
         self.interactionChanged.emit()
 
     @Slot()
@@ -821,6 +847,18 @@ class CalendarViewModel(TaskActionsViewModel):
 
     @Slot(result=bool)
     def commitResize(self) -> bool:
+        task = self._service.get_task(self._resize_uid)
+        if (
+            task is not None
+            and self._service.is_linked_series_occurrence(task)
+            and self._resize_proposal is not None
+            and self._resize_proposal.changed
+        ):
+            self.occurrenceScheduleConfirmationRequested.emit()
+            return False
+        return self._commit_resize_confirmed()
+
+    def _commit_resize_confirmed(self) -> bool:
         proposal = self._resize_proposal
         uid = self._resize_uid
         if (
@@ -851,6 +889,14 @@ class CalendarViewModel(TaskActionsViewModel):
         self.selectTask(uid)
         self._notify_mutation("Длительность обновлена")
         return True
+
+    @Slot(result=bool)
+    def confirmOccurrenceScheduleChange(self) -> bool:
+        if self._dragging:
+            return self._commit_drop_confirmed()
+        if self._resizing:
+            return self._commit_resize_confirmed()
+        return False
 
     def _keyboard_interaction(self, name: str, uid: str, operation) -> bool:
         if not uid or self._interaction_busy or not self._begin(name, uid, dedupe=True):

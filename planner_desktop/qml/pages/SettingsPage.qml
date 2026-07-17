@@ -589,6 +589,80 @@ ScrollView {
             }
         }
 
+        // ---- Linked Google occurrence exceptions (Phase 3.2B3B) ----
+        Panel {
+            id: occurrenceSyncPanel
+            objectName: "settingsOccurrenceSync"
+            Layout.fillWidth: true
+            implicitHeight: occurrenceSyncColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: occurrenceSyncColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                Label {
+                    text: "\u042d\u043a\u0437\u0435\u043c\u043f\u043b\u044f\u0440\u044b \u0441\u0432\u044f\u0437\u0430\u043d\u043d\u044b\u0445 \u0441\u0435\u0440\u0438\u0439 Google"
+                    font.pixelSize: Theme.fontSubtitle
+                    font.family: Theme.fontFamily
+                    font.weight: Font.DemiBold
+                    color: Theme.textPrimary
+                    Layout.fillWidth: true
+                    Accessible.name: text
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    Badge { text: "Update: " + settingsVm.pendingOccurrenceUpdateCount }
+                    Badge { text: "Cancel: " + settingsVm.pendingOccurrenceCancelCount }
+                    Badge { text: "Terminal: " + settingsVm.terminalOccurrenceOpsCount }
+                    Badge { text: "Quarantine: " + settingsVm.unresolvedOccurrenceQuarantineCount }
+                    Badge { text: "Remote cancelled: " + settingsVm.remoteCancelledOccurrenceCount }
+                    Badge { text: "Resolved: " + settingsVm.resolvedOccurrenceHistoryCount }
+                    Badge { text: "Exceptions: " + settingsVm.linkedOccurrenceExceptionCount }
+                }
+                Repeater {
+                    model: settingsVm.quarantinedOccurrenceRows
+                    delegate: QuarantinedOccurrenceRow {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        occurrence: modelData
+                        onResolveRequested: occurrence => {
+                            occurrenceConflictDialog.conflictData = occurrence
+                            occurrenceConflictDialog.open()
+                        }
+                    }
+                }
+                Label {
+                    visible: settingsVm.quarantinedOccurrenceRows.length === 0
+                    text: "\u041d\u0435\u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043d\u043d\u044b\u0445 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439 \u044d\u043a\u0437\u0435\u043c\u043f\u043b\u044f\u0440\u043e\u0432 \u043d\u0435\u0442."
+                    color: Theme.textMuted
+                    Layout.fillWidth: true
+                }
+            }
+        }
+
+        OccurrenceConflictDialog {
+            id: occurrenceConflictDialog
+            objectName: "occurrenceConflictDialog"
+            onUseGoogleRequested: changeId => settingsVm.useGoogleOccurrence(changeId)
+            onKeepPlannerRequested: changeId => keepPlannerOccurrenceConfirm.openFor(String(changeId))
+            onKeepBothRequested: changeId => settingsVm.keepBothOccurrence(changeId)
+        }
+
+        ConfirmDialog {
+            id: keepPlannerOccurrenceConfirm
+            objectName: "keepPlannerOccurrenceConfirm"
+            headerText: "\u041e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0432\u0435\u0440\u0441\u0438\u044e Planner?"
+            message: "\u0422\u0435\u043a\u0443\u0449\u0430\u044f \u0432\u0435\u0440\u0441\u0438\u044f Google \u0431\u0443\u0434\u0435\u0442 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0438\u0441\u0430\u043d\u0430 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u0439 \u0440\u0443\u0447\u043d\u043e\u0439 \u0441\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u0438."
+            confirmText: "\u041e\u0441\u0442\u0430\u0432\u0438\u0442\u044c Planner"
+            onConfirmed: uid => {
+                settingsVm.keepPlannerOccurrence(Number(uid), true)
+                occurrenceConflictDialog.close()
+            }
+        }
+
         // ---- Explicit conflict resolution history (Phase 3.2B3A) ----
         Panel {
             id: conflictResolutionPanel

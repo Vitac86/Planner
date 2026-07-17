@@ -39,6 +39,10 @@ Dialog {
     property string seriesLinkStatus: "Локальная серия"
     // Повторение для НОВОЙ задачи: включается тумблером, сохраняется
     // как локальная серия (vm.saveEditorAsSeries).
+    property string occurrenceSyncStatus: ""
+    property string occurrenceSyncStatusText: ""
+    property string occurrenceOriginalSlot: ""
+    property string occurrenceRemoteStatus: ""
     property bool recurEnabled: false
     // Снимки исходного состояния для детекции изменений расписания/правила.
     property string _origScheduleJson: ""
@@ -47,6 +51,7 @@ Dialog {
     property var _deleteSeriesConfirmObject: null
     property var _templatePickerObject: null
     property var _seriesGoogleLinkObject: null
+    property var _occurrenceCancelObject: null
 
     // Режим планирования: "none" | "allday" | "timed" (domain/scheduling.py).
     property string schedMode: "none"
@@ -120,6 +125,9 @@ Dialog {
         if (!taskEditorDialog._seriesGoogleLinkObject)
             taskEditorDialog._seriesGoogleLinkObject =
                 seriesGoogleLinkFactory.createObject(taskEditorDialog.parent)
+        if (!taskEditorDialog._occurrenceCancelObject)
+            taskEditorDialog._occurrenceCancelObject =
+                occurrenceCancelFactory.createObject(taskEditorDialog.parent)
     }
 
     function _resetForm(data) {
@@ -141,6 +149,10 @@ Dialog {
         taskEditorDialog.seriesTimezone = data.timezoneName || ""
         taskEditorDialog.seriesLinkedToGoogle = !!data.seriesLinkedToGoogle
         taskEditorDialog.seriesLinkStatus = data.seriesLinkStatus || "Локальная серия"
+        taskEditorDialog.occurrenceSyncStatus = data.occurrenceSyncStatus || ""
+        taskEditorDialog.occurrenceSyncStatusText = data.occurrenceSyncStatusText || ""
+        taskEditorDialog.occurrenceOriginalSlot = data.occurrenceOriginalSlot || data.occurrenceKey || ""
+        taskEditorDialog.occurrenceRemoteStatus = data.occurrenceRemoteStatus || ""
         taskEditorDialog.recurEnabled = !!data.recurring || taskEditorDialog.seriesOccurrence
         ruleEditor.reset(data.rule || {},
                          (data.recurring || data.isSeriesOccurrence) ? "custom" : "")
@@ -354,6 +366,25 @@ Dialog {
         SeriesGoogleLinkDialog {
             objectName: "seriesGoogleLinkDialog"
             vm: taskEditorDialog.vm
+        }
+    }
+
+    function requestOccurrenceCancel() {
+        if (!taskEditorDialog.seriesLinkedToGoogle || !taskEditorDialog.taskUid)
+            return
+        taskEditorDialog._prepareNestedPopups()
+        taskEditorDialog._occurrenceCancelObject.openFor(
+            taskEditorDialog.taskUid)
+    }
+
+    Component {
+        id: occurrenceCancelFactory
+        OccurrenceCancelConfirmation {
+            objectName: "occurrenceCancelConfirmation"
+            onConfirmed: uid => {
+                if (taskEditorDialog.vm.deleteTask(uid))
+                    taskEditorDialog.close()
+            }
         }
     }
 
@@ -632,6 +663,37 @@ Dialog {
             Layout.fillWidth: true
         }
 
+        SeriesOccurrenceBadge {
+            visible: taskEditorDialog.isEdit
+                     && taskEditorDialog.seriesOccurrence
+                     && taskEditorDialog.seriesLinkedToGoogle
+            Layout.alignment: Qt.AlignLeft
+        }
+
+        OccurrenceSyncStatus {
+            visible: taskEditorDialog.isEdit
+                     && taskEditorDialog.seriesOccurrence
+                     && taskEditorDialog.seriesLinkedToGoogle
+            statusCode: taskEditorDialog.occurrenceSyncStatus
+            statusText: taskEditorDialog.occurrenceSyncStatusText
+            Layout.fillWidth: true
+        }
+
+        Label {
+            visible: taskEditorDialog.isEdit
+                     && taskEditorDialog.seriesOccurrence
+                     && taskEditorDialog.seriesLinkedToGoogle
+            text: "Original slot: " + taskEditorDialog.occurrenceOriginalSlot
+                  + (taskEditorDialog.occurrenceRemoteStatus.length > 0
+                     ? " | Google: " + taskEditorDialog.occurrenceRemoteStatus : "")
+            font.pixelSize: Theme.fontCaption
+            font.family: Theme.fontFamily
+            color: Theme.textMuted
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+            Accessible.name: text
+        }
+
         RowLayout {
             visible: taskEditorDialog.isEdit && taskEditorDialog.seriesOccurrence
             Layout.fillWidth: true
@@ -881,8 +943,12 @@ Dialog {
                         text: "Удалить только этот экземпляр…"
                         onTriggered: {
                             var uid = taskEditorDialog.taskUid
-                            taskEditorDialog.close()
-                            taskEditorDialog.deleteRequested(uid)
+                            if (taskEditorDialog.seriesLinkedToGoogle) {
+                                taskEditorDialog.requestOccurrenceCancel()
+                            } else {
+                                taskEditorDialog.close()
+                                taskEditorDialog.deleteRequested(uid)
+                            }
                         }
                     }
                     MenuItem {

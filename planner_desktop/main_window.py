@@ -24,6 +24,9 @@ from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.storage.calendar_series_sync_store import (
     CalendarSeriesSyncStore,
 )
+from planner_desktop.storage.calendar_series_occurrence_sync_store import (
+    CalendarSeriesOccurrenceSyncStore,
+)
 from planner_desktop.storage.external_series_repository import (
     SQLiteExternalSeriesRepository,
 )
@@ -115,6 +118,9 @@ class MainWindow:
             self.series_sync_store = CalendarSeriesSyncStore(
                 self.repository.db_path
             )
+            self.occurrence_sync_store = CalendarSeriesOccurrenceSyncStore(
+                self.repository.db_path
+            )
         else:
             series_repository = InMemorySeriesRepository()
             template_repository = InMemoryTemplateRepository()
@@ -122,6 +128,7 @@ class MainWindow:
                 self.repository
             )
             self.series_sync_store = None
+            self.occurrence_sync_store = None
         self.external_series_service = ExternalSeriesService(
             self.external_series_repository
         )
@@ -137,6 +144,7 @@ class MainWindow:
             else None
         )
         self.recurrence_service.series_link_service = self.series_link_service
+        self.recurrence_service.occurrence_sync_store = self.occurrence_sync_store
         if self.series_sync_store is not None:
             from planner_desktop.usecases.series_conflict_service import (
                 SeriesConflictService,
@@ -152,6 +160,19 @@ class MainWindow:
         self.recurrence_service.series_conflict_service = (
             self.series_conflict_service
         )
+        if self.occurrence_sync_store is not None:
+            from planner_desktop.usecases.occurrence_resolution_service import (
+                OccurrenceResolutionService,
+            )
+
+            self.occurrence_resolution_service = OccurrenceResolutionService(
+                series_repository,
+                self.repository,
+                self.series_link_service,
+                self.occurrence_sync_store,
+            )
+        else:
+            self.occurrence_resolution_service = None
         self.template_service = TemplateService(
             template_repository, tag_service=self.tag_service)
         self.materializer = OccurrenceMaterializer(self.recurrence_service)
@@ -170,6 +191,8 @@ class MainWindow:
             external_series_service=self.external_series_service,
             series_link_service=self.series_link_service,
             series_sync_store=self.series_sync_store,
+            occurrence_sync_store=self.occurrence_sync_store,
+            occurrence_resolution_service=self.occurrence_resolution_service,
             series_conflict_service=self.series_conflict_service)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
