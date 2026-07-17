@@ -283,8 +283,23 @@ class RemoteOccurrenceChange:
     remote_updated_at: Optional[datetime] = None
     first_seen_at: datetime = field(default_factory=utc_now)
     last_seen_at: datetime = field(default_factory=utc_now)
+    matched_series_uid: Optional[str] = None
+    matched_occurrence_key: Optional[str] = None
+    resolution_status: str = "unresolved"
+    resolution_kind: Optional[str] = None
     resolved_at: Optional[datetime] = None
+    resolution_error: Optional[str] = None
     id: Optional[int] = None
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        if not self.payload_json:
+            return {}
+        try:
+            value = json.loads(self.payload_json)
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
 
 
 @dataclass(frozen=True)
