@@ -24,6 +24,7 @@ from planner_desktop.domain.task import utc_now
 from planner_desktop.sync.calendar_series_mapper import (
     master_event_to_owned_payload,
     master_payload_hash,
+    remote_master_snapshot_json,
     series_to_master_event,
 )
 from planner_desktop.sync.sync_types import (
@@ -71,6 +72,9 @@ class CalendarSeriesSyncEngine:
                 )
                 if not remains_pending:
                     result.terminal += 1
+                    item.resolution_failed = self._fail_op_resolution(
+                        op, str(exc)
+                    )
             except TerminalGatewayError as exc:
                 self._store.mark_terminal(op.id, str(exc))
                 item = SeriesSyncItemResult(
@@ -81,14 +85,16 @@ class CalendarSeriesSyncEngine:
                     error=str(exc),
                 )
                 result.terminal += 1
+                item.resolution_failed = self._fail_op_resolution(op, str(exc))
             except RemoteMasterConflictError as exc:
-                self._persist_conflict(op, exc.remote_event, str(exc))
+                superseded = self._persist_conflict(op, exc.remote_event, str(exc))
                 item = SeriesSyncItemResult(
                     op.series_uid,
                     op.op,
                     ok=False,
                     conflict=True,
                     error=str(exc),
+                    resolution_superseded=superseded,
                 )
                 result.conflicts += 1
             result.items.append(item)
@@ -99,8 +105,22 @@ class CalendarSeriesSyncEngine:
                     result.updated += 1
                 else:
                     result.deleted += 1
+            result.resolved_keep_planner += int(item.resolved_keep_planner)
+            result.resolution_superseded += int(item.resolution_superseded)
+            result.resolution_failed += int(item.resolution_failed)
+            result.remote_deleted_recreated += int(item.recreated)
         self.last_result = result
         return result
+
+    def _fail_op_resolution(self, op: PendingSeriesSyncOp, error: str) -> bool:
+        """A dead-lettered resolution op leaves a visible failed audit row."""
+        if op.resolution_id is None:
+            return False
+        try:
+            self._store.fail_resolution(op.resolution_id, error)
+        except Exception:  # pragma: no cover - diagnostics must not mask push
+            return False
+        return True
 
     def _refresh_latest_payload(
         self, op: PendingSeriesSyncOp
@@ -132,12 +152,17 @@ class CalendarSeriesSyncEngine:
     def _push_op(self, op: PendingSeriesSyncOp) -> SeriesSyncItemResult:
         if op.op is SeriesSyncOpKind.DELETE:
             return self._push_delete(op)
+        if op.op is SeriesSyncOpKind.UPDATE and op.resolution_id is not None:
+            return self._push_keep_planner(op)
         series = self._series.get_by_uid(op.series_uid)
         if series is None or series.is_deleted:
             raise TerminalGatewayError("Локальная серия не найдена.")
         link = self._store.get_link(op.series_uid, include_detached=True)
         if link is None:
             raise TerminalGatewayError("Связь серии не найдена.")
+        recreated = (
+            op.op is SeriesSyncOpKind.CREATE and link.link_generation > 0
+        )
         event = series_to_master_event(series)
         desired_hash = master_payload_hash(event)
         remote = self._gateway.get_recurring_master(link.remote_event_id)
@@ -150,7 +175,8 @@ class CalendarSeriesSyncEngine:
             if remote_hash == desired_hash:
                 self._complete_write(op, link, remote, series.revision, desired_hash)
                 return SeriesSyncItemResult(
-                    op.series_uid, op.op, ok=True, reconciled=True
+                    op.series_uid, op.op, ok=True, reconciled=True,
+                    recreated=recreated,
                 )
 
         if op.op is SeriesSyncOpKind.CREATE:
@@ -164,12 +190,6 @@ class CalendarSeriesSyncEngine:
             )
         else:
             if remote is None:
-                self._store.set_link_status(
-                    op.series_uid,
-                    SeriesLinkStatus.REMOTE_DELETED,
-                    error="Связанный мастер Google удалён.",
-                )
-                self._store.remove_op(op.id)
                 raise RemoteMasterConflictError(
                     "Связанный мастер Google удалён.", None
                 )
@@ -185,7 +205,136 @@ class CalendarSeriesSyncEngine:
             )
 
         self._complete_write(op, link, written, series.revision, desired_hash)
-        return SeriesSyncItemResult(op.series_uid, op.op, ok=True)
+        return SeriesSyncItemResult(
+            op.series_uid, op.op, ok=True, recreated=recreated
+        )
+
+    def _push_keep_planner(self, op: PendingSeriesSyncOp) -> SeriesSyncItemResult:
+        """Explicit conflict overwrite with etag race protection.
+
+        Sequence: load intent -> fetch current remote -> verify Planner
+        ownership and series uid -> compare the *current* remote etag with the
+        acknowledged conflict etag -> patch only when they still match.  A
+        second remote edit never gets overwritten: the stored conflict base is
+        refreshed and the stale decision becomes superseded.
+        """
+        link = self._store.get_link(op.series_uid, include_detached=True)
+        if link is None or link.link_status is SeriesLinkStatus.DETACHED:
+            raise TerminalGatewayError("Связь серии не найдена.")
+        resolution = self._store.get_resolution(op.resolution_id)
+        if resolution is None or not resolution.is_pending:
+            # The audit row was superseded/failed elsewhere; the op is stale.
+            self._store.remove_op(op.id)
+            return SeriesSyncItemResult(
+                op.series_uid, op.op, ok=False,
+                error="Решение конфликта устарело; требуется новое решение.",
+                resolution_superseded=True,
+            )
+        series = self._series.get_by_uid(op.series_uid)
+        if series is None or series.is_deleted:
+            raise TerminalGatewayError("Локальная серия не найдена.")
+
+        remote = self._gateway.get_recurring_master(link.remote_event_id)
+        if remote is None:
+            message = "Связанный мастер Google удалён до перезаписи."
+            self._store.mark_remote_deleted(op.series_uid, error=message)
+            self._store.fail_resolution(op.resolution_id, message)
+            return SeriesSyncItemResult(
+                op.series_uid, op.op, ok=False, conflict=True, error=message,
+                resolution_failed=True,
+            )
+        self._verify_remote_owner(remote, series.uid, link.remote_event_id)
+
+        event = series_to_master_event(series)
+        desired_hash = master_payload_hash(event)
+        remote_hash = remote.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
+        )
+        acknowledged = (
+            op.acknowledged_remote_etag or resolution.acknowledged_remote_etag
+        )
+        if acknowledged and remote.etag == acknowledged:
+            # The remote is still exactly the acknowledged conflict state:
+            # this is the one situation where the explicit overwrite runs.
+            written = self._gateway.patch_recurring_master(
+                link.remote_event_id, event, expected_etag=acknowledged
+            )
+            self._finish_keep_planner(op, link, written, series, desired_hash)
+            return SeriesSyncItemResult(
+                op.series_uid, op.op, ok=True, resolved_keep_planner=True
+            )
+
+        if remote_hash == desired_hash and self._remote_matches_payload(
+            remote, desired_hash
+        ):
+            # The etag moved past the acknowledged base, the Planner markers
+            # carry the desired hash AND the actual remote content equals the
+            # desired canonical payload: our own patch succeeded and only
+            # local persistence crashed.  Finish persistence, never patch
+            # twice.  The content check matters because a foreign edit does
+            # not update private markers — stale markers alone must not be
+            # mistaken for a completed overwrite.
+            self._finish_keep_planner(op, link, remote, series, desired_hash)
+            return SeriesSyncItemResult(
+                op.series_uid, op.op, ok=True, reconciled=True,
+                resolved_keep_planner=True,
+            )
+
+        # Race: Google changed again after the user decided (or the base was
+        # never acknowledged).  Do not patch; refresh the conflict base and
+        # require a new explicit decision.
+        if self._catalog is not None:
+            self._catalog.upsert(self._catalog_item(remote, link, remote_hash))
+        message = (
+            "Мастер Google изменён ещё раз после вашего решения; "
+            "перезапись остановлена, выберите решение заново."
+        )
+        self._store.record_conflict(
+            op.series_uid,
+            reason=message,
+            remote_etag=remote.etag,
+            remote_payload_hash=remote_hash,
+            remote_snapshot_json=remote_master_snapshot_json(remote),
+            remote_updated_at=remote.updated_at,
+        )
+        return SeriesSyncItemResult(
+            op.series_uid, op.op, ok=False, conflict=True, error=message,
+            resolution_superseded=True,
+        )
+
+    @staticmethod
+    def _remote_matches_payload(remote: CalendarEvent, desired_hash: str) -> bool:
+        """True only when the remote's actual owned content is the desired
+        canonical payload.  Any canonicalisation failure counts as a mismatch,
+        which safely degrades to requiring a new user decision."""
+        try:
+            return master_payload_hash(remote) == desired_hash
+        except (TypeError, ValueError):
+            return False
+
+    def _finish_keep_planner(
+        self, op: PendingSeriesSyncOp, link, written: CalendarEvent,
+        series, desired_hash: str,
+    ) -> None:
+        # Conflict clears only after both the remote update and the local
+        # persistence succeed; the queue row is removed last so a crash here
+        # replays into the no-second-patch reconciliation above.
+        self._store.complete_conflict_resolution_link(
+            op.series_uid,
+            remote_etag=written.etag,
+            remote_updated_at=written.updated_at,
+            synced_revision=series.revision,
+            synced_payload_hash=desired_hash,
+            resolution_kind="keep_planner",
+        )
+        if self._catalog is not None:
+            self._catalog.upsert(self._catalog_item(written, link, desired_hash))
+        self._store.complete_resolution(
+            op.resolution_id,
+            local_revision_after=series.revision,
+            remote_etag_after=written.etag,
+        )
+        self._store.remove_op(op.id)
 
     def _push_delete(self, op: PendingSeriesSyncOp) -> SeriesSyncItemResult:
         link = self._store.get_link(op.series_uid, include_detached=True)
@@ -246,6 +395,14 @@ class CalendarSeriesSyncEngine:
         )
         if self._catalog is not None:
             self._catalog.upsert(self._catalog_item(remote, link, payload_hash))
+        if op.resolution_id is not None:
+            # A generation-recreate CREATE carries its audit id; a successful
+            # write completes the recovery audit before the queue row goes.
+            self._store.complete_resolution(
+                op.resolution_id,
+                local_revision_after=revision,
+                remote_etag_after=remote.etag,
+            )
         self._store.remove_op(op.id)
 
     def _persist_conflict(
@@ -253,30 +410,38 @@ class CalendarSeriesSyncEngine:
         op: PendingSeriesSyncOp,
         remote: Optional[CalendarEvent],
         message: str,
-    ) -> None:
+    ) -> bool:
+        """Persist the durable conflict base; return True when a pending
+        explicit resolution was superseded/failed by this event."""
         link = self._store.get_link(op.series_uid, include_detached=True)
+        had_resolution = op.resolution_id is not None
         if link is None:
             self._store.mark_terminal(op.id, message)
-            return
+            return False
         if remote is None:
-            status = SeriesLinkStatus.REMOTE_DELETED
-        else:
-            status = SeriesLinkStatus.CONFLICT
-            if self._catalog is not None:
-                remote_hash = remote.private_extended_properties.get(
-                    PLANNER_PAYLOAD_HASH_PROPERTY
-                )
-                self._catalog.upsert(self._catalog_item(remote, link, remote_hash))
-        self._store.set_link_status(
-            op.series_uid,
-            status,
-            error=message,
-            remote_etag=remote.etag if remote is not None else None,
-            remote_updated_at=remote.updated_at if remote is not None else None,
+            self._store.mark_remote_deleted(op.series_uid, error=message)
+            if had_resolution:
+                self._store.fail_resolution(op.resolution_id, message)
+            self._store.remove_op(op.id)
+            return had_resolution
+        remote_hash = remote.private_extended_properties.get(
+            PLANNER_PAYLOAD_HASH_PROPERTY
         )
-        # Conflict is a durable link state, not a retrying write.  B3 will own
-        # user-directed resolution; leaving a pending overwrite would be unsafe.
+        if self._catalog is not None:
+            self._catalog.upsert(self._catalog_item(remote, link, remote_hash))
+        # Conflict is a durable link state, not a retrying write: the queue
+        # row disappears with the transaction and the complete remote snapshot
+        # becomes the acknowledged base for an explicit user decision.
+        self._store.record_conflict(
+            op.series_uid,
+            reason=message,
+            remote_etag=remote.etag,
+            remote_payload_hash=remote_hash,
+            remote_snapshot_json=remote_master_snapshot_json(remote),
+            remote_updated_at=remote.updated_at,
+        )
         self._store.remove_op(op.id)
+        return had_resolution
 
     @staticmethod
     def _schedule_for(remote: CalendarEvent) -> Optional[SeriesSchedule]:
