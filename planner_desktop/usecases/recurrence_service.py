@@ -39,6 +39,7 @@ from planner_desktop.domain.recurrence import (
 )
 from planner_desktop.domain.series_calendar_link import (
     LINKED_OCCURRENCE_CHANGE_ERROR,
+    SeriesLinkStatus,
 )
 from planner_desktop.domain.task import Task
 from planner_desktop.repositories import TaskRepository
@@ -132,6 +133,9 @@ class RecurrenceService:
         self.series_link_service = None
         # Phase 3.2B3A: explicit conflict/remote-deleted resolution use cases.
         self.series_conflict_service = None
+        # Phase 3.2B3B dedicated recurring-instance state/queue.  It remains
+        # optional for in-memory Phase 3.2A tests.
+        self.occurrence_sync_store = None
         #: Слушатели «серии изменились» (материализатор сбрасывает кэш).
         self._change_listeners: List[Callable[[], None]] = []
 
@@ -428,13 +432,27 @@ class RecurrenceService:
             return OccurrenceOperationResult(
                 errors=[NOT_A_SERIES_OCCURRENCE_ERROR]
             )
-        if (
+        linked = bool(
             self.series_link_service is not None
             and self.series_link_service.is_linked(task.series_uid)
-        ):
-            return OccurrenceOperationResult(
-                errors=[LINKED_OCCURRENCE_CHANGE_ERROR]
+        )
+        series = self.series_repository.get_by_uid(task.series_uid)
+        if series is None or series.is_deleted:
+            return OccurrenceOperationResult(errors=[SERIES_NOT_FOUND_ERROR])
+        series_link = (
+            self.series_link_service.get_link(task.series_uid)
+            if linked else None
+        )
+        if linked and (
+            self.occurrence_sync_store is None
+            or series_link is None
+            or series_link.link_status in (
+                SeriesLinkStatus.DETACHED,
+                SeriesLinkStatus.REMOTE_DELETED,
+                SeriesLinkStatus.TERMINAL_ERROR,
             )
+        ):
+            return OccurrenceOperationResult(errors=[LINKED_OCCURRENCE_CHANGE_ERROR])
         errors = validate_editor(command)
         if errors:
             return OccurrenceOperationResult(errors=errors)
@@ -444,6 +462,11 @@ class RecurrenceService:
         original = deepcopy(task)
         original_tag_ids = self._task_tag_ids(uid)
         try:
+            if linked and not command.add_to_calendar:
+                raise ValueError(
+                    "Экземпляр связанной серии нельзя снять с расписания; "
+                    "используйте отмену только этого экземпляра."
+                )
             apply_editor_fields(command, task)
             if command.add_to_calendar:
                 start, end, duration, is_all_day = schedule_from_command(command)
@@ -451,10 +474,49 @@ class RecurrenceService:
                 task.end = end
                 task.duration_minutes = duration
                 task.is_all_day = is_all_day
+            if linked and task.is_all_day != series.schedule.all_day:
+                raise ValueError(
+                    "Преобразование отдельного экземпляра между событием на "
+                    "весь день и событием со временем отложено до Phase 3.2B3C."
+                )
             task.is_series_exception = True
             updated = self.task_repository.update(task)
             if tag_ids is not None and self.tag_service is not None:
                 self.tag_service.set_task_tags(updated.uid, tag_ids)
+            if linked:
+                from planner_desktop.domain.google_occurrence import (
+                    canonical_occurrence_payload_fingerprint,
+                    local_occurrence_to_google_original_start,
+                )
+                from planner_desktop.sync.calendar_series_occurrence_mapper import (
+                    build_desired_occurrence_payload,
+                )
+
+                identity = local_occurrence_to_google_original_start(
+                    series, str(updated.occurrence_key)
+                )
+                occurrence_link = self.occurrence_sync_store.ensure_occurrence_link(
+                    series.uid,
+                    str(updated.occurrence_key),
+                    series_link,
+                    identity,
+                )
+                desired = build_desired_occurrence_payload(
+                    updated, series, series_link.link_generation
+                )
+                before = build_desired_occurrence_payload(
+                    original, series, series_link.link_generation
+                )
+                desired_hash = canonical_occurrence_payload_fingerprint(desired)
+                before_hash = canonical_occurrence_payload_fingerprint(before)
+                if desired_hash != before_hash:
+                    self.occurrence_sync_store.enqueue_update(
+                        series.uid,
+                        str(updated.occurrence_key),
+                        desired,
+                        desired_payload_hash=desired_hash,
+                        allow_cancelled_restore=bool(original.is_deleted),
+                    )
         except Exception as exc:
             self._restore_tasks([original])
             self._restore_task_tags(uid, original_tag_ids)
@@ -655,7 +717,45 @@ class RecurrenceService:
         task = self.task_repository.get_by_uid(uid)
         if task is None or task.is_deleted or task.series_uid is None:
             return False
-        return self.task_repository.delete(task.id)
+        linked = bool(
+            self.series_link_service is not None
+            and self.series_link_service.is_linked(task.series_uid)
+        )
+        if not linked:
+            return self.task_repository.delete(task.id)
+        if self.occurrence_sync_store is None:
+            return False
+        series = self.series_repository.get_by_uid(task.series_uid)
+        series_link = self.series_link_service.get_link(task.series_uid)
+        if series is None or series_link is None or task.id is None:
+            return False
+        from planner_desktop.domain.google_occurrence import (
+            local_occurrence_to_google_original_start,
+        )
+        from planner_desktop.sync.calendar_series_occurrence_mapper import (
+            build_desired_occurrence_payload,
+        )
+
+        snapshot = deepcopy(task)
+        try:
+            identity = local_occurrence_to_google_original_start(
+                series, str(task.occurrence_key)
+            )
+            self.occurrence_sync_store.ensure_occurrence_link(
+                series.uid, str(task.occurrence_key), series_link, identity
+            )
+            payload = build_desired_occurrence_payload(
+                task, series, series_link.link_generation
+            )
+            if not self.task_repository.delete(task.id):
+                return False
+            self.occurrence_sync_store.enqueue_cancel(
+                series.uid, str(task.occurrence_key), payload
+            )
+        except Exception:
+            self._restore_tasks([snapshot])
+            return False
+        return True
 
     # ---- статистика для настроек --------------------------------------------------------
 

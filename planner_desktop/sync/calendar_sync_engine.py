@@ -143,6 +143,8 @@ class CalendarSyncEngine:
         external_series_provider: str = EXTERNAL_PROVIDER_GOOGLE,
         external_series_calendar_id: Optional[str] = None,
         series_link_store=None,
+        occurrence_sync_store=None,
+        series_repository=None,
     ) -> None:
         self._repository = repository
         self._store = store
@@ -156,6 +158,8 @@ class CalendarSyncEngine:
         )
         self.last_pull_stats = CalendarPullStats()
         self._series_link_store = series_link_store
+        self._occurrence_sync_store = occurrence_sync_store
+        self._series_repository = series_repository
 
     # ---- реакция на локальные изменения ---------------------------------------
 
@@ -262,8 +266,8 @@ class CalendarSyncEngine:
             self.last_pull_stats.recurring_instances += 1
             linked_parent = self._linked_master(event.recurring_event_id)
             if linked_parent is not None:
-                self._quarantine_linked_instance(event, linked_parent)
-                self.last_pull_stats.linked_instance_changes_quarantined += 1
+                if self._quarantine_linked_instance(event, linked_parent):
+                    self.last_pull_stats.linked_instance_changes_quarantined += 1
                 return
         else:
             self.last_pull_stats.ordinary_events += 1
@@ -523,9 +527,14 @@ class CalendarSyncEngine:
             remote_updated_at=event.updated_at,
         )
 
-    def _quarantine_linked_instance(self, event: CalendarEvent, linked) -> None:
+    def _quarantine_linked_instance(self, event: CalendarEvent, linked) -> bool:
         if self._series_link_store is None or not event.id:
-            return
+            return False
+        if (
+            self._occurrence_sync_store is not None
+            and self._series_repository is not None
+        ):
+            return self._handle_owned_linked_instance(event, linked)
         original_start = (
             event.original_start.isoformat() if event.original_start is not None else ""
         )
@@ -557,3 +566,162 @@ class CalendarSyncEngine:
                 last_seen_at=seen,
             )
         )
+        return True
+
+    def _handle_owned_linked_instance(self, event: CalendarEvent, linked) -> bool:
+        """Match exact originalStartTime and quarantine without Task import."""
+        from planner_desktop.domain.google_occurrence import (
+            OccurrenceSyncStatus,
+            canonical_occurrence_payload_fingerprint,
+            google_original_start_to_occurrence_key,
+            local_occurrence_to_google_original_start,
+        )
+
+        series = self._series_repository.get_by_uid(linked.series_uid)
+        if series is None or series.is_deleted:
+            return False
+        raw = dict(event.raw_payload or {})
+        if not raw:
+            original = (
+                {"date": event.original_start.isoformat()}
+                if isinstance(event.original_start, date)
+                and not isinstance(event.original_start, datetime)
+                else {
+                    "dateTime": (
+                        event.original_start.isoformat()
+                        if event.original_start is not None else ""
+                    ),
+                    "timeZone": (
+                        event.original_start_timezone
+                        or series.schedule.timezone_name
+                    ),
+                }
+            )
+            raw = {
+                "id": event.id,
+                "etag": event.etag,
+                "status": event.status,
+                "recurringEventId": event.recurring_event_id,
+                "originalStartTime": original,
+                "summary": event.summary,
+                "description": event.description,
+                "start": (
+                    {"date": event.start.isoformat()}
+                    if isinstance(event.start, date)
+                    and not isinstance(event.start, datetime)
+                    else {
+                        "dateTime": event.start.isoformat() if event.start else "",
+                        "timeZone": event.start_timezone or series.schedule.timezone_name,
+                    }
+                ),
+                "end": (
+                    {"date": event.end.isoformat()}
+                    if isinstance(event.end, date)
+                    and not isinstance(event.end, datetime)
+                    else {
+                        "dateTime": event.end.isoformat() if event.end else "",
+                        "timeZone": event.end_timezone or series.schedule.timezone_name,
+                    }
+                ),
+            }
+        original = raw.get("originalStartTime") or {}
+        try:
+            key = google_original_start_to_occurrence_key(series, original)
+            identity = local_occurrence_to_google_original_start(series, key)
+        except ValueError:
+            # Wrong kind/timezone/slot is still retained for diagnostics, but
+            # cannot be attached to an arbitrary local occurrence.
+            seen = utc_now()
+            self._occurrence_sync_store.upsert_occurrence_change(
+                RemoteOccurrenceChange(
+                    provider=linked.provider,
+                    calendar_id=linked.calendar_id,
+                    remote_master_event_id=linked.remote_event_id,
+                    remote_instance_event_id=event.id,
+                    original_start_value=json.dumps(
+                        original, sort_keys=True, separators=(",", ":")
+                    ),
+                    status=event.status,
+                    payload_json=json.dumps(
+                        raw, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":")
+                    ),
+                    remote_etag=event.etag,
+                    remote_updated_at=event.updated_at,
+                    first_seen_at=seen,
+                    last_seen_at=seen,
+                    resolution_status="unresolved",
+                    resolution_error=(
+                        "originalStartTime не соответствует локальной серии"
+                    ),
+                )
+            )
+            return True
+        occurrence_link = self._occurrence_sync_store.ensure_occurrence_link(
+            series.uid, key, linked, identity
+        )
+        remote_hash = canonical_occurrence_payload_fingerprint(raw)
+        cancelled = event.is_cancelled
+        echo = (
+            occurrence_link.last_synced_remote_hash == remote_hash
+            and (
+                (cancelled and occurrence_link.sync_status is OccurrenceSyncStatus.CANCELLED)
+                or (
+                    not cancelled
+                    and occurrence_link.sync_status
+                    in (
+                        OccurrenceSyncStatus.SYNCED_EXCEPTION,
+                        OccurrenceSyncStatus.PENDING_UPDATE,
+                    )
+                )
+            )
+        )
+        if echo:
+            occurrence_link.remote_instance_event_id = event.id
+            occurrence_link.remote_etag = event.etag
+            occurrence_link.remote_updated_at = event.updated_at
+            occurrence_link.is_cancelled_remote = cancelled
+            self._occurrence_sync_store.update_occurrence_link(occurrence_link)
+            resolved = self._occurrence_sync_store.resolve_matching_quarantine(
+                series.uid, key, resolution_kind="echo"
+            )
+            self.last_pull_stats.occurrence_quarantine_resolved += resolved
+            return False
+        seen = utc_now()
+        change = self._occurrence_sync_store.upsert_occurrence_change(
+            RemoteOccurrenceChange(
+                provider=linked.provider,
+                calendar_id=linked.calendar_id,
+                remote_master_event_id=linked.remote_event_id,
+                remote_instance_event_id=event.id,
+                original_start_value=identity.value,
+                status=event.status,
+                payload_json=json.dumps(
+                    raw, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                remote_etag=event.etag,
+                remote_updated_at=event.updated_at,
+                first_seen_at=seen,
+                last_seen_at=seen,
+                matched_series_uid=series.uid,
+                matched_occurrence_key=key,
+                resolution_status="unresolved",
+            )
+        )
+        self._occurrence_sync_store.record_remote_conflict(
+            series.uid,
+            key,
+            reason=(
+                "Экземпляр Google отменён вне Planner."
+                if cancelled else "Экземпляр Google изменён вне Planner."
+            ),
+            snapshot=raw,
+            remote_instance_event_id=event.id,
+            remote_etag=event.etag,
+            remote_updated_at=event.updated_at,
+            cancelled=cancelled,
+        )
+        self.last_pull_stats.occurrence_conflicts_detected += 1
+        if cancelled:
+            self.last_pull_stats.occurrence_remote_cancellations += 1
+        return True

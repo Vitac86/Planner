@@ -76,6 +76,14 @@ class ManualSyncResult:
     remote_deleted_recreated: int = 0
     resolution_attempts_superseded: int = 0
     resolution_failures: int = 0
+    occurrence_updates_pushed: int = 0
+    occurrence_cancellations_pushed: int = 0
+    occurrence_conflicts_detected: int = 0
+    occurrence_conflicts_resolved_keep_planner: int = 0
+    occurrence_conflicts_resolved_use_google: int = 0
+    occurrence_remote_cancellations: int = 0
+    occurrence_quarantine_resolved: int = 0
+    occurrence_ops_terminal: int = 0
     pending_before: int = 0
     pending_after: int = 0
     terminal_ops: int = 0
@@ -123,6 +131,18 @@ class ManualSyncResult:
             )
         if self.resolution_failures:
             parts.append(f"ошибок разрешения {self.resolution_failures}")
+        if self.occurrence_updates_pushed:
+            parts.append(f"occurrence updates {self.occurrence_updates_pushed}")
+        if self.occurrence_cancellations_pushed:
+            parts.append(
+                f"occurrence cancellations {self.occurrence_cancellations_pushed}"
+            )
+        if self.occurrence_conflicts_detected:
+            parts.append(
+                f"occurrence conflicts {self.occurrence_conflicts_detected}"
+            )
+        if self.occurrence_ops_terminal:
+            parts.append(f"instance dead-letter: {self.occurrence_ops_terminal}")
         if self.pending_after:
             parts.append(f"в очереди осталось {self.pending_after}")
         if self.terminal_ops:
@@ -151,12 +171,18 @@ class ManualSyncService:
         *,
         clock: Callable[[], datetime] = utc_now,
         external_series_repository=None,
+        series_store=None,
+        series_repository=None,
+        occurrence_store=None,
     ) -> None:
         self._repository = repository
         self._store = store
         self._gateway_provider = gateway_provider
         self._clock = clock
         self._external_series_repository = external_series_repository
+        self._series_store = series_store
+        self._series_repository = series_repository
+        self._occurrence_store = occurrence_store
         self._db_path: Optional[Path] = None
         self._lock = threading.Lock()
 
@@ -204,6 +230,9 @@ class ManualSyncService:
         from planner_desktop.storage.calendar_series_sync_store import (
             CalendarSeriesSyncStore,
         )
+        from planner_desktop.storage.calendar_series_occurrence_sync_store import (
+            CalendarSeriesOccurrenceSyncStore,
+        )
         from planner_desktop.storage.series_repository import SQLiteSeriesRepository
 
         repository = SQLiteTaskRepository(self._db_path)
@@ -216,17 +245,24 @@ class ManualSyncService:
                         self._db_path, clock=self._clock
                     )
                     try:
-                        series_repository = SQLiteSeriesRepository(self._db_path)
+                        occurrence_store = CalendarSeriesOccurrenceSyncStore(
+                            self._db_path, clock=self._clock
+                        )
                         try:
-                            return self._run_cycle(
-                                repository,
-                                store,
-                                external_series,
-                                series_store=series_store,
-                                series_repository=series_repository,
-                            )
+                            series_repository = SQLiteSeriesRepository(self._db_path)
+                            try:
+                                return self._run_cycle(
+                                    repository,
+                                    store,
+                                    external_series,
+                                    series_store=series_store,
+                                    series_repository=series_repository,
+                                    occurrence_store=occurrence_store,
+                                )
+                            finally:
+                                series_repository.close()
                         finally:
-                            series_repository.close()
+                            occurrence_store.close()
                     finally:
                         series_store.close()
                 finally:
@@ -244,11 +280,15 @@ class ManualSyncService:
         *,
         series_store=None,
         series_repository=None,
+        occurrence_store=None,
     ) -> ManualSyncResult:
         started = self._clock()
         pending_before = store.count_pending_ops()
         cursor_before = store.get_sync_cursor()
         previous_sync_at = self._parse_stamp(store.get_state(LAST_SYNC_AT_KEY))
+        series_store = series_store or self._series_store
+        series_repository = series_repository or self._series_repository
+        occurrence_store = occurrence_store or self._occurrence_store
 
         try:
             gateway = self._gateway_provider()
@@ -269,8 +309,11 @@ class ManualSyncService:
             gateway,
             catalog,
             series_link_store=series_store,
+            occurrence_sync_store=occurrence_store,
+            series_repository=series_repository,
         )
         series_result = None
+        occurrence_result = None
         try:
             if series_store is not None and series_repository is not None:
                 from planner_desktop.sync.calendar_series_sync_engine import (
@@ -285,6 +328,14 @@ class ManualSyncService:
                     gateway,
                 )
                 series_result = series_engine.push_pending()
+            if occurrence_store is not None:
+                from planner_desktop.sync.calendar_series_occurrence_sync_engine import (
+                    CalendarSeriesOccurrenceSyncEngine,
+                )
+
+                occurrence_result = CalendarSeriesOccurrenceSyncEngine(
+                    occurrence_store, gateway
+                ).push_pending()
             pushed = engine.push_pending()
             pulled = engine.pull_remote_changes()
         except Exception as exc:
@@ -302,6 +353,7 @@ class ManualSyncService:
         cursor_after = store.get_sync_cursor()
         local_use_google = 0
         local_disconnected = 0
+        local_occurrence_use_google = 0
         if series_store is not None:
             counter = getattr(
                 series_store, "count_resolutions_completed_after", None
@@ -313,9 +365,21 @@ class ManualSyncService:
                 local_disconnected = counter(
                     previous_sync_at, ("disconnect", "keep_local")
                 )
+        if occurrence_store is not None:
+            occurrence_counter = getattr(
+                occurrence_store, "count_resolutions_completed_after", None
+            )
+            if callable(occurrence_counter):
+                local_occurrence_use_google = occurrence_counter(
+                    previous_sync_at, ("use_google",)
+                )
         return self._finish(store, ManualSyncResult(
             ok=True,
-            pushed=pushed + (series_result.pushed if series_result else 0),
+            pushed=(
+                pushed
+                + (series_result.pushed if series_result else 0)
+                + (occurrence_result.pushed if occurrence_result else 0)
+            ),
             pulled=pulled,
             ordinary_events_pulled=engine.last_pull_stats.ordinary_events,
             recurring_masters_discovered=engine.last_pull_stats.recurring_masters,
@@ -345,6 +409,33 @@ class ManualSyncService:
             ),
             resolution_failures=(
                 series_result.resolution_failed if series_result else 0
+            ),
+            occurrence_updates_pushed=(
+                occurrence_result.updates_pushed if occurrence_result else 0
+            ),
+            occurrence_cancellations_pushed=(
+                occurrence_result.cancellations_pushed if occurrence_result else 0
+            ),
+            occurrence_conflicts_detected=(
+                engine.last_pull_stats.occurrence_conflicts_detected
+                + (occurrence_result.conflicts_detected if occurrence_result else 0)
+            ),
+            occurrence_conflicts_resolved_keep_planner=(
+                occurrence_result.conflicts_resolved_keep_planner
+                if occurrence_result else 0
+            ),
+            occurrence_conflicts_resolved_use_google=(
+                local_occurrence_use_google
+            ),
+            occurrence_remote_cancellations=(
+                engine.last_pull_stats.occurrence_remote_cancellations
+            ),
+            occurrence_quarantine_resolved=(
+                engine.last_pull_stats.occurrence_quarantine_resolved
+            ),
+            occurrence_ops_terminal=(
+                occurrence_store.count_terminal_ops()
+                if occurrence_store is not None else 0
             ),
             pending_before=pending_before,
             pending_after=store.count_pending_ops(),

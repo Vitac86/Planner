@@ -122,7 +122,12 @@ def _row_to_occurrence_change(row: sqlite3.Row) -> RemoteOccurrenceChange:
         remote_updated_at=_text_to_dt(row["remote_updated_at"]),
         first_seen_at=_text_to_dt(row["first_seen_at"]) or utc_now(),
         last_seen_at=_text_to_dt(row["last_seen_at"]) or utc_now(),
+        matched_series_uid=row["matched_series_uid"],
+        matched_occurrence_key=row["matched_occurrence_key"],
+        resolution_status=str(row["resolution_status"] or "unresolved"),
+        resolution_kind=row["resolution_kind"],
         resolved_at=_text_to_dt(row["resolved_at"]),
+        resolution_error=row["resolution_error"],
     )
 
 
@@ -1458,8 +1463,10 @@ class CalendarSeriesSyncStore:
                 provider, calendar_id, remote_master_event_id,
                 remote_instance_event_id, original_start_value, status,
                 payload_json, remote_etag, remote_updated_at, first_seen_at,
-                last_seen_at, resolved_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_seen_at, resolved_at, matched_series_uid,
+                matched_occurrence_key, resolution_status, resolution_kind,
+                resolution_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (
                 provider, calendar_id, remote_master_event_id,
                 remote_instance_event_id, original_start_value
@@ -1469,7 +1476,12 @@ class CalendarSeriesSyncStore:
                 remote_etag = excluded.remote_etag,
                 remote_updated_at = excluded.remote_updated_at,
                 last_seen_at = excluded.last_seen_at,
-                resolved_at = excluded.resolved_at
+                resolved_at = excluded.resolved_at,
+                matched_series_uid = excluded.matched_series_uid,
+                matched_occurrence_key = excluded.matched_occurrence_key,
+                resolution_status = excluded.resolution_status,
+                resolution_kind = excluded.resolution_kind,
+                resolution_error = excluded.resolution_error
             """,
             (
                 change.provider,
@@ -1484,6 +1496,11 @@ class CalendarSeriesSyncStore:
                 _dt_to_text(change.first_seen_at),
                 _dt_to_text(change.last_seen_at),
                 _dt_to_text(change.resolved_at),
+                change.matched_series_uid,
+                change.matched_occurrence_key,
+                change.resolution_status,
+                change.resolution_kind,
+                change.resolution_error,
             ),
         )
         self._connection.commit()
