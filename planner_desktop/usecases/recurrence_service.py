@@ -130,6 +130,8 @@ class RecurrenceService:
         # Attached by MainWindow after the schema-v8 store is built.  Kept
         # optional so Phase 3.2A in-memory tests retain local-only behavior.
         self.series_link_service = None
+        # Phase 3.2B3A: explicit conflict/remote-deleted resolution use cases.
+        self.series_conflict_service = None
         #: Слушатели «серии изменились» (материализатор сбрасывает кэш).
         self._change_listeners: List[Callable[[], None]] = []
 
