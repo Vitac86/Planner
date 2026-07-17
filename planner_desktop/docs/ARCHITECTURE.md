@@ -295,8 +295,9 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
   etag check и already-absent delete;
 - materialized local occurrences всегда дают нулевую дельту ordinary Calendar
   queue. Только series-level owned поля ставят coalesced master op;
-- linked occurrence schedule/delete/split/bulk schedule mutations блокируются
-  до Phase 3.2B3B; completion/tags остаются локальными;
+- linked occurrence поддерживает подтверждённые same-kind title/notes/move/
+  resize/cancel через отдельную instance queue; split, kind conversion и bulk
+  schedule mutations остаются заблокированы; completion/tags локальны;
 - Phase 3.2B3A (schema v9): durable conflict base на link (etag/hash/полный
   remote snapshot JSON), audit-таблица `series_conflict_resolutions`,
   resolution-метаданные на queue rows и link generations. Разрешение
@@ -349,6 +350,7 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | External series catalog | B1 schema v7 сохранена; B2 добавляет Planner ownership/link metadata, но чужие masters не усыновляются |
 | Series link/queue/quarantine | Phase 3.2B2 schema v8: separate historical links, independent coalescing queue/dead-letter и changed-instance quarantine; additive/idempotent/reopen-safe |
 | Series conflict resolution (Phase 3.2B3A) | готов: schema v9 conflict base/audit/generations, чистая policy `domain/series_conflict_resolution.py`, `SeriesConflictService` без сети, etag-race protection в engine, транзакционный Use Google, recreate по generations; UI — SeriesConflictDialog/RemoteDeletedRecoveryDialog/ConflictResolutionHistory |
+| Occurrence sync (Phase 3.2B3B) | готов: schema v10 occurrence links/queue/quarantine resolutions; `domain/google_occurrence.py`; full-resource instance gateway; exact originalStartTime; bounded retry/reconciliation; Use Google / Keep Planner / Keep both / Ignore; instance IDs изолированы от ordinary Task fields |
 | CalendarSeriesSyncEngine | готов: deterministic create, etag-safe update, explicit delete, catalog/link persistence и idempotent reconciliation после non-atomic failure; B3A добавляет keep-planner overwrite строго по acknowledged etag, supersede при новой внешней правке и завершение recreate-audit |
 | OccurrenceMaterializer | готов: Today запрашивает сегодня, Calendar — видимый диапазон, буфер 14 дней, предел 366 экземпляров на серию за вызов; History генерацию не запускает |
 | TemplateService | готов: локальные ordinary/recurring шаблоны, NFKC+casefold уникальность имени, Settings CRUD/duplicate и неперсистентный editor prefill |
@@ -361,7 +363,7 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | FakeCalendarGateway | готов: deterministic change journal/cursor, etag, masters + changed/cancelled instances, без expansion, инъекция ошибок |
 | GoogleCalendarGateway (реальный) | ordinary behavior неизменён; отдельные master insert/get/patch/delete используют supplied id, recurrence/timezone/private markers, etag validation и retryable/terminal classification |
 | Изолированный OAuth десктопа (sync/google_auth.py) | token.json и secrets/client_secret.json в профиле PlannerDesktop (учитывает PLANNER_DESKTOP_DATA_DIR); старый профиль не читается; вход только явным действием, рекомендуется тестовый аккаунт |
-| Ручной синк (usecases/manual_sync_service.py + scripts/desktop_calendar_sync_once.py + кнопка в настройках) | series push → ordinary push → pull, concurrency guard и persisted summary; B2 result добавляет created/updated/deleted/conflict/terminal/quarantine counts; B3A — resolved keep-planner/use-google/disconnected, recreated, superseded и failure counts |
+| Ручной синк (usecases/manual_sync_service.py + scripts/desktop_calendar_sync_once.py + кнопка в настройках) | series master push → occurrence push → ordinary push → pull, concurrency guard и persisted summary; additive result включает master, B3A resolution и B3B update/cancel/conflict/quarantine/terminal counters |
 | Автоматический/фоновый синк | НЕ реализован сознательно: ни при старте, ни по таймеру — только явные действия пользователя |
 
 Подробная инвентаризация фич относительно старого приложения —

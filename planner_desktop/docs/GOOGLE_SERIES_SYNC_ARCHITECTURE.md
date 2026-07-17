@@ -326,14 +326,14 @@ by this push cycle; `conflicts_resolved_use_google` and
 `conflicts_disconnected` are local actions and report resolutions completed
 since the previous manual sync — i.e. in the NEXT summary.
 
-### Phase 3.2B3B / 3.2B3C boundary
+### Phase 3.2B3B occurrence layer and Phase 3.2B3C boundary
 
-Deferred explicitly to **Phase 3.2B3B**:
-
-- editing/cancelling one Google occurrence;
-- synchronization of local exceptions/EXDATE/RDATE/instance writes;
-- resolution of the linked-instance quarantine (it remains visible and
-  unresolved).
+Phase 3.2B3B adds a subordinate occurrence layer without weakening the master
+contract. It uses a separate link and queue, exact `originalStartTime`, full
+instance resources, current ETags, canonical-content reconciliation, durable
+cancelled identity, and explicit quarantine resolutions. It never writes a
+materialized occurrence as an ordinary event or changes the parent RRULE.
+See [`GOOGLE_OCCURRENCE_SYNC_ARCHITECTURE.md`](GOOGLE_OCCURRENCE_SYNC_ARCHITECTURE.md).
 
 Deferred explicitly to **Phase 3.2B3C**:
 
