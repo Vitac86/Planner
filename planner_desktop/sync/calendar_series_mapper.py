@@ -1,6 +1,7 @@
 """Pure TaskSeries <-> Planner-owned recurring-master mapping."""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, time, timedelta
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -114,6 +115,52 @@ def master_payload_hash(event: CalendarEvent) -> str:
     return canonical_master_payload_fingerprint(master_event_to_owned_payload(event))
 
 
+def _snapshot_bound(value, timezone_name):
+    if value is None:
+        return {}
+    if isinstance(value, datetime):
+        body: dict[str, Any] = {"dateTime": value.isoformat()}
+        if timezone_name:
+            body["timeZone"] = timezone_name
+        return body
+    if isinstance(value, date):
+        return {"date": value.isoformat()}
+    return {}
+
+
+def remote_master_snapshot(event: CalendarEvent) -> dict[str, Any]:
+    """Self-contained conflict snapshot of one remote recurring master.
+
+    Deterministic, JSON-serialisable and defensive: a foreign edit may have
+    produced any shape, so nothing here raises for missing fields.  Only the
+    Planner ownership markers from the private properties are retained.
+    """
+    start = event.recurrence_start or event.start
+    return {
+        "id": event.id or "",
+        "etag": event.etag,
+        "status": event.status,
+        "summary": event.summary or "",
+        "description": event.description or "",
+        "start": _snapshot_bound(start, event.start_timezone),
+        "end": _snapshot_bound(event.end, event.end_timezone or event.start_timezone),
+        "recurrence": [str(line) for line in event.recurrence_lines],
+        "updated_at": (
+            event.updated_at.isoformat() if event.updated_at is not None else None
+        ),
+        "private": dict(event.private_extended_properties or {}),
+    }
+
+
+def remote_master_snapshot_json(event: CalendarEvent) -> str:
+    return json.dumps(
+        remote_master_snapshot(event),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def private_properties_from_payload(payload: Mapping[str, Any]) -> dict[str, str]:
     extended = payload.get("extendedProperties") or {}
     private = extended.get("private") or {}
@@ -124,5 +171,7 @@ __all__ = [
     "master_event_to_owned_payload",
     "master_payload_hash",
     "private_properties_from_payload",
+    "remote_master_snapshot",
+    "remote_master_snapshot_json",
     "series_to_master_event",
 ]

@@ -340,6 +340,81 @@ class SQLiteSeriesRepository:
             raise
         return new_series, moved_task
 
+    def accept_remote_master_atomic(
+        self,
+        *,
+        accepted: TaskSeries,
+        removed_task_uids: Sequence[str],
+        link_id: int,
+        resolution_id: int,
+        remote_etag: Optional[str],
+        remote_updated_at_text: Optional[str],
+        synced_payload_hash: Optional[str],
+    ) -> TaskSeries:
+        """Commit the "Use Google version" acceptance in one SQLite transaction.
+
+        Phase 3.2B3A: the accepted remote definition replaces the local
+        series row, future uncompleted non-exception occurrences are removed
+        (the materializer recreates them), the link leaves ``conflict``, the
+        pending series queue empties and the resolution audit completes — all
+        atomically.  Completed history, exceptions, tombstones and tag
+        associations are deliberately untouched.  Any failure rolls the whole
+        acceptance back.
+        """
+        accepted.touch()
+        now_text = _dt_to_text(utc_now())
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            updated = self._update_series_no_commit(accepted)
+            if updated.rowcount == 0:
+                raise KeyError("Серия не найдена")
+            for task_uid in dict.fromkeys(str(item) for item in removed_task_uids):
+                self._connection.execute(
+                    "DELETE FROM tasks WHERE uid = ?", (task_uid,)
+                )
+            link_cursor = self._connection.execute(
+                """
+                UPDATE task_series_calendar_links SET
+                    link_status = 'synced', last_error = NULL, remote_etag = ?,
+                    remote_updated_at = ?, last_synced_series_revision = ?,
+                    last_synced_payload_hash = ?, conflict_detected_at = NULL,
+                    conflict_reason = NULL, conflict_remote_etag = NULL,
+                    conflict_remote_payload_hash = NULL,
+                    conflict_remote_snapshot_json = NULL, resolved_at = ?,
+                    resolution_kind = 'use_google', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    remote_etag,
+                    remote_updated_at_text,
+                    accepted.revision,
+                    synced_payload_hash,
+                    now_text,
+                    now_text,
+                    link_id,
+                ),
+            )
+            if link_cursor.rowcount == 0:
+                raise KeyError("Связь серии не найдена")
+            self._connection.execute(
+                "DELETE FROM pending_calendar_series_ops WHERE series_uid = ? "
+                "AND status = 'pending'",
+                (accepted.uid,),
+            )
+            audit_cursor = self._connection.execute(
+                "UPDATE series_conflict_resolutions SET status = 'completed', "
+                "local_revision_after = ?, remote_etag_after = ?, "
+                "completed_at = ?, error = NULL WHERE id = ?",
+                (accepted.revision, remote_etag, now_text, resolution_id),
+            )
+            if audit_cursor.rowcount == 0:
+                raise KeyError("Запись аудита разрешения не найдена")
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return accepted
+
     def _update_split_task_no_commit(self, task: Task) -> None:
         cursor = self._connection.execute(
             """

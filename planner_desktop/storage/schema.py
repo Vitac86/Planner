@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -307,7 +307,9 @@ ON external_calendar_series (last_seen_at)
 # Explicit local TaskSeries <-> Google recurring-master links (Phase 3.2B2).
 # Rows are retained after detach for diagnostics/history.  There is deliberately
 # no cascading foreign key: deleting a link or tombstoning a series must never
-# remove materialized Task history.
+# remove materialized Task history.  Schema v9 (Phase 3.2B3A) adds the durable
+# conflict base (etag/hash/snapshot), resolution metadata and link generations;
+# v8 databases receive the same columns additively below.
 CREATE_TASK_SERIES_CALENDAR_LINKS_TABLE = """
 CREATE TABLE IF NOT EXISTS task_series_calendar_links (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,7 +328,15 @@ CREATE TABLE IF NOT EXISTS task_series_calendar_links (
     linked_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     detached_at TEXT,
-    last_error TEXT
+    last_error TEXT,
+    link_generation INTEGER NOT NULL DEFAULT 0,
+    conflict_detected_at TEXT,
+    conflict_reason TEXT,
+    conflict_remote_etag TEXT,
+    conflict_remote_payload_hash TEXT,
+    conflict_remote_snapshot_json TEXT,
+    resolved_at TEXT,
+    resolution_kind TEXT
 )
 """
 
@@ -350,7 +360,8 @@ ON task_series_calendar_links (link_status, updated_at)
 
 # Independent dead-letter queue for recurring-master writes.  At most one
 # pending row exists per series; terminal rows remain visible and are never
-# selected automatically again.
+# selected automatically again.  v9: a non-null resolution_id marks an explicit
+# conflict-resolution/recovery operation (op values stay within the v8 CHECK).
 CREATE_PENDING_CALENDAR_SERIES_OPS_TABLE = """
 CREATE TABLE IF NOT EXISTS pending_calendar_series_ops (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -365,7 +376,9 @@ CREATE TABLE IF NOT EXISTS pending_calendar_series_ops (
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending','terminal')),
     created_at TEXT NOT NULL,
-    next_try_at TEXT NOT NULL
+    next_try_at TEXT NOT NULL,
+    resolution_id INTEGER,
+    acknowledged_remote_etag TEXT
 )
 """
 
@@ -411,6 +424,44 @@ ON external_series_occurrence_changes (resolved_at, last_seen_at)
 """
 
 
+# Durable audit history of explicit conflict/remote-deleted resolutions
+# (Phase 3.2B3A, schema v9).  Deliberately no foreign keys: the history must
+# survive series tombstones and link detachment and never cascade-delete
+# TaskSeries or materialized Task rows.
+CREATE_SERIES_CONFLICT_RESOLUTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS series_conflict_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_uid TEXT NOT NULL,
+    link_id INTEGER NOT NULL,
+    resolution_kind TEXT NOT NULL CHECK (resolution_kind IN (
+        'keep_planner','use_google','disconnect',
+        'keep_local','recreate','delete_local'
+    )),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','completed','failed','superseded')),
+    local_revision_before INTEGER NOT NULL,
+    local_revision_after INTEGER,
+    remote_etag_before TEXT,
+    remote_etag_after TEXT,
+    remote_payload_hash TEXT,
+    acknowledged_remote_etag TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    error TEXT
+)
+"""
+
+CREATE_SERIES_CONFLICT_RESOLUTIONS_SERIES_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_series_conflict_resolutions_series
+ON series_conflict_resolutions (series_uid, id)
+"""
+
+CREATE_SERIES_CONFLICT_RESOLUTIONS_STATUS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_series_conflict_resolutions_status
+ON series_conflict_resolutions (status, id)
+"""
+
+
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
@@ -451,6 +502,45 @@ def _migrate_series_columns(connection: sqlite3.Connection) -> None:
             "ALTER TABLE tasks ADD COLUMN is_series_exception INTEGER "
             "NOT NULL DEFAULT 0"
         )
+
+
+def _migrate_series_conflict_columns(connection: sqlite3.Connection) -> None:
+    """Additive v8 -> v9 columns; existing links backfill link_generation = 0.
+
+    Idempotent: each column is added only when missing; no row data is
+    rewritten destructively and v8 links, queues, catalog rows and quarantine
+    rows survive untouched.
+    """
+    links = _column_names(connection, "task_series_calendar_links")
+    if links:
+        additions = (
+            ("link_generation", "INTEGER NOT NULL DEFAULT 0"),
+            ("conflict_detected_at", "TEXT"),
+            ("conflict_reason", "TEXT"),
+            ("conflict_remote_etag", "TEXT"),
+            ("conflict_remote_payload_hash", "TEXT"),
+            ("conflict_remote_snapshot_json", "TEXT"),
+            ("resolved_at", "TEXT"),
+            ("resolution_kind", "TEXT"),
+        )
+        for name, declaration in additions:
+            if name not in links:
+                connection.execute(
+                    "ALTER TABLE task_series_calendar_links "
+                    f"ADD COLUMN {name} {declaration}"
+                )
+    ops = _column_names(connection, "pending_calendar_series_ops")
+    if ops:
+        if "resolution_id" not in ops:
+            connection.execute(
+                "ALTER TABLE pending_calendar_series_ops "
+                "ADD COLUMN resolution_id INTEGER"
+            )
+        if "acknowledged_remote_etag" not in ops:
+            connection.execute(
+                "ALTER TABLE pending_calendar_series_ops "
+                "ADD COLUMN acknowledged_remote_etag TEXT"
+            )
 
 
 def _migrate_external_series_link_columns(connection: sqlite3.Connection) -> None:
@@ -516,5 +606,9 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_PENDING_SERIES_OP_DUE_INDEX)
     connection.execute(CREATE_EXTERNAL_SERIES_OCCURRENCE_CHANGES_TABLE)
     connection.execute(CREATE_EXTERNAL_OCCURRENCE_STATUS_INDEX)
+    _migrate_series_conflict_columns(connection)
+    connection.execute(CREATE_SERIES_CONFLICT_RESOLUTIONS_TABLE)
+    connection.execute(CREATE_SERIES_CONFLICT_RESOLUTIONS_SERIES_INDEX)
+    connection.execute(CREATE_SERIES_CONFLICT_RESOLUTIONS_STATUS_INDEX)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

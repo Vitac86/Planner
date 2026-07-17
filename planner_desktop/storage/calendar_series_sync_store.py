@@ -1,4 +1,10 @@
-"""SQLite links, recurring-master queue, and instance quarantine (schema v8)."""
+"""SQLite links, recurring-master queue, quarantine and conflict resolutions.
+
+Schema v8 introduced links and the independent series queue; schema v9
+(Phase 3.2B3A) adds the durable conflict base on the link row, the
+``series_conflict_resolutions`` audit table, resolution metadata on queue
+rows and link generations for explicit remote-deleted recovery.
+"""
 from __future__ import annotations
 
 import json
@@ -14,6 +20,10 @@ from planner_desktop.domain.series_calendar_link import (
     SeriesLinkStatus,
     SeriesSyncOpKind,
     SeriesSyncOpStatus,
+)
+from planner_desktop.domain.series_conflict_resolution import (
+    ConflictResolutionStatus,
+    SeriesConflictResolution,
 )
 from planner_desktop.domain.task import utc_now
 from planner_desktop.storage.calendar_sync_store import (
@@ -49,6 +59,14 @@ def _row_to_link(row: sqlite3.Row) -> SeriesCalendarLink:
         updated_at=_text_to_dt(row["updated_at"]) or utc_now(),
         detached_at=_text_to_dt(row["detached_at"]),
         last_error=row["last_error"],
+        link_generation=int(row["link_generation"] or 0),
+        conflict_detected_at=_text_to_dt(row["conflict_detected_at"]),
+        conflict_reason=row["conflict_reason"],
+        conflict_remote_etag=row["conflict_remote_etag"],
+        conflict_remote_payload_hash=row["conflict_remote_payload_hash"],
+        conflict_remote_snapshot_json=row["conflict_remote_snapshot_json"],
+        resolved_at=_text_to_dt(row["resolved_at"]),
+        resolution_kind=row["resolution_kind"],
     )
 
 
@@ -66,6 +84,27 @@ def _row_to_op(row: sqlite3.Row) -> PendingSeriesSyncOp:
         status=SeriesSyncOpStatus(str(row["status"])),
         created_at=_text_to_dt(row["created_at"]),
         next_try_at=_text_to_dt(row["next_try_at"]),
+        resolution_id=row["resolution_id"],
+        acknowledged_remote_etag=row["acknowledged_remote_etag"],
+    )
+
+
+def _row_to_resolution(row: sqlite3.Row) -> SeriesConflictResolution:
+    return SeriesConflictResolution(
+        id=int(row["id"]),
+        series_uid=str(row["series_uid"]),
+        link_id=int(row["link_id"]),
+        resolution_kind=str(row["resolution_kind"]),
+        status=str(row["status"]),
+        local_revision_before=int(row["local_revision_before"]),
+        local_revision_after=row["local_revision_after"],
+        remote_etag_before=row["remote_etag_before"],
+        remote_etag_after=row["remote_etag_after"],
+        remote_payload_hash=row["remote_payload_hash"],
+        acknowledged_remote_etag=row["acknowledged_remote_etag"],
+        created_at=_text_to_dt(row["created_at"]),
+        completed_at=_text_to_dt(row["completed_at"]),
+        error=row["error"],
     )
 
 
@@ -228,7 +267,11 @@ class CalendarSeriesSyncStore:
                 remote_event_id = ?, remote_etag = ?, remote_updated_at = ?,
                 link_status = ?, last_synced_series_revision = ?,
                 last_synced_payload_hash = ?, updated_at = ?, detached_at = ?,
-                last_error = ?
+                last_error = ?, link_generation = ?, conflict_detected_at = ?,
+                conflict_reason = ?, conflict_remote_etag = ?,
+                conflict_remote_payload_hash = ?,
+                conflict_remote_snapshot_json = ?, resolved_at = ?,
+                resolution_kind = ?
             WHERE id = ?
             """,
             (
@@ -241,6 +284,14 @@ class CalendarSeriesSyncStore:
                 _dt_to_text(link.updated_at),
                 _dt_to_text(link.detached_at),
                 link.last_error,
+                int(link.link_generation),
+                _dt_to_text(link.conflict_detected_at),
+                link.conflict_reason,
+                link.conflict_remote_etag,
+                link.conflict_remote_payload_hash,
+                link.conflict_remote_snapshot_json,
+                _dt_to_text(link.resolved_at),
+                link.resolution_kind,
                 link.id,
             ),
         )
@@ -306,9 +357,39 @@ class CalendarSeriesSyncStore:
         link = self.get_link(series_uid)
         if link is None:
             return False
+        if link.link_status is SeriesLinkStatus.CONFLICT:
+            # A conflict is never overwritten automatically.  The one allowed
+            # refresh: after the user already chose "Keep Planner", later
+            # local edits update the desired payload of that explicit
+            # resolution UPDATE while preserving its acknowledged conflict
+            # base and audit id.
+            pending = self.get_pending_op(series_uid)
+            if (
+                pending is None
+                or pending.resolution_id is None
+                or pending.op is not SeriesSyncOpKind.UPDATE
+            ):
+                return False
+            now = self._clock()
+            self._connection.execute(
+                """
+                UPDATE pending_calendar_series_ops SET
+                    desired_revision = ?, desired_payload_hash = ?,
+                    payload_json = ?, attempts = 0, last_error = NULL,
+                    next_try_at = ? WHERE id = ?
+                """,
+                (
+                    desired_revision,
+                    desired_payload_hash,
+                    self._payload_json(payload),
+                    _dt_to_text(now),
+                    pending.id,
+                ),
+            )
+            self._connection.commit()
+            return True
         if link.link_status in (
             SeriesLinkStatus.PENDING_DELETE,
-            SeriesLinkStatus.CONFLICT,
             SeriesLinkStatus.REMOTE_DELETED,
             SeriesLinkStatus.TERMINAL_ERROR,
         ):
@@ -440,13 +521,16 @@ class CalendarSeriesSyncStore:
                     (self._payload_json(payload), pending.id),
                 )
             else:
-                # UPDATE + DELETE becomes one DELETE.
+                # UPDATE + DELETE becomes one DELETE.  An explicit destructive
+                # action is the only thing allowed to supersede a pending
+                # conflict-resolution UPDATE; its audit row is marked below.
                 self._connection.execute(
                     """
                     UPDATE pending_calendar_series_ops SET
                         op = ?, remote_event_id = ?, desired_revision = NULL,
                         desired_payload_hash = NULL, payload_json = ?, attempts = 0,
-                        last_error = NULL, next_try_at = ? WHERE id = ?
+                        last_error = NULL, next_try_at = ?, resolution_id = NULL,
+                        acknowledged_remote_etag = NULL WHERE id = ?
                     """,
                     (
                         SeriesSyncOpKind.DELETE.value,
@@ -456,6 +540,11 @@ class CalendarSeriesSyncStore:
                         pending.id,
                     ),
                 )
+            self._supersede_pending_resolutions_no_commit(
+                series_uid,
+                "Заменено явным удалением серии Google.",
+                when=now,
+            )
             self._connection.execute(
                 "UPDATE task_series_calendar_links SET link_status = ?, "
                 "updated_at = ?, last_error = NULL WHERE id = ?",
@@ -668,6 +757,696 @@ class CalendarSeriesSyncStore:
             counts[str(row["op"])] = int(row["n"])
         return counts
 
+    # ---- conflict base and resolution audit (schema v9) ---------------------
+
+    def _supersede_pending_resolutions_no_commit(
+        self, series_uid: str, reason: str, *, when: Optional[datetime] = None
+    ) -> None:
+        stamp = when or self._clock()
+        self._connection.execute(
+            "UPDATE series_conflict_resolutions SET status = ?, error = ?, "
+            "completed_at = ? WHERE series_uid = ? AND status = ?",
+            (
+                ConflictResolutionStatus.SUPERSEDED.value,
+                reason,
+                _dt_to_text(stamp),
+                series_uid,
+                ConflictResolutionStatus.PENDING.value,
+            ),
+        )
+
+    def record_conflict(
+        self,
+        series_uid: str,
+        *,
+        reason: str,
+        remote_etag: Optional[str] = None,
+        remote_payload_hash: Optional[str] = None,
+        remote_snapshot_json: Optional[str] = None,
+        remote_updated_at: Optional[datetime] = None,
+    ) -> Optional[SeriesCalendarLink]:
+        """Persist/refresh the durable conflict base in one transaction.
+
+        Removes every pending queue row (an automatic overwrite is never kept
+        alive) and marks pending resolution audits superseded: a newer remote
+        edit invalidates an earlier acknowledged decision.
+        """
+        link = self.get_link(series_uid, include_detached=True)
+        if link is None or link.link_status is SeriesLinkStatus.DETACHED:
+            return None
+        now = self._clock()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "DELETE FROM pending_calendar_series_ops WHERE series_uid = ? "
+                "AND status = ?",
+                (series_uid, SeriesSyncOpStatus.PENDING.value),
+            )
+            self._supersede_pending_resolutions_no_commit(
+                series_uid,
+                "Мастер Google изменился снова; требуется новое решение.",
+                when=now,
+            )
+            self._connection.execute(
+                """
+                UPDATE task_series_calendar_links SET
+                    link_status = ?, last_error = ?, remote_etag = ?,
+                    remote_updated_at = ?, conflict_detected_at = ?,
+                    conflict_reason = ?, conflict_remote_etag = ?,
+                    conflict_remote_payload_hash = ?,
+                    conflict_remote_snapshot_json = ?, resolved_at = NULL,
+                    resolution_kind = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    SeriesLinkStatus.CONFLICT.value,
+                    reason,
+                    remote_etag,
+                    _dt_to_text(remote_updated_at),
+                    _dt_to_text(now),
+                    reason,
+                    remote_etag,
+                    remote_payload_hash,
+                    remote_snapshot_json,
+                    _dt_to_text(now),
+                    link.id,
+                ),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return self.get_link(series_uid, include_detached=True)
+
+    def mark_remote_deleted(
+        self,
+        series_uid: str,
+        *,
+        error: str,
+        remote_etag: Optional[str] = None,
+        remote_updated_at: Optional[datetime] = None,
+    ) -> Optional[SeriesCalendarLink]:
+        """Cancel pending work and record the dead master in one transaction."""
+        link = self.get_link(series_uid, include_detached=True)
+        if link is None or link.link_status is SeriesLinkStatus.DETACHED:
+            return None
+        now = self._clock()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "DELETE FROM pending_calendar_series_ops WHERE series_uid = ? "
+                "AND status = ?",
+                (series_uid, SeriesSyncOpStatus.PENDING.value),
+            )
+            self._supersede_pending_resolutions_no_commit(
+                series_uid,
+                "Мастер Google удалён; ожидавшее решение устарело.",
+                when=now,
+            )
+            self._connection.execute(
+                """
+                UPDATE task_series_calendar_links SET
+                    link_status = ?, last_error = ?, remote_etag = ?,
+                    remote_updated_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    SeriesLinkStatus.REMOTE_DELETED.value,
+                    error,
+                    remote_etag if remote_etag is not None else link.remote_etag,
+                    _dt_to_text(remote_updated_at)
+                    if remote_updated_at is not None
+                    else _dt_to_text(link.remote_updated_at),
+                    _dt_to_text(now),
+                    link.id,
+                ),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return self.get_link(series_uid, include_detached=True)
+
+    def note_remote_reappeared(
+        self,
+        series_uid: str,
+        *,
+        remote_etag: Optional[str],
+        remote_updated_at: Optional[datetime],
+        remote_snapshot_json: Optional[str],
+    ) -> Optional[SeriesCalendarLink]:
+        """A cancelled master unexpectedly reappeared at the old id.
+
+        No automatic relink: the link stays ``remote_deleted`` and only the
+        diagnostic snapshot is refreshed for explicit user review.
+        """
+        link = self.get_link(series_uid, include_detached=True)
+        if link is None or link.link_status is not SeriesLinkStatus.REMOTE_DELETED:
+            return None
+        now = self._clock()
+        message = (
+            "Мастер Google снова появился по старому идентификатору. "
+            "Автоматическое переподключение отключено — проверьте серию."
+        )
+        self._connection.execute(
+            """
+            UPDATE task_series_calendar_links SET
+                last_error = ?, conflict_reason = ?, conflict_detected_at = ?,
+                conflict_remote_etag = ?, conflict_remote_snapshot_json = ?,
+                remote_updated_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                message,
+                "remote_reappeared",
+                _dt_to_text(now),
+                remote_etag,
+                remote_snapshot_json,
+                _dt_to_text(remote_updated_at),
+                _dt_to_text(now),
+                link.id,
+            ),
+        )
+        self._connection.commit()
+        return self.get_link(series_uid, include_detached=True)
+
+    def add_resolution(
+        self, resolution: SeriesConflictResolution
+    ) -> SeriesConflictResolution:
+        stamp = resolution.created_at or self._clock()
+        cursor = self._connection.execute(
+            """
+            INSERT INTO series_conflict_resolutions (
+                series_uid, link_id, resolution_kind, status,
+                local_revision_before, local_revision_after,
+                remote_etag_before, remote_etag_after, remote_payload_hash,
+                acknowledged_remote_etag, created_at, completed_at, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolution.series_uid,
+                resolution.link_id,
+                resolution.resolution_kind,
+                resolution.status,
+                resolution.local_revision_before,
+                resolution.local_revision_after,
+                resolution.remote_etag_before,
+                resolution.remote_etag_after,
+                resolution.remote_payload_hash,
+                resolution.acknowledged_remote_etag,
+                _dt_to_text(stamp),
+                _dt_to_text(resolution.completed_at),
+                resolution.error,
+            ),
+        )
+        self._connection.commit()
+        resolution.id = int(cursor.lastrowid)
+        resolution.created_at = stamp
+        return resolution
+
+    def get_resolution(
+        self, resolution_id: int
+    ) -> Optional[SeriesConflictResolution]:
+        row = self._connection.execute(
+            "SELECT * FROM series_conflict_resolutions WHERE id = ?",
+            (resolution_id,),
+        ).fetchone()
+        return _row_to_resolution(row) if row is not None else None
+
+    def get_pending_resolution(
+        self, series_uid: str, *, kind: Optional[str] = None
+    ) -> Optional[SeriesConflictResolution]:
+        query = (
+            "SELECT * FROM series_conflict_resolutions WHERE series_uid = ? "
+            "AND status = ?"
+        )
+        params: list[Any] = [series_uid, ConflictResolutionStatus.PENDING.value]
+        if kind is not None:
+            query += " AND resolution_kind = ?"
+            params.append(kind)
+        row = self._connection.execute(
+            query + " ORDER BY id DESC LIMIT 1", tuple(params)
+        ).fetchone()
+        return _row_to_resolution(row) if row is not None else None
+
+    def complete_resolution(
+        self,
+        resolution_id: int,
+        *,
+        local_revision_after: Optional[int] = None,
+        remote_etag_after: Optional[str] = None,
+    ) -> None:
+        self._connection.execute(
+            "UPDATE series_conflict_resolutions SET status = ?, "
+            "local_revision_after = ?, remote_etag_after = ?, "
+            "completed_at = ?, error = NULL WHERE id = ?",
+            (
+                ConflictResolutionStatus.COMPLETED.value,
+                local_revision_after,
+                remote_etag_after,
+                _dt_to_text(self._clock()),
+                resolution_id,
+            ),
+        )
+        self._connection.commit()
+
+    def fail_resolution(self, resolution_id: int, error: str) -> None:
+        self._connection.execute(
+            "UPDATE series_conflict_resolutions SET status = ?, error = ?, "
+            "completed_at = ? WHERE id = ?",
+            (
+                ConflictResolutionStatus.FAILED.value,
+                error,
+                _dt_to_text(self._clock()),
+                resolution_id,
+            ),
+        )
+        self._connection.commit()
+
+    def supersede_resolution(self, resolution_id: int, reason: str) -> None:
+        self._connection.execute(
+            "UPDATE series_conflict_resolutions SET status = ?, error = ?, "
+            "completed_at = ? WHERE id = ? AND status = ?",
+            (
+                ConflictResolutionStatus.SUPERSEDED.value,
+                reason,
+                _dt_to_text(self._clock()),
+                resolution_id,
+                ConflictResolutionStatus.PENDING.value,
+            ),
+        )
+        self._connection.commit()
+
+    def list_resolutions(
+        self, series_uid: Optional[str] = None
+    ) -> list[SeriesConflictResolution]:
+        query = "SELECT * FROM series_conflict_resolutions"
+        params: tuple[Any, ...] = ()
+        if series_uid is not None:
+            query += " WHERE series_uid = ?"
+            params = (series_uid,)
+        rows = self._connection.execute(
+            query + " ORDER BY id DESC", params
+        ).fetchall()
+        return [_row_to_resolution(row) for row in rows]
+
+    def count_resolutions_by_status(self) -> dict[str, int]:
+        counts = {status.value: 0 for status in ConflictResolutionStatus}
+        rows = self._connection.execute(
+            "SELECT status, COUNT(*) AS n FROM series_conflict_resolutions "
+            "GROUP BY status"
+        ).fetchall()
+        for row in rows:
+            counts[str(row["status"])] = int(row["n"])
+        return counts
+
+    def count_resolutions_completed_after(
+        self, stamp: Optional[datetime], kinds: Sequence[str]
+    ) -> int:
+        if not kinds:
+            return 0
+        placeholders = ",".join("?" for _ in kinds)
+        query = (
+            "SELECT COUNT(*) AS n FROM series_conflict_resolutions "
+            f"WHERE status = ? AND resolution_kind IN ({placeholders})"
+        )
+        params: list[Any] = [
+            ConflictResolutionStatus.COMPLETED.value, *[str(k) for k in kinds]
+        ]
+        if stamp is not None:
+            query += " AND completed_at > ?"
+            params.append(_dt_to_text(stamp))
+        row = self._connection.execute(query, tuple(params)).fetchone()
+        return int(row["n"])
+
+    def enqueue_conflict_resolution_update(
+        self,
+        series_uid: str,
+        *,
+        desired_revision: int,
+        desired_payload_hash: str,
+        payload: dict[str, Any],
+        acknowledged_remote_etag: str,
+        resolution_id: int,
+    ) -> bool:
+        """Queue exactly one explicit Keep-Planner UPDATE for a conflict.
+
+        The link deliberately stays in ``conflict`` until the remote write
+        succeeds.  A duplicate call for the same pending resolution refreshes
+        the desired payload instead of creating a second queue row.
+        """
+        link = self.get_link(series_uid)
+        if link is None or link.link_status is not SeriesLinkStatus.CONFLICT:
+            return False
+        pending = self.get_pending_op(series_uid)
+        now = self._clock()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if pending is None:
+                self._connection.execute(
+                    """
+                    INSERT INTO pending_calendar_series_ops (
+                        series_uid, op, remote_event_id, desired_revision,
+                        desired_payload_hash, payload_json, attempts, status,
+                        created_at, next_try_at, resolution_id,
+                        acknowledged_remote_etag
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        series_uid,
+                        SeriesSyncOpKind.UPDATE.value,
+                        link.remote_event_id,
+                        desired_revision,
+                        desired_payload_hash,
+                        self._payload_json(payload),
+                        SeriesSyncOpStatus.PENDING.value,
+                        _dt_to_text(now),
+                        _dt_to_text(now),
+                        resolution_id,
+                        acknowledged_remote_etag,
+                    ),
+                )
+            elif (
+                pending.op is SeriesSyncOpKind.UPDATE
+                and pending.resolution_id in (None, resolution_id)
+            ):
+                self._connection.execute(
+                    """
+                    UPDATE pending_calendar_series_ops SET
+                        desired_revision = ?, desired_payload_hash = ?,
+                        payload_json = ?, attempts = 0, last_error = NULL,
+                        next_try_at = ?, resolution_id = ?,
+                        acknowledged_remote_etag = ? WHERE id = ?
+                    """,
+                    (
+                        desired_revision,
+                        desired_payload_hash,
+                        self._payload_json(payload),
+                        _dt_to_text(now),
+                        resolution_id,
+                        acknowledged_remote_etag,
+                        pending.id,
+                    ),
+                )
+            else:
+                self._connection.rollback()
+                return False
+            self._connection.execute(
+                "UPDATE task_series_calendar_links SET resolution_kind = ?, "
+                "resolved_at = NULL, updated_at = ? WHERE id = ?",
+                ("keep_planner", _dt_to_text(now), link.id),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return True
+
+    def complete_conflict_resolution_link(
+        self,
+        series_uid: str,
+        *,
+        remote_etag: Optional[str],
+        remote_updated_at: Optional[datetime],
+        synced_revision: Optional[int],
+        synced_payload_hash: Optional[str],
+        resolution_kind: str,
+    ) -> Optional[SeriesCalendarLink]:
+        """Clear the conflict base only after the resolution truly succeeded."""
+        link = self.get_link(series_uid, include_detached=True)
+        if link is None:
+            return None
+        now = self._clock()
+        self._connection.execute(
+            """
+            UPDATE task_series_calendar_links SET
+                link_status = ?, last_error = NULL, remote_etag = ?,
+                remote_updated_at = ?, last_synced_series_revision = ?,
+                last_synced_payload_hash = ?, conflict_detected_at = NULL,
+                conflict_reason = NULL, conflict_remote_etag = NULL,
+                conflict_remote_payload_hash = NULL,
+                conflict_remote_snapshot_json = NULL, resolved_at = ?,
+                resolution_kind = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                SeriesLinkStatus.SYNCED.value,
+                remote_etag,
+                _dt_to_text(remote_updated_at),
+                synced_revision,
+                synced_payload_hash,
+                _dt_to_text(now),
+                resolution_kind,
+                _dt_to_text(now),
+                link.id,
+            ),
+        )
+        self._connection.commit()
+        return self.get_link(series_uid, include_detached=True)
+
+    def detach_link_resolved(
+        self,
+        series_uid: str,
+        *,
+        resolution_kind: str,
+        error: Optional[str] = None,
+    ) -> bool:
+        """Detach preserving conflict history fields, in one transaction."""
+        link = self.get_link(series_uid)
+        if link is None:
+            return False
+        now = self._clock()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "DELETE FROM pending_calendar_series_ops WHERE series_uid = ? "
+                "AND status = ?",
+                (series_uid, SeriesSyncOpStatus.PENDING.value),
+            )
+            self._supersede_pending_resolutions_no_commit(
+                series_uid, "Заменено отключением связи.", when=now
+            )
+            self._connection.execute(
+                """
+                UPDATE task_series_calendar_links SET
+                    link_status = ?, updated_at = ?, detached_at = ?,
+                    resolved_at = ?, resolution_kind = ?, last_error = ?
+                WHERE id = ?
+                """,
+                (
+                    SeriesLinkStatus.DETACHED.value,
+                    _dt_to_text(now),
+                    _dt_to_text(now),
+                    _dt_to_text(now),
+                    resolution_kind,
+                    error,
+                    link.id,
+                ),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return True
+
+    # ---- link generations (explicit remote-deleted recovery) ----------------
+
+    def max_link_generation(self, series_uid: str) -> int:
+        row = self._connection.execute(
+            "SELECT MAX(link_generation) AS g FROM task_series_calendar_links "
+            "WHERE series_uid = ?",
+            (series_uid,),
+        ).fetchone()
+        return int(row["g"] or 0)
+
+    def recreate_link_generation(
+        self,
+        series_uid: str,
+        *,
+        generation: int,
+        remote_event_id: str,
+        desired_revision: int,
+        desired_payload_hash: str,
+        payload: dict[str, Any],
+        local_revision_before: int,
+    ) -> tuple[SeriesCalendarLink, SeriesConflictResolution]:
+        """One transaction: retire the dead link, open generation N+1.
+
+        The old ``remote_deleted`` row is preserved as history (detached with
+        ``resolution_kind='recreate'``); a new active ``pending_create`` link,
+        its audit row and exactly one CREATE queue row appear atomically, so
+        rapid duplicate calls can never mint generation N+2.
+        """
+        link = self.get_link(series_uid)
+        if link is None or link.link_status is not SeriesLinkStatus.REMOTE_DELETED:
+            raise ValueError("Связь серии не находится в состоянии remote_deleted.")
+        now = self._clock()
+        payload_json = self._payload_json(payload)
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "DELETE FROM pending_calendar_series_ops WHERE series_uid = ? "
+                "AND status = ?",
+                (series_uid, SeriesSyncOpStatus.PENDING.value),
+            )
+            self._supersede_pending_resolutions_no_commit(
+                series_uid,
+                "Заменено пересозданием серии в Google.",
+                when=now,
+            )
+            self._connection.execute(
+                """
+                UPDATE task_series_calendar_links SET
+                    link_status = ?, updated_at = ?, detached_at = ?,
+                    resolved_at = ?, resolution_kind = ? WHERE id = ?
+                """,
+                (
+                    SeriesLinkStatus.DETACHED.value,
+                    _dt_to_text(now),
+                    _dt_to_text(now),
+                    _dt_to_text(now),
+                    "recreate",
+                    link.id,
+                ),
+            )
+            link_cursor = self._connection.execute(
+                """
+                INSERT INTO task_series_calendar_links (
+                    series_uid, provider, calendar_id, remote_event_id,
+                    link_status, linked_at, updated_at, link_generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    series_uid,
+                    link.provider,
+                    link.calendar_id,
+                    remote_event_id,
+                    SeriesLinkStatus.PENDING_CREATE.value,
+                    _dt_to_text(now),
+                    _dt_to_text(now),
+                    int(generation),
+                ),
+            )
+            new_link_id = int(link_cursor.lastrowid)
+            audit_cursor = self._connection.execute(
+                """
+                INSERT INTO series_conflict_resolutions (
+                    series_uid, link_id, resolution_kind, status,
+                    local_revision_before, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    series_uid,
+                    new_link_id,
+                    "recreate",
+                    ConflictResolutionStatus.PENDING.value,
+                    int(local_revision_before),
+                    _dt_to_text(now),
+                ),
+            )
+            resolution_id = int(audit_cursor.lastrowid)
+            self._connection.execute(
+                """
+                INSERT INTO pending_calendar_series_ops (
+                    series_uid, op, remote_event_id, desired_revision,
+                    desired_payload_hash, payload_json, attempts, status,
+                    created_at, next_try_at, resolution_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                """,
+                (
+                    series_uid,
+                    SeriesSyncOpKind.CREATE.value,
+                    remote_event_id,
+                    desired_revision,
+                    desired_payload_hash,
+                    payload_json,
+                    SeriesSyncOpStatus.PENDING.value,
+                    _dt_to_text(now),
+                    _dt_to_text(now),
+                    resolution_id,
+                ),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        new_link = self.get_link(series_uid)
+        resolution = self.get_resolution(resolution_id)
+        if new_link is None or resolution is None:  # pragma: no cover
+            raise RuntimeError("Новое поколение связи не сохранилось.")
+        return new_link, resolution
+
+    # ---- transactional Use-Google completion --------------------------------
+
+    def complete_use_google_locally(
+        self,
+        series_uid: str,
+        resolution_id: int,
+        *,
+        remote_etag: Optional[str],
+        remote_updated_at: Optional[datetime],
+        synced_revision: int,
+        synced_payload_hash: Optional[str],
+        local_revision_after: int,
+    ) -> None:
+        """Link + queue + audit part of Use-Google in one store transaction.
+
+        Used by the compensation path when series/task repositories are not
+        SQLite-backed; the fully atomic SQLite path lives in
+        ``SQLiteSeriesRepository.accept_remote_master_atomic``.
+        """
+        link = self.get_link(series_uid, include_detached=True)
+        if link is None:
+            raise KeyError("Связь серии не найдена")
+        now = self._clock()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "DELETE FROM pending_calendar_series_ops WHERE series_uid = ? "
+                "AND status = ?",
+                (series_uid, SeriesSyncOpStatus.PENDING.value),
+            )
+            self._connection.execute(
+                """
+                UPDATE task_series_calendar_links SET
+                    link_status = ?, last_error = NULL, remote_etag = ?,
+                    remote_updated_at = ?, last_synced_series_revision = ?,
+                    last_synced_payload_hash = ?, conflict_detected_at = NULL,
+                    conflict_reason = NULL, conflict_remote_etag = NULL,
+                    conflict_remote_payload_hash = NULL,
+                    conflict_remote_snapshot_json = NULL, resolved_at = ?,
+                    resolution_kind = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    SeriesLinkStatus.SYNCED.value,
+                    remote_etag,
+                    _dt_to_text(remote_updated_at),
+                    synced_revision,
+                    synced_payload_hash,
+                    _dt_to_text(now),
+                    "use_google",
+                    _dt_to_text(now),
+                    link.id,
+                ),
+            )
+            self._connection.execute(
+                "UPDATE series_conflict_resolutions SET status = ?, "
+                "local_revision_after = ?, remote_etag_after = ?, "
+                "completed_at = ?, error = NULL WHERE id = ?",
+                (
+                    ConflictResolutionStatus.COMPLETED.value,
+                    local_revision_after,
+                    remote_etag,
+                    _dt_to_text(now),
+                    resolution_id,
+                ),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
     # ---- changed linked instances -----------------------------------------
 
     def upsert_occurrence_change(
@@ -748,6 +1527,11 @@ class CalendarSeriesSyncStore:
             counts[str(row["link_status"])] = int(row["n"])
         counts["quarantined"] = self.count_quarantined()
         counts["series_ops_terminal"] = self.count_terminal_ops()
+        resolution_counts = self.count_resolutions_by_status()
+        counts["resolutions_pending"] = resolution_counts["pending"]
+        counts["resolutions_failed"] = resolution_counts["failed"]
+        counts["resolutions_superseded"] = resolution_counts["superseded"]
+        counts["resolutions_completed"] = resolution_counts["completed"]
         return counts
 
 

@@ -57,7 +57,9 @@ def test_schema_v7_migration_is_additive_and_idempotent(tmp_path):
     create_schema(connection)
     create_schema(connection)
 
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+    # Phase 3.2B3A moved the version forward additively (v9); the v6/v7
+    # families reconstructed above must still survive unchanged.
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
     columns = {
         row[1] for row in connection.execute(
             "PRAGMA table_info(external_calendar_series)"

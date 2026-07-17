@@ -141,7 +141,26 @@ class SeriesCalendarLink:
     updated_at: datetime = field(default_factory=utc_now)
     detached_at: Optional[datetime] = None
     last_error: Optional[str] = None
+    # Schema v9 (Phase 3.2B3A): explicit conflict base and link generations.
+    link_generation: int = 0
+    conflict_detected_at: Optional[datetime] = None
+    conflict_reason: Optional[str] = None
+    conflict_remote_etag: Optional[str] = None
+    conflict_remote_payload_hash: Optional[str] = None
+    conflict_remote_snapshot_json: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolution_kind: Optional[str] = None
     id: Optional[int] = None
+
+    @property
+    def conflict_remote_snapshot(self) -> Optional[dict[str, Any]]:
+        if not self.conflict_remote_snapshot_json:
+            return None
+        try:
+            value = json.loads(self.conflict_remote_snapshot_json)
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
 
     @property
     def is_active(self) -> bool:
@@ -169,6 +188,15 @@ class PendingSeriesSyncOp:
     status: SeriesSyncOpStatus = SeriesSyncOpStatus.PENDING
     created_at: Optional[datetime] = None
     next_try_at: Optional[datetime] = None
+    # Phase 3.2B3A: a non-null resolution id marks an explicit user-confirmed
+    # conflict-resolution or recovery operation; ordinary coalescing must not
+    # discard this metadata.
+    resolution_id: Optional[int] = None
+    acknowledged_remote_etag: Optional[str] = None
+
+    @property
+    def is_conflict_resolution(self) -> bool:
+        return self.resolution_id is not None
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -207,6 +235,11 @@ class SeriesSyncItemResult:
     conflict: bool = False
     terminal: bool = False
     error: str = ""
+    # Phase 3.2B3A conflict-resolution outcome flags.
+    resolved_keep_planner: bool = False
+    resolution_superseded: bool = False
+    resolution_failed: bool = False
+    recreated: bool = False
 
 
 @dataclass
@@ -216,6 +249,11 @@ class SeriesSyncResult:
     deleted: int = 0
     conflicts: int = 0
     terminal: int = 0
+    # Phase 3.2B3A additive counters.
+    resolved_keep_planner: int = 0
+    resolution_superseded: int = 0
+    resolution_failed: int = 0
+    remote_deleted_recreated: int = 0
     items: list[SeriesSyncItemResult] = field(default_factory=list)
 
     @property
