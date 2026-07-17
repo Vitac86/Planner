@@ -60,7 +60,8 @@ class CalendarEvent:
     status: str = EVENT_STATUS_CONFIRMED
     updated_at: Optional[datetime] = None
     recurring_event_id: Optional[str] = None
-    original_start: Optional[datetime] = None
+    original_start: Optional[Union[date, datetime]] = None
+    original_start_timezone: Optional[str] = None
     recurrence_lines: Tuple[str, ...] = field(default_factory=tuple)
     start_timezone: Optional[str] = None
     end_timezone: Optional[str] = None
@@ -71,6 +72,9 @@ class CalendarEvent:
     # Task mapping leaves it empty; B2 recurring-master writes use only the
     # Planner ownership/revision/hash markers defined in series_calendar_link.
     private_extended_properties: Dict[str, str] = field(default_factory=dict)
+    # Complete provider resource for safe recurring-instance quarantine and
+    # full-resource updates. Ordinary/master code may ignore it.
+    raw_payload: Dict[str, object] = field(default_factory=dict)
 
     @property
     def is_cancelled(self) -> bool:
@@ -102,6 +106,9 @@ class CalendarPullStats:
     unsupported_masters: int = 0
     cancelled_masters: int = 0
     linked_instance_changes_quarantined: int = 0
+    occurrence_conflicts_detected: int = 0
+    occurrence_remote_cancellations: int = 0
+    occurrence_quarantine_resolved: int = 0
 
 
 @dataclass
@@ -159,3 +166,13 @@ class RemoteMasterConflictError(CalendarGatewayError):
     ) -> None:
         super().__init__(message)
         self.remote_event = remote_event
+
+
+class RemoteOccurrenceConflictError(CalendarGatewayError):
+    """A recurring instance changed after the user's acknowledged ETag."""
+
+    def __init__(
+        self, message: str, remote_payload: Optional[dict] = None
+    ) -> None:
+        super().__init__(message)
+        self.remote_payload = remote_payload

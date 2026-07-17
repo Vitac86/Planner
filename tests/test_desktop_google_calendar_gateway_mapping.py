@@ -162,4 +162,5 @@ def test_recurring_all_day_instance_original_start_from_date():
     }
     event = payload_to_event(item)
     assert event.is_all_day is True
-    assert event.original_start == datetime(2026, 7, 14, 0, 0)
+    # All-day Google identity is a date, never a synthetic midnight datetime.
+    assert event.original_start == date(2026, 7, 14)

@@ -20,8 +20,9 @@ Google-клиентов. Симулирует ровно то поведение
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
 from planner_desktop.domain.task import utc_now
@@ -33,6 +34,7 @@ from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CANCELLED,
     CalendarEvent,
     RemoteMasterConflictError,
+    RemoteOccurrenceConflictError,
     RemoteChangeBatch,
     TerminalGatewayError,
 )
@@ -47,6 +49,7 @@ class FakeCalendarGateway:
     def __init__(self, base_time: Optional[datetime] = None,
                  calendar_id: str = "primary") -> None:
         self._events: Dict[str, CalendarEvent] = {}
+        self._instance_resources: Dict[str, Dict[str, Any]] = {}
         self._change_log: List[str] = []  # id событий в порядке изменений
         self._next_id = 1
         self._base_time = base_time or utc_now()
@@ -116,6 +119,10 @@ class FakeCalendarGateway:
         stored.etag = '"1"'
         stored.updated_at = self._tick()
         self._events[stored.id] = stored
+        if stored.is_recurring_instance:
+            resource = self._event_to_resource(stored)
+            stored.raw_payload = deepcopy(resource)
+            self._instance_resources[stored.id] = resource
         self._record_change(stored)
         return replace(stored)
 
@@ -263,6 +270,193 @@ class FakeCalendarGateway:
 
     def delete_recurring_master(self, remote_event_id: str) -> None:
         self.delete_event(remote_event_id)
+
+    # ---- explicit recurring-instance contract ----------------------------
+
+    @staticmethod
+    def _time_resource(value: Any, timezone_name: Optional[str]) -> dict:
+        if isinstance(value, datetime):
+            result = {"dateTime": value.isoformat()}
+            if timezone_name:
+                result["timeZone"] = timezone_name
+            return result
+        if isinstance(value, date):
+            return {"date": value.isoformat()}
+        return {}
+
+    def _event_to_resource(self, event: CalendarEvent) -> Dict[str, Any]:
+        original = self._time_resource(
+            event.original_start,
+            event.original_start_timezone or event.start_timezone,
+        )
+        return {
+            "id": event.id,
+            "etag": event.etag,
+            "summary": event.summary,
+            "description": event.description,
+            "start": self._time_resource(event.start, event.start_timezone),
+            "end": self._time_resource(event.end, event.end_timezone),
+            "status": event.status,
+            "updated": event.updated_at.isoformat() if event.updated_at else None,
+            "recurringEventId": event.recurring_event_id,
+            "originalStartTime": original,
+            "extendedProperties": {
+                "private": dict(event.private_extended_properties)
+            },
+        }
+
+    @staticmethod
+    def _resource_time(raw: Mapping[str, Any]) -> Any:
+        if raw.get("date"):
+            return date.fromisoformat(str(raw["date"]))
+        if raw.get("dateTime"):
+            return datetime.fromisoformat(
+                str(raw["dateTime"]).replace("Z", "+00:00")
+            )
+        return None
+
+    def _resource_to_event(self, raw: Mapping[str, Any]) -> CalendarEvent:
+        start_raw = raw.get("start") or {}
+        end_raw = raw.get("end") or {}
+        original_raw = raw.get("originalStartTime") or {}
+        start = self._resource_time(start_raw)
+        end = self._resource_time(end_raw)
+        original = self._resource_time(original_raw)
+        return CalendarEvent(
+            id=str(raw.get("id") or ""),
+            etag=raw.get("etag"),
+            summary=str(raw.get("summary") or ""),
+            description=str(raw.get("description") or ""),
+            start=start,
+            end=end,
+            is_all_day=isinstance(start, date) and not isinstance(start, datetime),
+            status=str(raw.get("status") or "confirmed"),
+            updated_at=(
+                datetime.fromisoformat(str(raw["updated"]).replace("Z", "+00:00"))
+                if raw.get("updated") else None
+            ),
+            recurring_event_id=str(raw.get("recurringEventId") or "") or None,
+            original_start=original,
+            original_start_timezone=original_raw.get("timeZone"),
+            start_timezone=start_raw.get("timeZone"),
+            end_timezone=end_raw.get("timeZone"),
+            private_extended_properties={
+                str(key): str(value) for key, value in (
+                    ((raw.get("extendedProperties") or {}).get("private") or {})
+                ).items()
+            },
+            raw_payload=deepcopy(dict(raw)),
+        )
+
+    def seed_recurring_instance(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        """Install a complete remote instance without counting a Planner write."""
+        resource = deepcopy(dict(payload))
+        event_id = str(resource.get("id") or f"evt-{self._next_id}")
+        if not resource.get("id"):
+            self._next_id += 1
+        resource["id"] = event_id
+        resource.setdefault("etag", '"1"')
+        resource.setdefault("status", "confirmed")
+        resource.setdefault("updated", self._tick().isoformat())
+        event = self._resource_to_event(resource)
+        self._events[event_id] = event
+        self._instance_resources[event_id] = resource
+        self._record_change(event)
+        return deepcopy(resource)
+
+    def list_recurring_instances(
+        self,
+        master_event_id: str,
+        original_start: Optional[Mapping[str, Any]] = None,
+        show_deleted: bool = True,
+    ) -> List[Dict[str, Any]]:
+        self.list_call_count += 1
+        result: List[Dict[str, Any]] = []
+        for resource in self._instance_resources.values():
+            if str(resource.get("recurringEventId") or "") != master_event_id:
+                continue
+            if not show_deleted and resource.get("status") == "cancelled":
+                continue
+            if original_start is not None and (
+                resource.get("originalStartTime") or {}
+            ) != dict(original_start):
+                continue
+            result.append(deepcopy(resource))
+        return result
+
+    def get_recurring_instance(
+        self, instance_event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        resource = self._instance_resources.get(instance_event_id)
+        return deepcopy(resource) if resource is not None else None
+
+    def _write_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+        *,
+        cancel: bool,
+    ) -> Dict[str, Any]:
+        self.write_call_count += 1
+        self._maybe_fail()
+        current = self._instance_resources.get(instance_event_id)
+        if current is None:
+            raise TerminalGatewayError(
+                f"Recurring instance {instance_event_id} does not exist (404)."
+            )
+        if str(current.get("recurringEventId") or "") != str(
+            complete_instance_payload.get("recurringEventId") or ""
+        ):
+            raise TerminalGatewayError("Recurring instance has the wrong parent.")
+        if (current.get("originalStartTime") or {}) != (
+            complete_instance_payload.get("originalStartTime") or {}
+        ):
+            raise TerminalGatewayError(
+                "Recurring instance has the wrong originalStartTime."
+            )
+        if expected_etag and current.get("etag") != expected_etag:
+            raise RemoteOccurrenceConflictError(
+                "Recurring instance changed after acknowledgement.",
+                deepcopy(current),
+            )
+        if cancel and current.get("status") == "cancelled":
+            return deepcopy(current)
+        updated = deepcopy(dict(complete_instance_payload))
+        updated.pop("recurrence", None)
+        updated["id"] = instance_event_id
+        revision = int(str(current.get("etag") or '"0"').strip('"')) + 1
+        updated["etag"] = f'"{revision}"'
+        updated["updated"] = self._tick().isoformat()
+        if cancel:
+            updated["status"] = "cancelled"
+        event = self._resource_to_event(updated)
+        self._instance_resources[instance_event_id] = updated
+        self._events[instance_event_id] = event
+        self._record_change(event)
+        return deepcopy(updated)
+
+    def update_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]:
+        return self._write_recurring_instance(
+            instance_event_id, complete_instance_payload, expected_etag,
+            cancel=False,
+        )
+
+    def cancel_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]:
+        return self._write_recurring_instance(
+            instance_event_id, complete_instance_payload, expected_etag,
+            cancel=True,
+        )
 
     def list_changes(self, cursor: Optional[str]) -> RemoteChangeBatch:
         self.list_call_count += 1

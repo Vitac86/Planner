@@ -63,6 +63,7 @@ from planner_desktop.sync.sync_types import (
     CalendarEvent,
     RemoteChangeBatch,
     RemoteMasterConflictError,
+    RemoteOccurrenceConflictError,
     RetryableGatewayError,
     TerminalGatewayError,
 )
@@ -232,12 +233,12 @@ def _parse_updated(value: Optional[str]) -> Optional[datetime]:
     return _parse_rfc3339(value).astimezone(timezone.utc)
 
 
-def _parse_original_start(item: Mapping[str, Any]) -> Optional[datetime]:
+def _parse_original_start(item: Mapping[str, Any]) -> Optional[Any]:
     original = item.get("originalStartTime") or {}
     if original.get("dateTime"):
         return _parse_rfc3339(original["dateTime"])
     if original.get("date"):
-        return datetime.combine(date.fromisoformat(original["date"]), time.min)
+        return date.fromisoformat(original["date"])
     return None
 
 
@@ -290,6 +291,9 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
         updated_at=_parse_updated(item.get("updated")),
         recurring_event_id=item.get("recurringEventId"),
         original_start=_parse_original_start(item),
+        original_start_timezone=(
+            (item.get("originalStartTime") or {}).get("timeZone")
+        ),
         recurrence_lines=tuple(str(line) for line in (item.get("recurrence") or ())),
         start_timezone=start_raw.get("timeZone"),
         end_timezone=end_raw.get("timeZone"),
@@ -300,6 +304,7 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
                 ((item.get("extendedProperties") or {}).get("private") or {})
             ).items()
         },
+        raw_payload=dict(item),
     )
 
 
@@ -519,6 +524,169 @@ class GoogleCalendarGateway:
             raise _classify(
                 exc, f"delete_recurring_master {remote_event_id}"
             ) from exc
+
+    # ---- explicit recurring-instance writes (Phase 3.2B3B) ---------------
+
+    @staticmethod
+    def _same_original_start(
+        left: Mapping[str, Any], right: Mapping[str, Any]
+    ) -> bool:
+        if bool(left.get("date")) != bool(right.get("date")):
+            return False
+        if left.get("date"):
+            return str(left.get("date")) == str(right.get("date"))
+        if not left.get("dateTime") or not right.get("dateTime"):
+            return False
+        if str(left.get("timeZone") or "") != str(right.get("timeZone") or ""):
+            return False
+        try:
+            first = _parse_rfc3339(str(left["dateTime"]))
+            second = _parse_rfc3339(str(right["dateTime"]))
+        except ValueError:
+            return False
+        return first == second
+
+    def list_recurring_instances(
+        self,
+        master_event_id: str,
+        original_start: Optional[Mapping[str, Any]] = None,
+        show_deleted: bool = True,
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        page_token: Optional[str] = None
+        while True:
+            params: Dict[str, Any] = {
+                "calendarId": self._calendar_id,
+                "eventId": master_event_id,
+                "showDeleted": bool(show_deleted),
+                "maxResults": LIST_PAGE_SIZE,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                page = self._service.events().instances(**params).execute()
+            except Exception as exc:
+                raise _classify(
+                    exc, f"list_recurring_instances {master_event_id}"
+                ) from exc
+            for item in page.get("items", ()):
+                if str(item.get("recurringEventId") or "") != master_event_id:
+                    continue
+                if original_start is not None and not self._same_original_start(
+                    item.get("originalStartTime") or {}, original_start
+                ):
+                    continue
+                items.append(dict(item))
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+        return items
+
+    def get_recurring_instance(
+        self, instance_event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            item = self._service.events().get(
+                calendarId=self._calendar_id, eventId=instance_event_id,
+            ).execute()
+        except Exception as exc:
+            if _http_status(exc) in (404, 410):
+                return None
+            raise _classify(
+                exc, f"get_recurring_instance {instance_event_id}"
+            ) from exc
+        if not item.get("recurringEventId") or not item.get("originalStartTime"):
+            raise TerminalGatewayError(
+                f"Google event {instance_event_id} is not a recurring instance."
+            )
+        return dict(item)
+
+    def _write_complete_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+        *,
+        cancel: bool,
+    ) -> Dict[str, Any]:
+        current = self.get_recurring_instance(instance_event_id)
+        if current is None:
+            raise TerminalGatewayError(
+                f"Recurring instance {instance_event_id} was not found."
+            )
+        expected_parent = str(
+            complete_instance_payload.get("recurringEventId") or ""
+        )
+        if not expected_parent or str(current.get("recurringEventId")) != expected_parent:
+            raise TerminalGatewayError(
+                "Recurring instance parent identity changed; write refused."
+            )
+        expected_original = complete_instance_payload.get("originalStartTime") or {}
+        if not self._same_original_start(
+            current.get("originalStartTime") or {}, expected_original
+        ):
+            raise TerminalGatewayError(
+                "Recurring instance originalStartTime changed; write refused."
+            )
+        if expected_etag and str(current.get("etag") or "") != expected_etag:
+            raise RemoteOccurrenceConflictError(
+                "Recurring instance changed after it was acknowledged.", current
+            )
+        if cancel and str(current.get("status") or "") == "cancelled":
+            return current
+
+        body = dict(complete_instance_payload)
+        body.pop("recurrence", None)
+        body["recurringEventId"] = expected_parent
+        body["originalStartTime"] = dict(expected_original)
+        if cancel:
+            body["status"] = "cancelled"
+        try:
+            request = self._service.events().update(
+                calendarId=self._calendar_id,
+                eventId=instance_event_id,
+                body=body,
+            )
+            headers = getattr(request, "headers", None)
+            if expected_etag and isinstance(headers, dict):
+                headers["If-Match"] = expected_etag
+            item = request.execute()
+        except Exception as exc:
+            if _http_status(exc) in (409, 412):
+                raise RemoteOccurrenceConflictError(
+                    "Google rejected the conditional instance update.",
+                    self.get_recurring_instance(instance_event_id),
+                ) from exc
+            raise _classify(
+                exc, f"update_recurring_instance {instance_event_id}"
+            ) from exc
+        return dict(item)
+
+    def update_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]:
+        return self._write_complete_instance(
+            instance_event_id,
+            complete_instance_payload,
+            expected_etag,
+            cancel=False,
+        )
+
+    def cancel_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]:
+        return self._write_complete_instance(
+            instance_event_id,
+            complete_instance_payload,
+            expected_etag,
+            cancel=True,
+        )
 
     # ---- pull -------------------------------------------------------------------
 

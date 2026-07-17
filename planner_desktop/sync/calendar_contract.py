@@ -162,6 +162,36 @@ class RecurringMasterGateway(Protocol):
 
 
 @runtime_checkable
+class RecurringInstanceGateway(Protocol):
+    """Full-resource operations for one instance of a recurring master."""
+
+    def list_recurring_instances(
+        self,
+        master_event_id: str,
+        original_start: Optional[Mapping[str, Any]] = None,
+        show_deleted: bool = True,
+    ) -> List[Dict[str, Any]]: ...
+
+    def get_recurring_instance(
+        self, instance_event_id: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def update_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]: ...
+
+    def cancel_recurring_instance(
+        self,
+        instance_event_id: str,
+        complete_instance_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]: ...
+
+
+@runtime_checkable
 class CalendarEventMapper(Protocol):
     """Чистое преобразование Task <-> событие Calendar. Без сети."""
 
