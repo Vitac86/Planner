@@ -234,6 +234,14 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 - `calendar_series_mapper.py` и `calendar_series_sync_engine.py` — master body,
   fingerprint, create/update/delete и remote-success/local-failure
   reconciliation. Series queue не смешивается с ordinary Task queue.
+- `domain/google_series_split.py`, `storage/calendar_series_remote_split_store.py`,
+  `usecases/remote_series_split_service.py` и
+  `sync/calendar_series_remote_split_engine.py` (Phase 3.2B3C1) — durable
+  remote split «этот и будущие»: schema v11 план с canonical снапшотами,
+  локальный preflight, state machine `pending → source_trimmed →
+  successor_created → completed`, локальная атомарная финализация и явный
+  rollback; split engine выполняется ПЕРВЫМ в ручном sync, QML читает
+  только ViewModel-слоты.
 
 Поток данных:
 
@@ -351,6 +359,7 @@ Calendar queue; schedule/unschedule/delete переиспользуют суще
 | Series link/queue/quarantine | Phase 3.2B2 schema v8: separate historical links, independent coalescing queue/dead-letter и changed-instance quarantine; additive/idempotent/reopen-safe |
 | Series conflict resolution (Phase 3.2B3A) | готов: schema v9 conflict base/audit/generations, чистая policy `domain/series_conflict_resolution.py`, `SeriesConflictService` без сети, etag-race protection в engine, транзакционный Use Google, recreate по generations; UI — SeriesConflictDialog/RemoteDeletedRecoveryDialog/ConflictResolutionHistory |
 | Occurrence sync (Phase 3.2B3B) | готов: schema v10 occurrence links/queue/quarantine resolutions; `domain/google_occurrence.py`; full-resource instance gateway; exact originalStartTime; bounded retry/reconciliation; Use Google / Keep Planner / Keep both / Ignore; instance IDs изолированы от ordinary Task fields |
+| Remote split (Phase 3.2B3C1) | готов: schema v11 durable split-план, детерминированный подсчёт слотов, full-resource trim + идемпотентный successor insert (маркеры ПЛЮС фактическое содержимое), блокировка будущих исключений, split-aware pull, локальная атомарная финализация, явный rollback; adoption внешних masters остаётся B3C2 |
 | CalendarSeriesSyncEngine | готов: deterministic create, etag-safe update, explicit delete, catalog/link persistence и idempotent reconciliation после non-atomic failure; B3A добавляет keep-planner overwrite строго по acknowledged etag, supersede при новой внешней правке и завершение recreate-audit |
 | OccurrenceMaterializer | готов: Today запрашивает сегодня, Calendar — видимый диапазон, буфер 14 дней, предел 366 экземпляров на серию за вызов; History генерацию не запускает |
 | TemplateService | готов: локальные ordinary/recurring шаблоны, NFKC+casefold уникальность имени, Settings CRUD/duplicate и неперсистентный editor prefill |

@@ -17,7 +17,8 @@
 discovery; **Фаза 3.2B2** — явная связь с новым Google master и безопасные
 master writes; **Фаза 3.2B3A** — явное разрешение конфликтов и восстановление
 после удаления master (link generations); **Фаза 3.2B3B** — безопасные
-instance writes/exceptions/quarantine; **Фаза 3.2B3C** — remote split/adoption;
+instance writes/exceptions/quarantine; **Фаза 3.2B3C1** — remote split
+«этот и будущие» (два мастера); **Фаза 3.2B3C2** — adoption (deferred);
 **Фаза 4** — продуктизация
 синхронизации; **Фаза 5** — миграция
 и релиз. Уже реализованная до принятия роадмапа базовая функциональность
@@ -98,7 +99,8 @@ Phase 3.2B3C.
 | Локальная повторяющаяся серия | implemented — отдельный `TaskSeries`, materialized `Task`-экземпляры, daily/weekly/monthly/yearly, явные «только этот / этот и будущие», exception/tombstone и сохранение истории; Calendar queue delta = 0 | Фаза 3.2A |
 | Шаблоны задач | implemented — ordinary/recurring, локальное управление в Settings, предзаполнение общего редактора без записи до «Создать», меню новой задачи и `Ctrl+Alt+N` | Фаза 3.2A |
 | Read-only discovery Google recurring masters | implemented — master/instance/ordinary classification, raw RRULE + support diagnostics, schema v7 catalog; master никогда не становится ordinary Task, pull даёт queue delta 0 | Фаза 3.2B1 |
-| Синхронизация локальной серии с Google | implemented — явный preflight/link к одному новому recurring master; master create/update/delete и conflict/recovery; один Planner-owned occurrence может безопасно update/cancel через отдельную очередь и full-resource ETag-защищённую запись; materialized occurrences не отправляются отдельно; existing-master adoption и remote split deferred | Фаза 3.2B2 / 3.2B3A / 3.2B3B |
+| Синхронизация локальной серии с Google | implemented — явный preflight/link к одному новому recurring master; master create/update/delete и conflict/recovery; один Planner-owned occurrence может безопасно update/cancel через отдельную очередь и full-resource ETag-защищённую запись; materialized occurrences не отправляются отдельно; remote split «этот и будущие» делит чистую связанную серию на два мастера durable-планом с явным rollback; existing-master adoption deferred | Фаза 3.2B2 / 3.2B3A / 3.2B3B / 3.2B3C1 |
+| Remote split «этот и будущие» связанной серии | implemented — durable план (schema v11), точный COUNT-подсчёт слотов генератором, преемник COUNT-остаток/lossless UNTIL/never, блокировка будущих исключений с точными датами, ETag+content race-защита, локальная атомарная финализация, явный rollback, split-aware pull; сеть только в ручном sync | Фаза 3.2B3C1 |
 | Разрешение конфликтов связанной серии | implemented — SeriesConflictDialog со сравнением Planner ↔ Google, статусом поддержки/владения и тремя явными действиями с подтверждением; неподдерживаемое правило блокирует «Использовать версию Google» и показывает raw RRULE; история решений в Settings | Фаза 3.2B3A |
 | Исключение одного связанного Google-экземпляра | implemented — immutable original occurrence key, exact originalStartTime, title/notes/same-kind move/resize/cancel, Use Google / Keep Planner / Keep both locally / Ignore, remote cancellation persistence, ETag race и reconciliation; completion/tags/priority остаются локальными | Фаза 3.2B3B |
 

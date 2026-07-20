@@ -335,10 +335,25 @@ cancelled identity, and explicit quarantine resolutions. It never writes a
 materialized occurrence as an ordinary event or changes the parent RRULE.
 See [`GOOGLE_OCCURRENCE_SYNC_ARCHITECTURE.md`](GOOGLE_OCCURRENCE_SYNC_ARCHITECTURE.md).
 
-Deferred explicitly to **Phase 3.2B3C**:
+### Phase 3.2B3C1 remote split layer
 
-- remote "this and future" split;
-- adoption of unrelated external Google masters.
+Phase 3.2B3C1 adds the remote "this and future" split of one clean
+Planner-owned linked series into TWO Google masters. The durable plan runs
+FIRST in the manual cycle (before master, occurrence and ordinary pushes):
+`pending -> source_trimmed -> successor_created -> completed`, each remote
+step verified by Planner markers PLUS actual canonical content under ETag
+protection, with an explicit durable rollback path. During an active plan
+the pull handler classifies both masters BEFORE ordinary B3A conflict
+handling: expected trim/insert echoes refresh the plan ETags, the successor
+is associated with its reserved series UID, and unexpected changes mark the
+plan (not the link) conflicted. After completion both links follow the
+normal B2/B3A/B3B rules independently. See
+[`GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md`](GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md).
+
+Deferred explicitly to **Phase 3.2B3C2**:
+
+- adoption of unrelated external Google masters;
+- future-exception migration onto the successor series.
 
 Automatic merge, automatic restoration of deleted masters and any automatic
 sync remain out of scope entirely. The B3B occurrence implementation was

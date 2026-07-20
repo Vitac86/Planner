@@ -776,10 +776,84 @@ Google calls = 0. Ordinary Task sync и recurring-master sync сохранили
 - [Settings](screenshots/occurrence_settings_phase3_2b3b.png);
 - [compact](screenshots/occurrence_compact_phase3_2b3b.png).
 
-### Фаза 3.2B3C — явно отложено
+### Фаза 3.2B3C1 — remote split «этот и будущие» (реализовано; fake-приёмка PASS)
 
-- remote split «этот и все будущие»;
-- adoption несвязанных внешних Google masters.
+- schema v11: durable таблица `calendar_series_remote_splits` — полный
+  recoverable план разделения (canonical снапшоты original/trimmed/successor,
+  acknowledged ETag base, state machine); миграция additive/idempotent, один
+  активный план на серию, зарезервированный successor UID и детерминированный
+  successor remote id уникальны навсегда;
+- чистая Planner-owned связанная серия делится по целевому слоту на ДВА
+  мастера Google: исходный сокращается до `COUNT = точное число слотов до
+  цели` (подсчёт только детерминированным генератором — monthly-пропуски,
+  високосные годы и DST не считаются календарной арифметикой), преемник
+  стартует с целевого слота (COUNT-остаток / исходный lossless UNTIL /
+  never), поддержаны title/notes/время/длительность/правило/окончание/IANA
+  таймзона; timed↔all-day конверсия отложена;
+- первый экземпляр маршрутизируется в правку всей серии; цель в прошлом,
+  вне слотов и после последнего экземпляра отклоняются;
+- любое будущее (>= цели) исключение — локальное exception/tombstone,
+  pending/terminal occurrence-операция, synced remote exception, remote
+  cancellation, unresolved quarantine, EXDATE/RDATE — блокирует split с
+  точными числами и датами; ничего не удаляется и не сбрасывается молча;
+  прошлые исключения и выполненная история остаются у исходной серии;
+- state machine `pending → source_trimmed → successor_created → completed`
+  выполняется ПЕРВОЙ в ручном sync; каждый шаг — маркеры ПЛЮС фактическое
+  каноническое содержимое, ETag-защита на full-resource `events.update`,
+  идемпотентный insert по детерминированному id без random fallback; любые
+  расхождения → durable `conflict` без записи;
+- локальная финализация — одна SQLite-транзакция: trim исходной серии,
+  создание преемника из зарезервированного UID, перенос replaceable
+  будущих слотов, копия тегов серии, synced-связь преемника, обновление
+  исходной связи, план `completed`; при сбое повторяется ТОЛЬКО локальная
+  транзакция; ordinary Task-операции не порождаются;
+- durable явный rollback: отмена pending без Google-вызовов; после trim —
+  verify+restore исходного снапшота; после успешного insert — verify+delete
+  преемника, затем restore; изменённые извне мастера никогда не
+  перезаписываются и не удаляются (план становится `conflict`);
+- pull во время активного плана: ожидаемые эхо trim/insert обновляют ETag
+  плана и не считаются конфликтами; преемник ассоциируется с
+  зарезервированным UID и не становится ordinary Task/unowned external
+  master; сбой персиста прерывает pull до продвижения курсора;
+- на время активного плана заблокированы правка определения серии,
+  повторный split, connect/disconnect/delete связи, schedule-операции
+  occurrence >= цели и разрешение конфликтов того же мастера (пока сам план
+  не станет conflict); выполнение и теги остаются локально доступными;
+- UI: «Этот и будущие» включён для eligible связанных серий, диалог с
+  preflight, точным предупреждением о двух мастерах и не-деструктивным
+  фокусом; Settings-панель планов (активные/частичные/конфликты/ошибки/
+  история) c retry/cancel/явным rollback; открытие любого UI — 0 вызовов
+  Google; ManualSyncResult расширен восемью additive-счётчиками разделения;
+- adoption несвязанных внешних masters НЕ реализован (Phase 3.2B3C2);
+  automatic/background sync остаётся выключенным.
+
+Архитектура: [GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md](GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md).
+
+Fake-приёмка в `D:\Users\v.pyatakov\myspace\planner-desktop-remote-split-smoke` — **PASS**:
+COUNT=5 разделился ровно 2/3 одним `update` + одним `insert`, UNTIL-преемник
+сохранил исходный UNTIL, weekly never остался never, monthly-план остаётся
+`pending` до sync; будущее исключение заблокировало split с точной датой;
+ETag race — 0 split-записей и durable `conflict`; source-trim partial
+failure и successor-created finalize failure реконсилированы без повторных
+удалённых мутаций; rollback вернул исходный мастер и удалил преемник;
+ordinary event flood = 0, master duplication = 0, restart persistence
+подтверждён; `qml_warnings=0`, opening UI Google calls = 0.
+
+Скриншоты fake-приёмки:
+
+- [диалог разделения](screenshots/remote_split_dialog_phase3_2b3c1.png);
+- [выбор области с «Этот и будущие»](screenshots/remote_split_summary_phase3_2b3c1.png);
+- [план ожидает sync](screenshots/remote_split_pending_phase3_2b3c1.png);
+- [завершённые планы](screenshots/remote_split_completed_phase3_2b3c1.png);
+- [блокировка будущим исключением](screenshots/remote_split_blocked_exception_phase3_2b3c1.png);
+- [восстановление/откат](screenshots/remote_split_recovery_phase3_2b3c1.png);
+- [compact](screenshots/remote_split_compact_phase3_2b3c1.png).
+
+### Фаза 3.2B3C2 — явно отложено
+
+- adoption несвязанных внешних Google masters (pull только каталогизирует
+  их read-only; связывание/усыновление отключено);
+- миграция будущих исключений на серию-преемник при split;
 - automatic conflict merge, local/external series conversion и background sync.
 
 ---

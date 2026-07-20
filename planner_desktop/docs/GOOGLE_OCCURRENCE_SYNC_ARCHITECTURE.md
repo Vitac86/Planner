@@ -184,10 +184,20 @@ Google sync remain disabled.
 
 ## Phase 3.2B3C boundary
 
-Still deferred:
+Phase 3.2B3C1 implements the remote "this and future" split (see
+[`GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md`](GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md)).
+While a split plan is active, occurrence SCHEDULE operations at or after the
+target slot are locked and any future (>= target) occurrence state — local
+exceptions, tombstones, pending/terminal instance operations, synced remote
+exceptions, remote cancellations, unresolved quarantine — blocks the split
+with exact dates instead of being migrated or silently reset. Past
+exceptions stay with the source master. Local completion and tags remain
+allowed during a pending split.
+
+Still deferred (Phase 3.2B3C2):
 
 - adoption of unrelated external Google masters;
-- remote “this and future” series split;
+- future-exception migration onto the successor series;
 - automatic conflict merging;
 - local/external series conversion;
 - automatic/background sync;
