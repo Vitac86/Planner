@@ -43,6 +43,11 @@ Dialog {
     property string occurrenceSyncStatusText: ""
     property string occurrenceOriginalSlot: ""
     property string occurrenceRemoteStatus: ""
+    // Phase 3.2B3C1: удалённое разделение «этот и будущие» связанной серии.
+    property bool remoteSplitEligible: false
+    property bool remoteSplitPending: false
+    property string remoteSplitStatusText: ""
+    property string remoteSplitRole: ""
     property bool recurEnabled: false
     // Снимки исходного состояния для детекции изменений расписания/правила.
     property string _origScheduleJson: ""
@@ -52,6 +57,7 @@ Dialog {
     property var _templatePickerObject: null
     property var _seriesGoogleLinkObject: null
     property var _occurrenceCancelObject: null
+    property var _remoteSplitDialogObject: null
 
     // Режим планирования: "none" | "allday" | "timed" (domain/scheduling.py).
     property string schedMode: "none"
@@ -128,6 +134,9 @@ Dialog {
         if (!taskEditorDialog._occurrenceCancelObject)
             taskEditorDialog._occurrenceCancelObject =
                 occurrenceCancelFactory.createObject(taskEditorDialog.parent)
+        if (!taskEditorDialog._remoteSplitDialogObject)
+            taskEditorDialog._remoteSplitDialogObject =
+                remoteSplitDialogFactory.createObject(taskEditorDialog.parent)
     }
 
     function _resetForm(data) {
@@ -153,6 +162,10 @@ Dialog {
         taskEditorDialog.occurrenceSyncStatusText = data.occurrenceSyncStatusText || ""
         taskEditorDialog.occurrenceOriginalSlot = data.occurrenceOriginalSlot || data.occurrenceKey || ""
         taskEditorDialog.occurrenceRemoteStatus = data.occurrenceRemoteStatus || ""
+        taskEditorDialog.remoteSplitEligible = !!data.remoteSplitEligible
+        taskEditorDialog.remoteSplitPending = !!data.remoteSplitPending
+        taskEditorDialog.remoteSplitStatusText = data.remoteSplitStatusText || ""
+        taskEditorDialog.remoteSplitRole = data.remoteSplitRole || ""
         taskEditorDialog.recurEnabled = !!data.recurring || taskEditorDialog.seriesOccurrence
         ruleEditor.reset(data.rule || {},
                          (data.recurring || data.isSeriesOccurrence) ? "custom" : "")
@@ -269,6 +282,14 @@ Dialog {
     }
 
     function _saveScoped(scope) {
+        // Phase 3.2B3C1: «Этот и будущие» для связанной серии — удалённое
+        // разделение на два мастера через отдельный диалог подтверждения.
+        if (scope === "this_and_future" && taskEditorDialog.seriesLinkedToGoogle) {
+            taskEditorDialog._prepareNestedPopups()
+            taskEditorDialog._remoteSplitDialogObject.openFor(
+                taskEditorDialog.taskUid, taskEditorDialog._recurrencePayload())
+            return
+        }
         var ok = taskEditorDialog.vm.saveOccurrenceScoped(
             taskEditorDialog.taskUid, scope, taskEditorDialog._recurrencePayload())
         if (ok)
@@ -327,7 +348,10 @@ Dialog {
                 JSON.stringify(ruleEditor.ruleMap()) !== taskEditorDialog._origRuleJson
             taskEditorDialog._scopeDialogObject.openForSave(
                 scheduleChanged, ruleChanged,
-                taskEditorDialog.seriesLinkedToGoogle)
+                taskEditorDialog.seriesLinkedToGoogle,
+                taskEditorDialog.remoteSplitEligible,
+                taskEditorDialog.remoteSplitPending,
+                taskEditorDialog.remoteSplitStatusText)
             return
         }
         // Новая задача с включённым повторением -> локальная серия.
@@ -358,6 +382,15 @@ Dialog {
         SeriesScopeDialog {
             objectName: "seriesScopeDialog"
             onScopeChosen: scope => taskEditorDialog._saveScoped(scope)
+        }
+    }
+
+    Component {
+        id: remoteSplitDialogFactory
+        RemoteSeriesSplitDialog {
+            objectName: "remoteSeriesSplitDialog"
+            vm: taskEditorDialog.vm
+            onPlanCreated: taskEditorDialog.close()
         }
     }
 
@@ -879,6 +912,42 @@ Dialog {
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
+        }
+
+        // ---- активное удалённое разделение серии (Phase 3.2B3C1) ----
+        RowLayout {
+            visible: taskEditorDialog.remoteSplitPending
+            spacing: Theme.spacingSm
+            Layout.fillWidth: true
+
+            AppIcon { name: "repeat"; size: 15; color: Theme.warningText }
+            Label {
+                text: "Для серии выполняется разделение «этот и будущие» ("
+                      + taskEditorDialog.remoteSplitStatusText + "). "
+                      + "Правка определения серии и расписаний будущих "
+                      + "экземпляров временно заблокирована."
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                color: Theme.warningText
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+
+        RowLayout {
+            visible: taskEditorDialog.remoteSplitRole !== ""
+            spacing: Theme.spacingSm
+            Layout.fillWidth: true
+
+            Badge {
+                objectName: "remoteSplitRoleBadge"
+                text: taskEditorDialog.remoteSplitRole === "source"
+                      ? "Исходная серия разделения"
+                      : "Серия-преемник разделения"
+                bg: Theme.accentSoft
+                fg: Theme.accent
+            }
+            Item { Layout.fillWidth: true }
         }
 
         // ---- инлайн-ошибка валидации ----

@@ -121,7 +121,8 @@ class SettingsViewModel(QObject):
                  series_sync_store=None,
                  occurrence_sync_store=None,
                  occurrence_resolution_service=None,
-                 series_conflict_service=None) -> None:
+                 series_conflict_service=None,
+                 remote_split_service=None) -> None:
         super().__init__(parent)
         self._service = service
         self._daily = daily_service
@@ -136,6 +137,7 @@ class SettingsViewModel(QObject):
         self._occurrence_sync_store = occurrence_sync_store
         self._occurrence_resolutions = occurrence_resolution_service
         self._series_conflicts = series_conflict_service
+        self._remote_splits = remote_split_service
         self._busy_kind = ""       # "" | "connect" | "sync"
         self._live_error = ""      # ошибка текущей сессии (поверх сохранённой)
         self._live_error_set = False
@@ -689,6 +691,134 @@ class SettingsViewModel(QObject):
                 "error": item.error or "",
             })
         return rows
+
+    # ---- remote "this and future" split plans (Phase 3.2B3C1) ---------------
+
+    @Property(str, constant=True)
+    def remoteSplitNote(self) -> str:
+        return (
+            "Разделение «этот и будущие» связанной серии выполняется "
+            "durable-планом: удалённые шаги происходят только при ручной "
+            "синхронизации. После завершения в Google существуют два "
+            "мастера: исходный (прошлые экземпляры) и преемник."
+        )
+
+    def _remote_split_counts(self) -> dict:
+        if self._remote_splits is None:
+            return {}
+        try:
+            return self._remote_splits.diagnostics()
+        except Exception:
+            logger.exception("Не удалось прочитать диагностику разделений")
+            return {}
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def activeRemoteSplitCount(self) -> int:
+        counts = self._remote_split_counts()
+        return sum(int(counts.get(state, 0)) for state in (
+            "pending", "source_trimmed", "successor_created",
+            "local_finalize_pending", "rollback_pending",
+            "successor_removed_for_rollback",
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def partialRemoteSplitCount(self) -> int:
+        counts = self._remote_split_counts()
+        return sum(int(counts.get(state, 0)) for state in (
+            "source_trimmed", "successor_created", "local_finalize_pending",
+            "rollback_pending", "successor_removed_for_rollback",
+        ))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def conflictRemoteSplitCount(self) -> int:
+        return int(self._remote_split_counts().get("conflict", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def terminalRemoteSplitCount(self) -> int:
+        return int(self._remote_split_counts().get("terminal_error", 0))
+
+    @Property(int, notify=seriesLinksStateChanged)
+    def completedRemoteSplitCount(self) -> int:
+        counts = self._remote_split_counts()
+        return int(counts.get("completed", 0)) + int(
+            counts.get("rolled_back", 0)
+        )
+
+    @Property("QVariantList", notify=seriesLinksStateChanged)
+    def remoteSplitRows(self):
+        if self._remote_splits is None:
+            return []
+        try:
+            records = self._remote_splits.list_split_history()
+        except Exception:
+            logger.exception("Не удалось прочитать планы разделения")
+            return []
+        recurrence = getattr(self._service, "recurrence_service", None)
+        rows = []
+        for record in records[:50]:
+            title = ""
+            if recurrence is not None:
+                series = recurrence.get_series(record.source_series_uid)
+                title = series.title if series is not None else ""
+            state = record.state.value
+            rows.append({
+                "id": record.id,
+                "seriesUid": record.source_series_uid,
+                "seriesTitle": title,
+                "targetSlot": record.target_occurrence_key,
+                "state": state,
+                "statusText": record.status_text,
+                "attempts": record.attempts,
+                "lastError": record.last_error or "",
+                "createdAt": _format_local(record.created_at),
+                "completedAt": _format_local(record.completed_at),
+                "isActive": record.is_active,
+                "canCancel": state == "pending",
+                "canRetry": state in (
+                    "pending", "source_trimmed", "successor_created",
+                    "local_finalize_pending", "rollback_pending",
+                    "successor_removed_for_rollback",
+                ),
+                "canRollback": state in (
+                    "source_trimmed", "successor_created",
+                    "local_finalize_pending", "conflict",
+                ),
+                "successorRemoteId": record.successor_remote_event_id,
+            })
+        return rows
+
+    def _run_remote_split_action(self, result) -> bool:
+        if not result.ok:
+            self.toastMessage.emit(
+                result.error or "Операция с планом разделения не выполнена."
+            )
+            return False
+        self.seriesLinksStateChanged.emit()
+        return True
+
+    @Slot(int, result=bool)
+    def retryRemoteSplit(self, plan_id: int) -> bool:
+        if self._remote_splits is None:
+            return False
+        return self._run_remote_split_action(
+            self._remote_splits.retry_split(plan_id)
+        )
+
+    @Slot(int, result=bool)
+    def rollbackRemoteSplit(self, plan_id: int) -> bool:
+        if self._remote_splits is None:
+            return False
+        return self._run_remote_split_action(
+            self._remote_splits.request_split_rollback(plan_id)
+        )
+
+    @Slot(int, result=bool)
+    def cancelRemoteSplit(self, plan_id: int) -> bool:
+        if self._remote_splits is None:
+            return False
+        return self._run_remote_split_action(
+            self._remote_splits.cancel_unstarted_split(plan_id)
+        )
 
     # ---- локальные теги --------------------------------------------------------
 

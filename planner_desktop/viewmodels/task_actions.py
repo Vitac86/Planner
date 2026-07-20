@@ -280,6 +280,10 @@ class TaskActionsViewModel(QObject):
         data.setdefault("occurrenceSyncStatusText", "")
         data.setdefault("occurrenceOriginalSlot", data.get("occurrenceKey", ""))
         data.setdefault("occurrenceRemoteStatus", "")
+        data.setdefault("remoteSplitEligible", False)
+        data.setdefault("remoteSplitPending", False)
+        data.setdefault("remoteSplitStatusText", "")
+        data.setdefault("remoteSplitRole", "")
         recurrence = getattr(self._service, "recurrence_service", None)
         if data.get("isSeriesOccurrence") and recurrence is not None:
             series = recurrence.get_series(data.get("seriesUid", ""))
@@ -324,7 +328,215 @@ class TaskActionsViewModel(QObject):
                             if occurrence_link.is_cancelled_remote
                             else "confirmed"
                         )
+                splits = self._remote_splits()
+                if splits is not None and link is not None:
+                    active = splits.get_active_split(series.uid)
+                    if active is not None:
+                        data["remoteSplitPending"] = True
+                        data["remoteSplitStatusText"] = active.status_text
+                    else:
+                        # Cheap hint only; the split dialog runs the exact
+                        # preflight (future exceptions, ETag base, rule).
+                        data["remoteSplitEligible"] = (
+                            link.link_status.value == "synced"
+                        )
+                    data["remoteSplitRole"] = self._remote_split_role(
+                        splits, series.uid
+                    )
         return data
+
+    # ---- remote "this and future" split (Phase 3.2B3C1) ---------------------
+
+    def _remote_splits(self):
+        recurrence = getattr(self._service, "recurrence_service", None)
+        return getattr(recurrence, "remote_split_service", None)
+
+    @staticmethod
+    def _remote_split_role(splits, series_uid: str) -> str:
+        """"source"/"successor" badge after a completed split, else ""."""
+        store = getattr(splits, "split_store", None)
+        if store is None:
+            return ""
+        try:
+            for record in store.list_plans(series_uid=series_uid):
+                if record.state.value == "completed":
+                    return "source"
+            by_successor = store.get_plan_by_successor_uid(series_uid)
+            if by_successor is not None and (
+                by_successor.state.value == "completed"
+            ):
+                return "successor"
+        except Exception:
+            return ""
+        return ""
+
+    def _remote_split_proposal(self, series, target_key: str, payload):
+        from datetime import time as time_type
+
+        from planner_desktop.domain.google_series_split import (
+            RemoteSeriesSplitProposal,
+        )
+
+        payload = dict(payload or {})
+        local_time = None
+        time_text = str(payload.get("timeText") or "").strip()
+        if time_text and not series.schedule.all_day:
+            hours, minutes = time_text.split(":", 1)
+            local_time = time_type(int(hours), int(minutes))
+        duration = None
+        duration_text = str(payload.get("durationText") or "").strip()
+        if duration_text and not series.schedule.all_day:
+            try:
+                duration = max(1, int(duration_text))
+            except ValueError:
+                duration = None
+        start_date = None
+        if series.schedule.all_day:
+            date_text = str(payload.get("dateText") or "").strip()
+            if date_text:
+                try:
+                    start_date = date.fromisoformat(date_text)
+                except ValueError:
+                    start_date = None
+        rule = None
+        keep_rule_end = False
+        if payload.get("rule") is not None:
+            anchor = start_date or (
+                date.fromisoformat(str(target_key)[:10])
+                if target_key else series.schedule.start_date
+            )
+            rule = rule_from_map(payload.get("rule") or {}, anchor)
+            # The end condition is normally derived from the SOURCE semantics
+            # (COUNT remainder / kept UNTIL / never).  Only an explicitly
+            # different requested ending overrides that derivation.
+            keep_rule_end = (
+                rule.end_mode != series.rule.end_mode
+                or rule.until_date != series.rule.until_date
+                or rule.occurrence_count != series.rule.occurrence_count
+            )
+        title = payload.get("title")
+        notes = payload.get("notes")
+        priority = payload.get("priority")
+        return RemoteSeriesSplitProposal(
+            title=str(title) if title is not None else None,
+            notes=str(notes) if notes is not None else None,
+            priority=int(priority) if priority is not None else None,
+            local_time=local_time,
+            duration_minutes=duration,
+            start_date=start_date,
+            rule=rule,
+            keep_rule_end=keep_rule_end,
+        )
+
+    @Slot(str, "QVariantMap", result="QVariantMap")
+    def remoteSplitPreflight(self, uid: str, payload) -> Dict[str, Any]:
+        """Local preflight for the split dialog; zero Google calls."""
+        base: Dict[str, Any] = {
+            "available": False, "ok": False, "errors": [], "codes": [],
+        }
+        splits = self._remote_splits()
+        recurrence = getattr(self._service, "recurrence_service", None)
+        task = self._service.get_task(uid)
+        if splits is None or recurrence is None or task is None or (
+            task.series_uid is None
+        ):
+            base["errors"] = ["Сервис удалённого разделения недоступен."]
+            return base
+        series = recurrence.get_series(task.series_uid)
+        if series is None:
+            base["errors"] = ["Серия не найдена."]
+            return base
+        target_key = str(task.occurrence_key or "")
+        try:
+            proposal = self._remote_split_proposal(series, target_key, payload)
+        except Exception as exc:
+            base["errors"] = [f"Некорректные данные формы: {exc}"]
+            return base
+        plan, validation = splits.validate_split(
+            series.uid, target_key, proposal
+        )
+        base["available"] = True
+        base["ok"] = validation.ok and plan is not None
+        base["errors"] = list(validation.errors)
+        base["codes"] = list(validation.codes)
+        base["seriesTitle"] = series.title
+        base["seriesSummary"] = series.summary()
+        base["targetSlot"] = target_key
+        base["routeToEntireSeries"] = "target_is_first" in validation.codes
+        if plan is not None:
+            successor = plan.successor_series
+            changed: List[str] = []
+            if successor.title != series.title:
+                changed.append("название")
+            if successor.notes != series.notes:
+                changed.append("заметки")
+            if successor.schedule.local_time != series.schedule.local_time:
+                changed.append("время начала")
+            if successor.schedule.duration_minutes != (
+                series.schedule.duration_minutes
+            ):
+                changed.append("длительность")
+            if successor.schedule.timezone_name != (
+                series.schedule.timezone_name
+            ):
+                changed.append("часовой пояс")
+            if successor.rule != series.rule:
+                changed.append("правило повторения")
+            base.update({
+                "occurrencesBeforeTarget": plan.occurrences_before_target,
+                "successorTitle": successor.title,
+                "successorSummary": successor.summary(),
+                "successorStart": successor.schedule.start_date.isoformat(),
+                "changedFields": changed,
+                "twoMastersWarning": (
+                    "После завершения в Google Calendar будут существовать "
+                    "ДВА повторяющихся события: исходное (ровно "
+                    f"{plan.occurrences_before_target} прошлых экземпляров) "
+                    "и новое, начинающееся с выбранного экземпляра."
+                ),
+            })
+        return base
+
+    @Slot(str, "QVariantMap", result=bool)
+    def createRemoteSplitPlan(self, uid: str, payload) -> bool:
+        """Persist one durable split plan; network happens only in manual sync."""
+        splits = self._remote_splits()
+        recurrence = getattr(self._service, "recurrence_service", None)
+        task = self._service.get_task(uid)
+        if splits is None or recurrence is None or task is None or (
+            task.series_uid is None
+        ):
+            self._set_editor_error("Сервис удалённого разделения недоступен.")
+            return False
+        series = recurrence.get_series(task.series_uid)
+        if series is None:
+            self._set_editor_error("Серия не найдена.")
+            return False
+        if not self._begin("createRemoteSplit", uid, dedupe=True):
+            return False
+        try:
+            proposal = self._remote_split_proposal(
+                series, str(task.occurrence_key or ""), payload
+            )
+            result = splits.create_split_plan(
+                series.uid, str(task.occurrence_key or ""), proposal
+            )
+        except Exception as exc:
+            self._set_editor_error(f"Не удалось создать план разделения: {exc}")
+            return False
+        finally:
+            self._end()
+        if not result.ok:
+            self._set_editor_error(
+                result.error or "Не удалось создать план разделения."
+            )
+            return False
+        self._set_editor_error("")
+        self._notify_mutation(
+            "План разделения создан; выполнится при следующей ручной "
+            "синхронизации"
+        )
+        return True
 
     def _series_links(self):
         recurrence = getattr(self._service, "recurrence_service", None)

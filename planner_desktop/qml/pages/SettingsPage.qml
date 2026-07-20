@@ -711,6 +711,82 @@ ScrollView {
             }
         }
 
+        // ---- Remote "this and future" split plans (Phase 3.2B3C1) ----
+        Panel {
+            id: remoteSplitPanel
+            objectName: "settingsRemoteSplits"
+            Layout.fillWidth: true
+            implicitHeight: remoteSplitColumn.implicitHeight + 2 * Theme.spacingLg
+
+            ColumnLayout {
+                id: remoteSplitColumn
+                anchors.fill: parent
+                anchors.margins: Theme.spacingLg
+                spacing: Theme.spacingMd
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    AppIcon { name: "repeat"; size: 20; color: Theme.accent }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            text: "Разделение связанных серий «этот и будущие»"
+                            font.pixelSize: Theme.fontSubtitle
+                            font.family: Theme.fontFamily
+                            font.weight: Font.DemiBold
+                            color: Theme.textPrimary
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+                        Label {
+                            text: settingsVm.remoteSplitNote
+                            font.pixelSize: Theme.fontCaption
+                            font.family: Theme.fontFamily
+                            color: Theme.textMuted
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSm
+                    Badge { text: "Активных: " + settingsVm.activeRemoteSplitCount }
+                    Badge { text: "Частичных: " + settingsVm.partialRemoteSplitCount }
+                    Badge {
+                        text: "Конфликтов: " + settingsVm.conflictRemoteSplitCount
+                        fg: settingsVm.conflictRemoteSplitCount > 0
+                            ? Theme.danger : Theme.textSecondary
+                        bg: settingsVm.conflictRemoteSplitCount > 0
+                            ? Theme.dangerSoft : Theme.surfaceHover
+                    }
+                    Badge {
+                        text: "Ошибок: " + settingsVm.terminalRemoteSplitCount
+                        fg: settingsVm.terminalRemoteSplitCount > 0
+                            ? Theme.danger : Theme.textSecondary
+                        bg: settingsVm.terminalRemoteSplitCount > 0
+                            ? Theme.dangerSoft : Theme.surfaceHover
+                    }
+                    Badge { text: "Завершено/откачено: " + settingsVm.completedRemoteSplitCount }
+                }
+
+                RemoteSeriesSplitHistory {
+                    Layout.fillWidth: true
+                    rows: settingsVm.remoteSplitRows
+                    onRecoveryRequested: plan => remoteSplitRecoveryDialog.openFor(plan)
+                }
+            }
+        }
+
+        RemoteSeriesSplitRecoveryDialog {
+            id: remoteSplitRecoveryDialog
+            objectName: "remoteSplitRecoveryDialog"
+            vm: settingsVm
+        }
+
         // ---- Read-only Google recurring-master catalog (Phase 3.2B1/B2) ----
         Panel {
             id: googleSeriesCatalog

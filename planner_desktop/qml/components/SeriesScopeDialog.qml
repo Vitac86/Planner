@@ -18,6 +18,11 @@ Dialog {
     property bool scheduleChanged: false
     property bool ruleChanged: false
     property bool linkedGoogle: false
+    // Phase 3.2B3C1: у чистой Planner-owned связанной серии «Этот и будущие»
+    // доступен как удалённое разделение на два мастера Google.
+    property bool remoteSplitEligible: false
+    property bool remoteSplitPending: false
+    property string remoteSplitStatusText: ""
 
     signal scopeChosen(string scope)
 
@@ -50,10 +55,15 @@ Dialog {
         }
     }
 
-    function openForSave(scheduleChangedFlag, ruleChangedFlag, linkedGoogleFlag) {
+    function openForSave(scheduleChangedFlag, ruleChangedFlag, linkedGoogleFlag,
+                         remoteSplitEligibleFlag, remoteSplitPendingFlag,
+                         remoteSplitStatus) {
         dialog.scheduleChanged = !!scheduleChangedFlag
         dialog.ruleChanged = !!ruleChangedFlag
         dialog.linkedGoogle = !!linkedGoogleFlag
+        dialog.remoteSplitEligible = !!remoteSplitEligibleFlag
+        dialog.remoteSplitPending = !!remoteSplitPendingFlag
+        dialog.remoteSplitStatusText = remoteSplitStatus || ""
         open()
         onlyThisButton.forceActiveFocus()
     }
@@ -116,27 +126,43 @@ Dialog {
             Layout.fillWidth: true
         }
 
-        // ---- «Этот и все будущие» ----
+        // ---- «Этот и будущие» ----
         AppButton {
             id: allFutureButton
-            text: "Этот и все будущие"
+            text: "Этот и будущие"
             variant: "secondary"
             enabled: !dialog.linkedGoogle
+                     || (dialog.remoteSplitEligible && !dialog.remoteSplitPending)
             Layout.fillWidth: true
             Accessible.description:
-                "Серия разделится: прошлые экземпляры и история сохранятся, "
-                + "будущие будут созданы по новому правилу"
+                dialog.linkedGoogle
+                ? "Связанная серия Google разделится на два мастера: прошлые "
+                  + "экземпляры останутся в исходном, будущие перейдут в новый"
+                : "Серия разделится: прошлые экземпляры и история сохранятся, "
+                  + "будущие будут созданы по новому правилу"
             onClicked: {
                 dialog.close()
                 dialog.scopeChosen("this_and_future")
             }
         }
         Label {
-            text: dialog.linkedGoogle
-                  ? "Удалённое разделение «этот и все будущие» отложено до Phase 3.2B3C."
-                  : "Серия разделится на этом экземпляре: прошлые экземпляры и "
-                    + "выполненная история сохранятся, будущие невыполненные "
-                    + "будут заменены по новому правилу."
+            text: {
+                if (!dialog.linkedGoogle)
+                    return "Серия разделится на этом экземпляре: прошлые "
+                         + "экземпляры и выполненная история сохранятся, "
+                         + "будущие невыполненные будут заменены по новому правилу."
+                if (dialog.remoteSplitPending)
+                    return "Для серии уже выполняется разделение («"
+                         + dialog.remoteSplitStatusText
+                         + "»): дождитесь завершения или откатите план в настройках."
+                if (dialog.remoteSplitEligible)
+                    return "После подтверждения и следующей ручной синхронизации "
+                         + "в Google будут ДВА повторяющихся события: исходное "
+                         + "(прошлые экземпляры) и новое с этого экземпляра."
+                return "Удалённое разделение доступно только для "
+                     + "синхронизированной Planner-owned серии без конфликтов "
+                     + "и незавершённых операций."
+            }
             font.pixelSize: Theme.fontCaption
             font.family: Theme.fontFamily
             color: Theme.textMuted

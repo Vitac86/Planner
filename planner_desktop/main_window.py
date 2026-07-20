@@ -121,6 +121,13 @@ class MainWindow:
             self.occurrence_sync_store = CalendarSeriesOccurrenceSyncStore(
                 self.repository.db_path
             )
+            from planner_desktop.storage.calendar_series_remote_split_store import (
+                CalendarSeriesRemoteSplitStore,
+            )
+
+            self.remote_split_store = CalendarSeriesRemoteSplitStore(
+                self.repository.db_path
+            )
         else:
             series_repository = InMemorySeriesRepository()
             template_repository = InMemoryTemplateRepository()
@@ -129,6 +136,7 @@ class MainWindow:
             )
             self.series_sync_store = None
             self.occurrence_sync_store = None
+            self.remote_split_store = None
         self.external_series_service = ExternalSeriesService(
             self.external_series_repository
         )
@@ -160,6 +168,30 @@ class MainWindow:
         self.recurrence_service.series_conflict_service = (
             self.series_conflict_service
         )
+        if self.remote_split_store is not None:
+            from planner_desktop.usecases.remote_series_split_service import (
+                RemoteSeriesSplitService,
+            )
+
+            self.remote_split_service = RemoteSeriesSplitService(
+                series_repository,
+                self.repository,
+                self.series_sync_store,
+                self.occurrence_sync_store,
+                self.remote_split_store,
+                external_series_repository=self.external_series_repository,
+            )
+        else:
+            self.remote_split_service = None
+        self.recurrence_service.remote_split_service = self.remote_split_service
+        if self.series_link_service is not None:
+            self.series_link_service.remote_split_service = (
+                self.remote_split_service
+            )
+        if self.series_conflict_service is not None:
+            self.series_conflict_service.remote_split_service = (
+                self.remote_split_service
+            )
         if self.occurrence_sync_store is not None:
             from planner_desktop.usecases.occurrence_resolution_service import (
                 OccurrenceResolutionService,
@@ -193,7 +225,8 @@ class MainWindow:
             series_sync_store=self.series_sync_store,
             occurrence_sync_store=self.occurrence_sync_store,
             occurrence_resolution_service=self.occurrence_resolution_service,
-            series_conflict_service=self.series_conflict_service)
+            series_conflict_service=self.series_conflict_service,
+            remote_split_service=self.remote_split_service)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
         self.search_viewmodel = SearchViewModel(self.service)
