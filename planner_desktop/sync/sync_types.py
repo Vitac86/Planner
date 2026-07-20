@@ -109,6 +109,9 @@ class CalendarPullStats:
     occurrence_conflicts_detected: int = 0
     occurrence_remote_cancellations: int = 0
     occurrence_quarantine_resolved: int = 0
+    # Phase 3.2B3C1: unexpected remote master changes detected during an
+    # active split plan (the plan itself moved to conflict).
+    split_conflicts_detected: int = 0
 
 
 @dataclass

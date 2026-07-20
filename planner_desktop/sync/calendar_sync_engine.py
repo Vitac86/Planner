@@ -145,6 +145,7 @@ class CalendarSyncEngine:
         series_link_store=None,
         occurrence_sync_store=None,
         series_repository=None,
+        split_store=None,
     ) -> None:
         self._repository = repository
         self._store = store
@@ -160,6 +161,7 @@ class CalendarSyncEngine:
         self._series_link_store = series_link_store
         self._occurrence_sync_store = occurrence_sync_store
         self._series_repository = series_repository
+        self._split_store = split_store
 
     # ---- реакция на локальные изменения ---------------------------------------
 
@@ -360,6 +362,13 @@ class CalendarSyncEngine:
         existing: Optional[ExternalCalendarSeries],
         linked=None,
     ) -> None:
+        # Phase 3.2B3C1: an active remote split plan classifies its two
+        # masters BEFORE ordinary B3A conflict handling.  Expected split
+        # echoes update plan ETags; unexpected changes mark the plan conflict;
+        # neither master ever becomes an ordinary Task or an unowned external
+        # master while the plan is active.
+        if self._handle_split_master_pull(event):
+            return
         repository = self._external_series_repository
         # Compatibility mode for older engine construction: the classification
         # still prevents an ordinary Task even when no catalog was supplied.
@@ -475,6 +484,102 @@ class CalendarSyncEngine:
                 self._series_link_store.update_link(linked)
             else:
                 self._persist_linked_master_mismatch(event, linked)
+
+    def _handle_split_master_pull(self, event: CalendarEvent) -> bool:
+        """Split-aware master classification; True when fully handled here."""
+        store = self._split_store
+        if store is None or not event.id:
+            return False
+        plan = store.get_active_plan_by_source_remote(event.id)
+        if plan is not None:
+            return self._handle_split_source_pull(event, plan)
+        plan = store.get_plan_by_successor_remote(event.id)
+        if plan is not None and plan.is_active:
+            return self._handle_split_successor_pull(event, plan)
+        return False
+
+    @staticmethod
+    def _pulled_master_hash(event: CalendarEvent) -> Optional[str]:
+        from planner_desktop.sync.calendar_series_mapper import (
+            master_payload_hash,
+        )
+
+        try:
+            return master_payload_hash(event)
+        except (TypeError, ValueError):
+            return None
+
+    def _handle_split_source_pull(self, event: CalendarEvent, plan) -> bool:
+        store = self._split_store
+        if event.is_cancelled:
+            # Recorded without automatic recreation (Part 12).
+            store.mark_conflict(
+                plan.id,
+                "Исходный мастер отменён в Google во время разделения.",
+            )
+            self.last_pull_stats.split_conflicts_detected += 1
+            return True
+        actual_hash = self._pulled_master_hash(event)
+        if actual_hash == plan.source_trimmed_payload_hash:
+            # Expected echo of our own trim: refresh the acknowledged ETag.
+            if event.etag:
+                store.update_remote_etags(
+                    plan.id, source_trimmed_remote_etag=event.etag
+                )
+            return True
+        if actual_hash == plan.source_original_payload_hash:
+            return True  # pre-trim state, nothing unexpected yet
+        store.mark_conflict(
+            plan.id,
+            "Исходный мастер изменён вне Planner во время разделения; "
+            "план остановлен.",
+        )
+        self.last_pull_stats.split_conflicts_detected += 1
+        return True
+
+    def _handle_split_successor_pull(self, event: CalendarEvent, plan) -> bool:
+        from planner_desktop.domain.google_series_split import (
+            RemoteSeriesSplitStatus,
+        )
+
+        store = self._split_store
+        if event.is_cancelled:
+            if plan.state in (
+                RemoteSeriesSplitStatus.SUCCESSOR_REMOVED_FOR_ROLLBACK,
+                RemoteSeriesSplitStatus.ROLLBACK_PENDING,
+            ):
+                return True  # expected rollback deletion echo
+            if plan.state in (
+                RemoteSeriesSplitStatus.SUCCESSOR_CREATED,
+                RemoteSeriesSplitStatus.LOCAL_FINALIZE_PENDING,
+            ):
+                store.mark_conflict(
+                    plan.id,
+                    "Мастер-преемник отменён в Google до завершения "
+                    "разделения; автоматическое пересоздание отключено.",
+                )
+                self.last_pull_stats.split_conflicts_detected += 1
+            return True
+        actual_hash = self._pulled_master_hash(event)
+        if actual_hash == plan.successor_payload_hash:
+            # Expected echo of our own insert, associated with the reserved
+            # successor series UID; never an unowned external master.
+            if event.etag:
+                store.update_remote_etags(
+                    plan.id, successor_remote_etag=event.etag
+                )
+            return True
+        if plan.state in (
+            RemoteSeriesSplitStatus.SUCCESSOR_CREATED,
+            RemoteSeriesSplitStatus.LOCAL_FINALIZE_PENDING,
+        ):
+            store.mark_conflict(
+                plan.id,
+                "Мастер-преемник изменён вне Planner до завершения "
+                "разделения; план остановлен.",
+            )
+            self.last_pull_stats.split_conflicts_detected += 1
+        return True
 
     def _persist_linked_master_mismatch(self, event: CalendarEvent, linked) -> None:
         """Unexpected remote master state for an active link (Phase 3.2B3A).

@@ -76,6 +76,16 @@ class ManualSyncResult:
     remote_deleted_recreated: int = 0
     resolution_attempts_superseded: int = 0
     resolution_failures: int = 0
+    # Phase 3.2B3C1 additive remote split counters.  The split engine runs
+    # FIRST in the cycle, before master, occurrence and ordinary pushes.
+    remote_splits_started: int = 0
+    remote_sources_trimmed: int = 0
+    remote_successors_created: int = 0
+    remote_splits_finalized: int = 0
+    remote_split_conflicts: int = 0
+    remote_split_rollbacks_completed: int = 0
+    remote_split_terminal: int = 0
+    remote_split_reconciliation_completions: int = 0
     occurrence_updates_pushed: int = 0
     occurrence_cancellations_pushed: int = 0
     occurrence_conflicts_detected: int = 0
@@ -131,6 +141,31 @@ class ManualSyncResult:
             )
         if self.resolution_failures:
             parts.append(f"ошибок разрешения {self.resolution_failures}")
+        if self.remote_splits_started:
+            parts.append(f"разделений начато {self.remote_splits_started}")
+        if self.remote_sources_trimmed:
+            parts.append(
+                f"исходных серий сокращено {self.remote_sources_trimmed}"
+            )
+        if self.remote_successors_created:
+            parts.append(
+                f"серий-преемников создано {self.remote_successors_created}"
+            )
+        if self.remote_splits_finalized:
+            parts.append(
+                f"разделений завершено {self.remote_splits_finalized}"
+            )
+        if self.remote_split_conflicts:
+            parts.append(
+                f"конфликтов разделения {self.remote_split_conflicts}"
+            )
+        if self.remote_split_rollbacks_completed:
+            parts.append(
+                "откатов разделения завершено "
+                f"{self.remote_split_rollbacks_completed}"
+            )
+        if self.remote_split_terminal:
+            parts.append(f"разделений в ошибке {self.remote_split_terminal}")
         if self.occurrence_updates_pushed:
             parts.append(f"occurrence updates {self.occurrence_updates_pushed}")
         if self.occurrence_cancellations_pushed:
@@ -174,6 +209,7 @@ class ManualSyncService:
         series_store=None,
         series_repository=None,
         occurrence_store=None,
+        split_store=None,
     ) -> None:
         self._repository = repository
         self._store = store
@@ -183,6 +219,7 @@ class ManualSyncService:
         self._series_store = series_store
         self._series_repository = series_repository
         self._occurrence_store = occurrence_store
+        self._split_store = split_store
         self._db_path: Optional[Path] = None
         self._lock = threading.Lock()
 
@@ -233,6 +270,9 @@ class ManualSyncService:
         from planner_desktop.storage.calendar_series_occurrence_sync_store import (
             CalendarSeriesOccurrenceSyncStore,
         )
+        from planner_desktop.storage.calendar_series_remote_split_store import (
+            CalendarSeriesRemoteSplitStore,
+        )
         from planner_desktop.storage.series_repository import SQLiteSeriesRepository
 
         repository = SQLiteTaskRepository(self._db_path)
@@ -251,14 +291,21 @@ class ManualSyncService:
                         try:
                             series_repository = SQLiteSeriesRepository(self._db_path)
                             try:
-                                return self._run_cycle(
-                                    repository,
-                                    store,
-                                    external_series,
-                                    series_store=series_store,
-                                    series_repository=series_repository,
-                                    occurrence_store=occurrence_store,
+                                split_store = CalendarSeriesRemoteSplitStore(
+                                    self._db_path, clock=self._clock
                                 )
+                                try:
+                                    return self._run_cycle(
+                                        repository,
+                                        store,
+                                        external_series,
+                                        series_store=series_store,
+                                        series_repository=series_repository,
+                                        occurrence_store=occurrence_store,
+                                        split_store=split_store,
+                                    )
+                                finally:
+                                    split_store.close()
                             finally:
                                 series_repository.close()
                         finally:
@@ -281,6 +328,7 @@ class ManualSyncService:
         series_store=None,
         series_repository=None,
         occurrence_store=None,
+        split_store=None,
     ) -> ManualSyncResult:
         started = self._clock()
         pending_before = store.count_pending_ops()
@@ -289,6 +337,7 @@ class ManualSyncService:
         series_store = series_store or self._series_store
         series_repository = series_repository or self._series_repository
         occurrence_store = occurrence_store or self._occurrence_store
+        split_store = split_store or self._split_store
 
         try:
             gateway = self._gateway_provider()
@@ -311,10 +360,25 @@ class ManualSyncService:
             series_link_store=series_store,
             occurrence_sync_store=occurrence_store,
             series_repository=series_repository,
+            split_store=split_store,
         )
         series_result = None
         occurrence_result = None
+        split_result = None
         try:
+            if split_store is not None and series_repository is not None:
+                from planner_desktop.sync.calendar_series_remote_split_engine import (
+                    CalendarSeriesRemoteSplitEngine,
+                )
+
+                # Active remote split plans run FIRST: two-master consistency
+                # must settle before ordinary master/occurrence pushes.
+                split_result = CalendarSeriesRemoteSplitEngine(
+                    split_store,
+                    series_repository,
+                    repository,
+                    gateway,
+                ).process_pending()
             if series_store is not None and series_repository is not None:
                 from planner_desktop.sync.calendar_series_sync_engine import (
                     CalendarSeriesSyncEngine,
@@ -409,6 +473,31 @@ class ManualSyncService:
             ),
             resolution_failures=(
                 series_result.resolution_failed if series_result else 0
+            ),
+            remote_splits_started=(
+                split_result.splits_started if split_result else 0
+            ),
+            remote_sources_trimmed=(
+                split_result.sources_trimmed if split_result else 0
+            ),
+            remote_successors_created=(
+                split_result.successors_created if split_result else 0
+            ),
+            remote_splits_finalized=(
+                split_result.splits_finalized if split_result else 0
+            ),
+            remote_split_conflicts=(
+                (split_result.conflicts if split_result else 0)
+                + engine.last_pull_stats.split_conflicts_detected
+            ),
+            remote_split_rollbacks_completed=(
+                split_result.rollbacks_completed if split_result else 0
+            ),
+            remote_split_terminal=(
+                split_result.terminal if split_result else 0
+            ),
+            remote_split_reconciliation_completions=(
+                split_result.reconciliation_completions if split_result else 0
             ),
             occurrence_updates_pushed=(
                 occurrence_result.updates_pushed if occurrence_result else 0
