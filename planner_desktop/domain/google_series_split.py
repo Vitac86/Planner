@@ -407,6 +407,31 @@ def series_master_payload(series: TaskSeries) -> tuple[dict[str, Any], str]:
     return payload, canonical_master_payload_fingerprint(payload)
 
 
+def master_content_fingerprint(payload: Mapping[str, Any]) -> str:
+    """Content hash tolerant of provider-side RRULE normalization.
+
+    Identical to ``canonical_master_payload_fingerprint`` except every RRULE
+    line is canonicalized first (Google drops ``INTERVAL=1`` and similar),
+    so a written master and its returned echo hash equally.  Planner's own
+    generated lines are already canonical, therefore plan-stored hashes are
+    unchanged by this normalization.
+    """
+    import hashlib
+
+    from planner_desktop.domain.google_recurrence import canonicalize_rrule_line
+    from planner_desktop.domain.series_calendar_link import (
+        canonical_master_payload_data,
+    )
+
+    data = canonical_master_payload_data(payload)
+    data["recurrence"] = [
+        canonicalize_rrule_line(line) for line in data["recurrence"]
+    ]
+    return hashlib.sha256(
+        canonical_json(data).encode("utf-8")
+    ).hexdigest()
+
+
 def _with_private_properties(
     payload: Mapping[str, Any], private: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -888,6 +913,7 @@ __all__ = [
     "count_occurrences_before",
     "first_generated_slot_key",
     "is_generated_slot",
+    "master_content_fingerprint",
     "plan_remote_series_split",
     "readable_split_status",
     "replace_series_definition",

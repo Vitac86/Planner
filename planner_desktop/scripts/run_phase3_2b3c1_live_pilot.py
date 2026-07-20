@@ -440,6 +440,14 @@ def run(*, preflight_only: bool = False) -> int:
         split_sync = manual.run_once()
         _require(split_sync.ok, "split_manual_sync_failed")
         sync_results["split"] = _sanitized_sync(split_sync)
+        if split_sync.remote_splits_finalized != 1:
+            # Redaction-safe diagnostic: the plan state and Planner's own
+            # error message for our TEST series (no identity, no payloads).
+            stalled = split_store.get_plan(plan_id)
+            print(
+                f"split_stalled_state={stalled.state.value} "
+                f"split_stalled_error={stalled.last_error or ''}"
+            )
         _require(split_sync.remote_splits_finalized == 1, "split_not_finalized")
         _require(
             gateway.write_counts["master_full_update"] == 1,
@@ -665,6 +673,9 @@ def run(*, preflight_only: bool = False) -> int:
         success = True
     except Exception as exc:
         failure_type = type(exc).__name__
+        # PilotFailure labels are redaction-safe identifiers by construction.
+        failure_label = str(exc) if isinstance(exc, PilotFailure) else ""
+        print(f"failure_type={failure_type} failure_label={failure_label}")
     finally:
         if not preflight_only and not success:
             try:
@@ -697,6 +708,7 @@ def run(*, preflight_only: bool = False) -> int:
             report = {
                 "result": "failed",
                 "failure_type": failure_type or "PilotFailure",
+                "failure_label": locals().get("failure_label", ""),
                 "account_identity": "redacted",
                 "token_contents_logged": False,
                 "active_test_resources_after_cleanup": final_remote,

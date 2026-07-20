@@ -776,7 +776,7 @@ Google calls = 0. Ordinary Task sync и recurring-master sync сохранили
 - [Settings](screenshots/occurrence_settings_phase3_2b3b.png);
 - [compact](screenshots/occurrence_compact_phase3_2b3b.png).
 
-### Фаза 3.2B3C1 — remote split «этот и будущие» (реализовано; fake-приёмка PASS)
+### Фаза 3.2B3C1 — remote split «этот и будущие» (реализовано; live-пилот PASS)
 
 - schema v11: durable таблица `calendar_series_remote_splits` — полный
   recoverable план разделения (canonical снапшоты original/trimmed/successor,
@@ -828,6 +828,25 @@ Google calls = 0. Ordinary Task sync и recurring-master sync сохранили
   automatic/background sync остаётся выключенным.
 
 Архитектура: [GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md](GOOGLE_SERIES_REMOTE_SPLIT_ARCHITECTURE.md).
+
+Контролируемый real-Google пилот **пройден 20 июля 2026 года** на личном
+аккаунте, в `primary`, только из изолированного соседнего профиля
+`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot` и
+после явного подтверждения пользователя. Будущий `COUNT=5` TEST-мастер
+разделён с третьего экземпляра (новое название, 11:30): ровно один
+full-resource update (COUNT=2) и один детерминированный insert
+преемника (COUNT=3); исходный мастер содержал ровно экземпляры 1–2,
+преемник — ровно 3–5; id различны; ordinary TEST-событий 0; повторный
+неизменённый sync — 0 записей; ETag race на свежей TEST-серии — durable
+conflict при 0 split-записей. Cleanup удалил все TEST-мастера: 0
+активных TEST-ресурсов, все очереди/планы пусты, restart-проверка
+чистая. Write-учёт: `master_insert=2, master_full_update=1,
+split_successor_insert=1, master_delete=3, master_patch=0, ordinary=0,
+occurrence=0`. Первый прогон остановился durable-конфликтом из-за
+неучтённой нормализации RRULE Google (echo отбрасывает `INTERVAL=1`);
+лишних записей не было, cleanup отработал; после добавления канонизации
+RRULE в сравнения содержимого полный повтор прошёл. Adoption не
+тестировался; отчёт обезличен.
 
 Fake-приёмка в `D:\Users\v.pyatakov\myspace\planner-desktop-remote-split-smoke` — **PASS**:
 COUNT=5 разделился ровно 2/3 одним `update` + одним `insert`, UNTIL-преемник

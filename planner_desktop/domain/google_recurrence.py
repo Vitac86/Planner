@@ -582,6 +582,28 @@ def _canonical_parsed_rrule(parsed: ParsedGoogleRule) -> str:
     return "RRULE:" + ";".join(f"{name}={value}" for name, value in properties)
 
 
+def canonicalize_rrule_line(line: str) -> str:
+    """Canonical serialization of one RRULE line for content comparison.
+
+    Google normalizes stored RRULEs (for example it drops ``INTERVAL=1``),
+    so byte-exact comparison of a written line against the returned one is
+    wrong.  Parsing and re-serializing both sides yields one canonical form
+    for the supported subset.  Non-RRULE, unparseable or unsupported lines
+    are returned unchanged — a failed canonicalization must degrade to a
+    mismatch, never to a silent success.
+    """
+    raw = str(line)
+    if not raw.upper().startswith("RRULE"):
+        return raw
+    parsed, reasons = _parse_rrule_line(raw)
+    if parsed is None or reasons:
+        return raw
+    try:
+        return _canonical_parsed_rrule(parsed)
+    except ValueError:
+        return raw
+
+
 def parse_google_recurrence(
     lines: Iterable[str],
     *,
@@ -786,6 +808,7 @@ __all__ = [
     "ParsedGoogleRule",
     "UnsupportedRecurrenceCode",
     "UnsupportedRecurrenceReason",
+    "canonicalize_rrule_line",
     "google_rrule_to_planner_rule",
     "parse_google_recurrence",
     "parse_recurrence_lines",

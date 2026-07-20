@@ -323,22 +323,26 @@ def split_resource_content_matches(
     resource: Mapping[str, Any], desired_payload: Mapping[str, Any]
 ) -> bool:
     """True only when the actual owned content of a raw master resource is
-    canonically identical to the desired split payload.  Two comparisons are
-    accepted: the exact canonical dict fingerprint and (for provider-side
-    dateTime normalisation) the parsed-event canonical hash.  Any failure
-    counts as a mismatch — a silent false success is never produced."""
-    from planner_desktop.domain.series_calendar_link import (
-        canonical_master_payload_fingerprint,
+    canonically identical to the desired split payload.  Both sides pass
+    through RRULE canonicalization (Google drops ``INTERVAL=1`` and similar
+    when echoing a stored master); a parsed-event comparison covers
+    provider-side dateTime re-serialization.  Any failure counts as a
+    mismatch — a silent false success is never produced."""
+    from planner_desktop.domain.google_series_split import (
+        master_content_fingerprint,
     )
 
     try:
-        desired_hash = canonical_master_payload_fingerprint(desired_payload)
-        if canonical_master_payload_fingerprint(resource) == desired_hash:
+        desired_hash = master_content_fingerprint(desired_payload)
+        if master_content_fingerprint(resource) == desired_hash:
             return True
     except (TypeError, ValueError):
         return False
     try:
-        return master_payload_hash(payload_to_event(dict(resource))) == desired_hash
+        event_payload = master_event_to_owned_payload(
+            payload_to_event(dict(resource))
+        )
+        return master_content_fingerprint(event_payload) == desired_hash
     except (TypeError, ValueError, KeyError):
         return False
 

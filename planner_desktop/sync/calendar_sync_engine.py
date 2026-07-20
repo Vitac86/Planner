@@ -500,12 +500,19 @@ class CalendarSyncEngine:
 
     @staticmethod
     def _pulled_master_hash(event: CalendarEvent) -> Optional[str]:
+        from planner_desktop.domain.google_series_split import (
+            master_content_fingerprint,
+        )
         from planner_desktop.sync.calendar_series_mapper import (
-            master_payload_hash,
+            master_event_to_owned_payload,
         )
 
         try:
-            return master_payload_hash(event)
+            # RRULE-normalized: an echo of our own write hashes equally even
+            # after Google canonicalizes the stored recurrence line.
+            return master_content_fingerprint(
+                master_event_to_owned_payload(event)
+            )
         except (TypeError, ValueError):
             return None
 
