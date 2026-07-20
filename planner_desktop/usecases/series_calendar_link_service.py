@@ -88,6 +88,23 @@ class SeriesCalendarLinkService:
         self.provider = provider
         self.calendar_id = calendar_id
         self._today = today_provider
+        # Phase 3.2B3C1: link mutations lock while a remote split is active.
+        self.remote_split_service = None
+
+    def _split_lock_error(self, series_uid: str) -> str:
+        service = self.remote_split_service
+        if service is None:
+            return ""
+        try:
+            active = service.has_active_split(series_uid)
+        except Exception:
+            return ""
+        if not active:
+            return ""
+        from planner_desktop.usecases.remote_series_split_service import (
+            SPLIT_ACTIVE_LINK_ERROR,
+        )
+        return SPLIT_ACTIVE_LINK_ERROR
 
     def validate_connection(self, series_uid: str) -> SeriesConnectValidationResult:
         issues: list[SeriesConnectValidationIssue] = []
@@ -246,6 +263,9 @@ class SeriesCalendarLinkService:
         return bool(series_uid and self.store.get_link(series_uid) is not None)
 
     def disconnect_keep_remote(self, series_uid: str) -> SeriesLinkActionResult:
+        lock_error = self._split_lock_error(series_uid)
+        if lock_error:
+            return SeriesLinkActionResult(ok=False, error=lock_error)
         changed = self.store.disconnect_keep_remote(series_uid)
         return SeriesLinkActionResult(
             ok=changed,
@@ -257,6 +277,9 @@ class SeriesCalendarLinkService:
     def request_remote_delete_keep_local(
         self, series_uid: str
     ) -> SeriesLinkActionResult:
+        lock_error = self._split_lock_error(series_uid)
+        if lock_error:
+            return SeriesLinkActionResult(ok=False, error=lock_error)
         outcome = self.store.enqueue_delete(series_uid)
         ok = outcome not in ("missing",)
         return SeriesLinkActionResult(
@@ -269,6 +292,9 @@ class SeriesCalendarLinkService:
     def request_delete_local_and_remote(
         self, series_uid: str
     ) -> SeriesLinkActionResult:
+        lock_error = self._split_lock_error(series_uid)
+        if lock_error:
+            return SeriesLinkActionResult(ok=False, error=lock_error)
         if self.series_repository.get_by_uid(series_uid) is None:
             return SeriesLinkActionResult(ok=False, error=SERIES_NOT_FOUND)
         outcome = self.store.enqueue_delete(

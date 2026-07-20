@@ -71,7 +71,7 @@ def test_v9_migrates_v8_links_and_queues_additively(tmp_path):
     create_schema(con)
     create_schema(con)  # idempotent
 
-    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 11
     links = _columns(con, "task_series_calendar_links")
     assert {
         "link_generation", "conflict_detected_at", "conflict_reason",

@@ -136,6 +136,9 @@ class RecurrenceService:
         # Phase 3.2B3B dedicated recurring-instance state/queue.  It remains
         # optional for in-memory Phase 3.2A tests.
         self.occurrence_sync_store = None
+        # Phase 3.2B3C1: while a remote split plan is active, series-level
+        # definition edits and target-and-future schedule operations lock.
+        self.remote_split_service = None
         #: Слушатели «серии изменились» (материализатор сбрасывает кэш).
         self._change_listeners: List[Callable[[], None]] = []
 
@@ -197,6 +200,9 @@ class RecurrenceService:
         series = self.series_repository.get_by_uid(uid)
         if series is None or series.is_deleted:
             return SeriesOperationResult(errors=[SERIES_NOT_FOUND_ERROR])
+        split_error = self._active_split_error(uid)
+        if split_error:
+            return SeriesOperationResult(errors=[split_error])
 
         schedule_changed = schedule is not None and schedule != series.schedule
         rule_changed = rule is not None and rule != series.rule
@@ -255,6 +261,9 @@ class RecurrenceService:
         series = self.series_repository.get_by_uid(uid)
         if series is None or series.is_deleted:
             return SeriesOperationResult(errors=[SERIES_NOT_FOUND_ERROR])
+        split_error = self._active_split_error(uid)
+        if split_error:
+            return SeriesOperationResult(errors=[split_error])
         boundary = from_date or date.today()
         stopped = series.with_end_before(boundary)
         if stopped.rule.until_date is not None and (
@@ -285,6 +294,9 @@ class RecurrenceService:
         series = self.series_repository.get_by_uid(uid)
         if series is None or series.is_deleted:
             return SeriesOperationResult(errors=[SERIES_NOT_FOUND_ERROR])
+        split_error = self._active_split_error(uid)
+        if split_error:
+            return SeriesOperationResult(errors=[split_error])
         if (
             self.series_link_service is not None
             and self.series_link_service.is_linked(uid)
@@ -453,6 +465,13 @@ class RecurrenceService:
             )
         ):
             return OccurrenceOperationResult(errors=[LINKED_OCCURRENCE_CHANGE_ERROR])
+        if self._occurrence_locked(task.series_uid, task.occurrence_key):
+            from planner_desktop.usecases.remote_series_split_service import (
+                SPLIT_ACTIVE_OCCURRENCE_ERROR,
+            )
+            return OccurrenceOperationResult(
+                errors=[SPLIT_ACTIVE_OCCURRENCE_ERROR]
+            )
         errors = validate_editor(command)
         if errors:
             return OccurrenceOperationResult(errors=errors)
@@ -717,6 +736,8 @@ class RecurrenceService:
         task = self.task_repository.get_by_uid(uid)
         if task is None or task.is_deleted or task.series_uid is None:
             return False
+        if self._occurrence_locked(task.series_uid, task.occurrence_key):
+            return False
         linked = bool(
             self.series_link_service is not None
             and self.series_link_service.is_linked(task.series_uid)
@@ -777,6 +798,35 @@ class RecurrenceService:
         }
 
     # ---- внутреннее ------------------------------------------------------------------------
+
+    def _active_split_error(self, series_uid: str) -> Optional[str]:
+        """Non-empty error while a remote split plan owns this series."""
+        service = self.remote_split_service
+        if service is None:
+            return None
+        try:
+            active = service.has_active_split(series_uid)
+        except Exception:
+            return None
+        if not active:
+            return None
+        from planner_desktop.usecases.remote_series_split_service import (
+            SPLIT_ACTIVE_SERIES_EDIT_ERROR,
+        )
+        return SPLIT_ACTIVE_SERIES_EDIT_ERROR
+
+    def _occurrence_locked(
+        self, series_uid: Optional[str], occurrence_key: Optional[str]
+    ) -> bool:
+        service = self.remote_split_service
+        if service is None or not series_uid:
+            return False
+        try:
+            return bool(
+                service.is_occurrence_locked(series_uid, occurrence_key)
+            )
+        except Exception:
+            return False
 
     @staticmethod
     def _validate(series: TaskSeries) -> List[str]:

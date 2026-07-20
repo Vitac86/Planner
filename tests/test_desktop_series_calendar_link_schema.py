@@ -33,7 +33,7 @@ def test_v8_is_additive_idempotent_and_preserves_v7_rows(tmp_path):
 
     # Phase 3.2B3A moved the version forward additively; the v8 families and
     # rows created above must still survive unchanged.
-    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 11
     assert con.execute("SELECT title FROM task_series WHERE uid='s1'").fetchone()[0] == "Local"
     row = con.execute(
         "SELECT remote_event_id, planner_owned, linked_series_uid "

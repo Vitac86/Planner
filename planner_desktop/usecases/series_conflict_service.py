@@ -86,6 +86,25 @@ class SeriesConflictService:
         self.task_repository = task_repository
         self.store = store
         self._today = today_provider
+        # Phase 3.2B3C1: while a remote split plan is active for the same
+        # master, explicit conflict resolution is blocked unless the split
+        # plan itself entered its conflict state first.
+        self.remote_split_service = None
+
+    def _split_block_error(self, series_uid: str) -> str:
+        service = self.remote_split_service
+        if service is None:
+            return ""
+        try:
+            allowed = service.allows_conflict_resolution(series_uid)
+        except Exception:
+            return ""
+        if allowed:
+            return ""
+        from planner_desktop.usecases.remote_series_split_service import (
+            SPLIT_CONFLICT_RESOLUTION_BLOCKED,
+        )
+        return SPLIT_CONFLICT_RESOLUTION_BLOCKED
 
     # ---- read-only conflict data for the UI ---------------------------------
 
@@ -216,6 +235,9 @@ class SeriesConflictService:
     def resolve_keep_planner(
         self, series_uid: str, *, confirmed: bool = False
     ) -> SeriesConflictActionResult:
+        block = self._split_block_error(series_uid)
+        if block:
+            return SeriesConflictActionResult(ok=False, error=block)
         proposal = self.propose_keep_planner(series_uid)
         if not proposal.ok:
             return SeriesConflictActionResult(
@@ -284,6 +306,9 @@ class SeriesConflictService:
     def resolve_use_google(
         self, series_uid: str, *, confirmed: bool = False
     ) -> SeriesConflictActionResult:
+        block = self._split_block_error(series_uid)
+        if block:
+            return SeriesConflictActionResult(ok=False, error=block)
         series = self.series_repository.get_by_uid(series_uid)
         link = self.store.get_link(series_uid)
         snapshot = link.conflict_remote_snapshot if link is not None else None
@@ -405,6 +430,9 @@ class SeriesConflictService:
     # ---- disconnect and remote-deleted recovery ------------------------------
 
     def resolve_disconnect(self, series_uid: str) -> SeriesConflictActionResult:
+        block = self._split_block_error(series_uid)
+        if block:
+            return SeriesConflictActionResult(ok=False, error=block)
         link = self.store.get_link(series_uid)
         validation = validate_disconnect(link=link)
         if not validation.ok:

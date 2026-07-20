@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -561,6 +561,76 @@ ON series_conflict_resolutions (status, id)
 """
 
 
+# Durable remote "this and future" split plans (Phase 3.2B3C1, schema v11).
+# One row is the complete recoverable state machine of one two-master split:
+# canonical source/trimmed/successor snapshots, acknowledged ETags and the
+# current state.  Completed/rolled-back plans remain queryable history; no
+# foreign keys cascade into Task or TaskSeries history.
+CREATE_CALENDAR_SERIES_REMOTE_SPLITS_TABLE = """
+CREATE TABLE IF NOT EXISTS calendar_series_remote_splits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_series_uid TEXT NOT NULL,
+    source_link_id INTEGER NOT NULL,
+    source_link_generation INTEGER NOT NULL DEFAULT 0,
+    source_remote_event_id TEXT NOT NULL,
+    target_occurrence_key TEXT NOT NULL,
+    target_original_start_kind TEXT NOT NULL
+        CHECK (target_original_start_kind IN ('date','datetime')),
+    target_original_start_value TEXT NOT NULL,
+    target_original_start_timezone TEXT,
+    source_local_revision INTEGER NOT NULL,
+    source_remote_etag_base TEXT NOT NULL,
+    source_original_snapshot_json TEXT NOT NULL,
+    source_original_payload_hash TEXT NOT NULL,
+    source_trimmed_payload_json TEXT NOT NULL,
+    source_trimmed_payload_hash TEXT NOT NULL,
+    reserved_successor_series_uid TEXT NOT NULL,
+    successor_remote_event_id TEXT NOT NULL,
+    successor_series_snapshot_json TEXT NOT NULL,
+    successor_payload_json TEXT NOT NULL,
+    successor_payload_hash TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN (
+        'pending','source_trimmed','successor_created',
+        'local_finalize_pending','completed','conflict','rollback_pending',
+        'successor_removed_for_rollback','rolled_back','terminal_error'
+    )),
+    source_trimmed_remote_etag TEXT,
+    successor_remote_etag TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+)
+"""
+
+# Exactly one live plan may own a source series at a time; completed,
+# rolled-back and dead-lettered plans do not block a new plan.
+CREATE_ACTIVE_REMOTE_SPLIT_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_splits_active_source
+ON calendar_series_remote_splits (source_series_uid)
+WHERE state IN (
+    'pending','source_trimmed','successor_created','local_finalize_pending',
+    'conflict','rollback_pending','successor_removed_for_rollback'
+)
+"""
+
+CREATE_REMOTE_SPLIT_SUCCESSOR_UID_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_splits_successor_uid
+ON calendar_series_remote_splits (reserved_successor_series_uid)
+"""
+
+CREATE_REMOTE_SPLIT_SUCCESSOR_REMOTE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_splits_successor_remote
+ON calendar_series_remote_splits (successor_remote_event_id)
+"""
+
+CREATE_REMOTE_SPLIT_STATE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_remote_splits_state
+ON calendar_series_remote_splits (state, updated_at)
+"""
+
+
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
@@ -739,5 +809,10 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_SERIES_CONFLICT_RESOLUTIONS_TABLE)
     connection.execute(CREATE_SERIES_CONFLICT_RESOLUTIONS_SERIES_INDEX)
     connection.execute(CREATE_SERIES_CONFLICT_RESOLUTIONS_STATUS_INDEX)
+    connection.execute(CREATE_CALENDAR_SERIES_REMOTE_SPLITS_TABLE)
+    connection.execute(CREATE_ACTIVE_REMOTE_SPLIT_INDEX)
+    connection.execute(CREATE_REMOTE_SPLIT_SUCCESSOR_UID_INDEX)
+    connection.execute(CREATE_REMOTE_SPLIT_SUCCESSOR_REMOTE_INDEX)
+    connection.execute(CREATE_REMOTE_SPLIT_STATE_INDEX)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

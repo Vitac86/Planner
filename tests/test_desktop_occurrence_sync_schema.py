@@ -28,7 +28,7 @@ def test_v10_is_additive_idempotent_and_reopens(tmp_path):
     create_schema(connection)
     create_schema(connection)
     assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION == 11
     tables = {
         row[0]
         for row in connection.execute(
