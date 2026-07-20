@@ -25,10 +25,16 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
+from zoneinfo import ZoneInfo
+
 from planner_desktop.domain.task import utc_now
 from planner_desktop.domain.series_calendar_link import (
     PLANNER_PAYLOAD_HASH_PROPERTY,
     PLANNER_SERIES_UID_PROPERTY,
+    canonical_master_payload_fingerprint,
+)
+from planner_desktop.sync.calendar_series_mapper import (
+    master_event_to_owned_payload,
 )
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CANCELLED,
@@ -50,6 +56,9 @@ class FakeCalendarGateway:
                  calendar_id: str = "primary") -> None:
         self._events: Dict[str, CalendarEvent] = {}
         self._instance_resources: Dict[str, Dict[str, Any]] = {}
+        # Unrelated provider fields of a master resource (attendees, location
+        # and similar) survive full-resource split writes verbatim.
+        self._master_extras: Dict[str, Dict[str, Any]] = {}
         self._change_log: List[str] = []  # id событий в порядке изменений
         self._next_id = 1
         self._base_time = base_time or utc_now()
@@ -270,6 +279,169 @@ class FakeCalendarGateway:
 
     def delete_recurring_master(self, remote_event_id: str) -> None:
         self.delete_event(remote_event_id)
+
+    # ---- full-resource master split contract (Phase 3.2B3C1) ---------------
+
+    _OWNED_RESOURCE_KEYS = (
+        "id", "etag", "status", "updated", "summary", "description",
+        "start", "end", "recurrence", "extendedProperties",
+    )
+
+    def _master_event_to_resource(self, event: CalendarEvent) -> Dict[str, Any]:
+        body = master_event_to_owned_payload(event)
+        body["id"] = event.id
+        body["etag"] = event.etag
+        body["status"] = event.status
+        body["updated"] = (
+            event.updated_at.isoformat() if event.updated_at is not None else None
+        )
+        body["extendedProperties"] = {
+            "private": dict(event.private_extended_properties)
+        }
+        for key, value in (self._master_extras.get(event.id or "") or {}).items():
+            body.setdefault(key, deepcopy(value))
+        return body
+
+    def _master_resource_to_event(self, raw: Mapping[str, Any]) -> CalendarEvent:
+        start_raw = raw.get("start") or {}
+        end_raw = raw.get("end") or {}
+        is_all_day = bool(start_raw.get("date"))
+        if is_all_day:
+            start: Any = date.fromisoformat(str(start_raw["date"]))
+            end: Any = (
+                date.fromisoformat(str(end_raw["date"]))
+                if end_raw.get("date") else start + timedelta(days=1)
+            )
+        else:
+            timezone_name = str(start_raw.get("timeZone") or "UTC")
+            zone = ZoneInfo(timezone_name)
+            start = datetime.fromisoformat(
+                str(start_raw["dateTime"]).replace("Z", "+00:00")
+            ).astimezone(zone).replace(tzinfo=None)
+            end = datetime.fromisoformat(
+                str(end_raw["dateTime"]).replace("Z", "+00:00")
+            ).astimezone(zone).replace(tzinfo=None)
+        return CalendarEvent(
+            id=str(raw.get("id") or ""),
+            etag=raw.get("etag"),
+            summary=str(raw.get("summary") or ""),
+            description=str(raw.get("description") or ""),
+            start=start,
+            end=end,
+            is_all_day=is_all_day,
+            status=str(raw.get("status") or "confirmed"),
+            recurrence_lines=tuple(
+                str(line) for line in (raw.get("recurrence") or ())
+            ),
+            start_timezone=start_raw.get("timeZone"),
+            end_timezone=end_raw.get("timeZone"),
+            recurrence_start=start,
+            private_extended_properties={
+                str(key): str(value) for key, value in (
+                    ((raw.get("extendedProperties") or {}).get("private") or {})
+                ).items()
+            },
+        )
+
+    def _store_master_extras(
+        self, remote_event_id: str, payload: Mapping[str, Any]
+    ) -> None:
+        extras = {
+            key: deepcopy(value)
+            for key, value in payload.items()
+            if key not in self._OWNED_RESOURCE_KEYS
+        }
+        if extras:
+            self._master_extras[remote_event_id] = extras
+
+    def get_recurring_master_resource(
+        self, remote_event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        event = self._events.get(remote_event_id)
+        if event is None or event.is_cancelled:
+            return None
+        return self._master_event_to_resource(event)
+
+    def update_recurring_master_full(
+        self,
+        remote_event_id: str,
+        complete_master_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]:
+        self.write_call_count += 1
+        self._maybe_fail()
+        current = self._events.get(remote_event_id)
+        if current is None or current.is_cancelled:
+            raise RemoteMasterConflictError("Связанный мастер удалён.")
+        desired_private = (
+            (complete_master_payload.get("extendedProperties") or {})
+            .get("private") or {}
+        )
+        desired_uid = str(desired_private.get(PLANNER_SERIES_UID_PROPERTY) or "")
+        actual_uid = current.private_extended_properties.get(
+            PLANNER_SERIES_UID_PROPERTY
+        )
+        if not actual_uid or actual_uid != desired_uid:
+            raise TerminalGatewayError(
+                f"Коллизия Google event id {remote_event_id}: чужой мастер."
+            )
+        if expected_etag and current.etag != expected_etag:
+            raise RemoteMasterConflictError(
+                "Мастер изменён вне Planner.",
+                self.get_recurring_master(remote_event_id),
+            )
+        updated = self._master_resource_to_event(complete_master_payload)
+        updated.id = remote_event_id
+        updated.etag = current.etag
+        updated.status = "confirmed"
+        self._bump_etag(updated)
+        updated.updated_at = self._tick()
+        self._events[remote_event_id] = updated
+        self._store_master_extras(remote_event_id, complete_master_payload)
+        self._record_change(updated)
+        return self._master_event_to_resource(updated)
+
+    def insert_split_successor_master(
+        self,
+        remote_event_id: str,
+        complete_master_payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        self.write_call_count += 1
+        self._maybe_fail()
+        existing = self._events.get(remote_event_id)
+        if existing is not None and not existing.is_cancelled:
+            desired_private = (
+                (complete_master_payload.get("extendedProperties") or {})
+                .get("private") or {}
+            )
+            desired_uid = str(
+                desired_private.get(PLANNER_SERIES_UID_PROPERTY) or ""
+            )
+            actual_uid = existing.private_extended_properties.get(
+                PLANNER_SERIES_UID_PROPERTY
+            )
+            if not actual_uid or actual_uid != desired_uid:
+                raise TerminalGatewayError(
+                    f"Коллизия Google event id {remote_event_id}: чужое событие."
+                )
+            resource = self._master_event_to_resource(existing)
+            if canonical_master_payload_fingerprint(resource) == (
+                canonical_master_payload_fingerprint(complete_master_payload)
+            ):
+                return resource
+            raise RemoteMasterConflictError(
+                "Мастер-преемник уже существует, но отличается.",
+                self.get_recurring_master(remote_event_id),
+            )
+        stored = self._master_resource_to_event(complete_master_payload)
+        stored.id = remote_event_id
+        stored.etag = '"1"'
+        stored.status = "confirmed"
+        stored.updated_at = self._tick()
+        self._events[remote_event_id] = stored
+        self._store_master_extras(remote_event_id, complete_master_payload)
+        self._record_change(stored)
+        return self._master_event_to_resource(stored)
 
     # ---- explicit recurring-instance contract ----------------------------
 

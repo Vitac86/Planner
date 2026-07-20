@@ -319,6 +319,30 @@ def _master_content_matches(current: CalendarEvent, desired_hash: str) -> bool:
         return False
 
 
+def split_resource_content_matches(
+    resource: Mapping[str, Any], desired_payload: Mapping[str, Any]
+) -> bool:
+    """True only when the actual owned content of a raw master resource is
+    canonically identical to the desired split payload.  Two comparisons are
+    accepted: the exact canonical dict fingerprint and (for provider-side
+    dateTime normalisation) the parsed-event canonical hash.  Any failure
+    counts as a mismatch — a silent false success is never produced."""
+    from planner_desktop.domain.series_calendar_link import (
+        canonical_master_payload_fingerprint,
+    )
+
+    try:
+        desired_hash = canonical_master_payload_fingerprint(desired_payload)
+        if canonical_master_payload_fingerprint(resource) == desired_hash:
+            return True
+    except (TypeError, ValueError):
+        return False
+    try:
+        return master_payload_hash(payload_to_event(dict(resource))) == desired_hash
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
 # ---- сам шлюз -----------------------------------------------------------------------
 
 class GoogleCalendarGateway:
@@ -510,6 +534,115 @@ class GoogleCalendarGateway:
                 exc, f"patch_recurring_master {remote_event_id}"
             ) from exc
         return payload_to_event(item)
+
+    # ---- full-resource master split operations (Phase 3.2B3C1) --------------
+
+    def get_recurring_master_resource(
+        self, remote_event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Complete raw master resource, or None when absent/cancelled."""
+        try:
+            item = self._service.events().get(
+                calendarId=self._calendar_id, eventId=remote_event_id,
+            ).execute()
+        except Exception as exc:
+            if _http_status(exc) in (404, 410):
+                return None
+            raise _classify(
+                exc, f"get_recurring_master_resource {remote_event_id}"
+            ) from exc
+        if str(item.get("status") or "") == "cancelled":
+            return None
+        return dict(item)
+
+    def update_recurring_master_full(
+        self,
+        remote_event_id: str,
+        complete_master_payload: Mapping[str, Any],
+        expected_etag: Optional[str],
+    ) -> Dict[str, Any]:
+        """One conditional full events.update of a recurring master.
+
+        The caller supplies the COMPLETE merged resource (unrelated Google
+        fields preserved).  A failed precondition never overwrites: 409/412
+        surface as RemoteMasterConflictError with the fresh remote snapshot.
+        """
+        body = dict(complete_master_payload)
+        body.pop("etag", None)
+        try:
+            request = self._service.events().update(
+                calendarId=self._calendar_id,
+                eventId=remote_event_id,
+                body=body,
+            )
+            headers = getattr(request, "headers", None)
+            if expected_etag and isinstance(headers, dict):
+                headers["If-Match"] = expected_etag
+            item = request.execute()
+        except Exception as exc:
+            if _http_status(exc) in (409, 412):
+                raise RemoteMasterConflictError(
+                    "Google отклонил условное полное обновление мастера.",
+                    self.get_recurring_master(remote_event_id),
+                ) from exc
+            raise _classify(
+                exc, f"update_recurring_master_full {remote_event_id}"
+            ) from exc
+        return dict(item)
+
+    def insert_split_successor_master(
+        self,
+        remote_event_id: str,
+        complete_master_payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Insert exactly one deterministic split successor master.
+
+        Idempotent retry: an id collision fetches the existing resource and
+        succeeds only when Planner ownership markers AND the actual canonical
+        content both match the desired payload.  A foreign collision is
+        terminal; stale markers without matching content are a conflict.
+        There is no random-id fallback.
+        """
+        body = dict(complete_master_payload)
+        body["id"] = remote_event_id
+        try:
+            item = self._service.events().insert(
+                calendarId=self._calendar_id, body=body,
+            ).execute()
+            return dict(item)
+        except Exception as exc:
+            if _http_status(exc) != 409:
+                raise _classify(
+                    exc, f"insert_split_successor_master {remote_event_id}"
+                ) from exc
+
+        existing = self.get_recurring_master_resource(remote_event_id)
+        if existing is None:
+            raise TerminalGatewayError(
+                f"Google сообщил коллизию id {remote_event_id}, "
+                "но мастер-преемник не найден."
+            )
+        desired_private = (
+            (complete_master_payload.get("extendedProperties") or {})
+            .get("private") or {}
+        )
+        actual_private = (
+            (existing.get("extendedProperties") or {}).get("private") or {}
+        )
+        desired_uid = str(desired_private.get(PLANNER_SERIES_UID_PROPERTY) or "")
+        actual_uid = str(actual_private.get(PLANNER_SERIES_UID_PROPERTY) or "")
+        if not actual_uid or actual_uid != desired_uid:
+            raise TerminalGatewayError(
+                f"Коллизия Google event id {remote_event_id}: "
+                "существующее событие принадлежит не этой серии."
+            )
+        if split_resource_content_matches(existing, complete_master_payload):
+            return existing
+        raise RemoteMasterConflictError(
+            "Мастер-преемник с детерминированным id уже существует, "
+            "но его фактическое содержимое отличается.",
+            payload_to_event(existing),
+        )
 
     def delete_recurring_master(self, remote_event_id: str) -> None:
         # Same idempotent HTTP semantics as ordinary delete, but a separate
@@ -751,5 +884,6 @@ __all__ = [
     "recurrence_to_google_lines",
     "recurring_master_patch_to_body",
     "recurring_master_to_insert_body",
+    "split_resource_content_matches",
     "times_to_body",
 ]
