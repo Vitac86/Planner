@@ -51,6 +51,19 @@ def _row_to_series(row: sqlite3.Row) -> ExternalCalendarSeries:
         planner_owned=bool(row["planner_owned"]),
         linked_series_uid=row["linked_series_uid"],
         planner_payload_hash=row["planner_payload_hash"],
+        raw_snapshot_json=row["raw_snapshot_json"],
+        private_properties_json=row["private_properties_json"] or "{}",
+        calendar_access_role=row["calendar_access_role"] or "",
+        organizer_self=(
+            None if row["organizer_self"] is None else bool(row["organizer_self"])
+        ),
+        event_type=row["event_type"] or "default",
+        locked=bool(row["locked"]),
+        exception_count=int(row["exception_count"] or 0),
+        exception_dates_json=row["exception_dates_json"] or "[]",
+        duration_minutes=row["duration_minutes"],
+        adopted_series_uid=row["adopted_series_uid"],
+        adoption_state=row["adoption_state"],
     )
 
 
@@ -85,6 +98,17 @@ class SQLiteExternalSeriesRepository:
             _dt_to_text(series.first_seen_at), _dt_to_text(series.last_seen_at),
             _dt_to_text(series.deleted_at), int(series.planner_owned),
             series.linked_series_uid, series.planner_payload_hash,
+            series.raw_snapshot_json,
+            series.private_properties_json or "{}",
+            series.calendar_access_role or "",
+            None if series.organizer_self is None else int(series.organizer_self),
+            series.event_type or "default",
+            int(series.locked),
+            int(series.exception_count),
+            series.exception_dates_json or "[]",
+            series.duration_minutes,
+            series.adopted_series_uid,
+            series.adoption_state,
         )
 
     def upsert(self, series: ExternalCalendarSeries) -> ExternalCalendarSeries:
@@ -96,8 +120,12 @@ class SQLiteExternalSeriesRepository:
                 recurrence_lines_json, parsed_rule_json, support_status,
                 unsupported_reason, remote_status, remote_updated_at,
                 first_seen_at, last_seen_at, deleted_at, planner_owned,
-                linked_series_uid, planner_payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                linked_series_uid, planner_payload_hash, raw_snapshot_json,
+                private_properties_json, calendar_access_role, organizer_self,
+                event_type, locked, exception_count, exception_dates_json,
+                duration_minutes, adopted_series_uid, adoption_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(provider, calendar_id, remote_event_id) DO UPDATE SET
                 etag = excluded.etag,
                 title = excluded.title,
@@ -116,7 +144,18 @@ class SQLiteExternalSeriesRepository:
                 deleted_at = excluded.deleted_at,
                 planner_owned = excluded.planner_owned,
                 linked_series_uid = excluded.linked_series_uid,
-                planner_payload_hash = excluded.planner_payload_hash
+                planner_payload_hash = excluded.planner_payload_hash,
+                raw_snapshot_json = excluded.raw_snapshot_json,
+                private_properties_json = excluded.private_properties_json,
+                calendar_access_role = excluded.calendar_access_role,
+                organizer_self = excluded.organizer_self,
+                event_type = excluded.event_type,
+                locked = excluded.locked,
+                exception_count = excluded.exception_count,
+                exception_dates_json = excluded.exception_dates_json,
+                duration_minutes = excluded.duration_minutes,
+                adopted_series_uid = excluded.adopted_series_uid,
+                adoption_state = excluded.adoption_state
             """,
             self._params(series),
         )

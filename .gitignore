@@ -1,40 +1,86 @@
-# Byte-compiled / cache
+# --- Python bytecode / caches ------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 
-# Environments
-.env
+# --- Test / lint / type-check caches ------------------------------------------
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# --- Coverage -----------------------------------------------------------------
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Virtual environments -----------------------------------------------------
 .venv/
 venv/
+env/
+ENV/
 
-# Editors/IDE
-.idea/
-.vscode/
-*.iml
-
-# Build artifacts
+# --- Build / packaging output -------------------------------------------------
 build/
 dist/
 *.egg-info/
+*.whl
+*.spec
 
-# Logs
-*.log
+# --- Editors / IDE ------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
 
-# OS junk
+# --- OS junk ------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+desktop.ini
+*.lnk
 
-# Project data (ignore by default)
-data/*.db
+# --- Logs and temporary files -------------------------------------------------
+logs/
+*.log
+*.tmp
+*.bak
+*.old
+*.orig
+*.rej
+
+# --- Local databases and runtime state ----------------------------------------
+# Real application data lives outside the repo (see README), but development
+# and smoke profiles are sometimes pointed at the working tree.
+*.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
-*.tsv
-*.csv
-*.tmp
 
-# Secrets and runtime state
-secrets/*
+# --- Secrets and OAuth state --------------------------------------------------
+# Never commit these. See the README security section.
+.env
+.env.*
+!.env.example
+secrets/
+client_secret*.json
+!client_secret.example.json
 token.json
-*.db
-storage/*.json
+*_token.json
+gcal_sync_token.json
+credentials.json
+*.pem
+*.key
+
+# --- Local agent / tool scratch -----------------------------------------------
+# Narrow on purpose: a shared .claude/settings.json stays committable.
+.claude/settings.local.json
+.claude/scheduled_tasks.json
+.codex/
+.agents/

@@ -24,20 +24,21 @@ pull ручного синка создаёт локальные задачи и
 | OAuth-токен | `<PlannerDesktop>/token.json` |
 | OAuth-секрет приложения | `<PlannerDesktop>/secrets/client_secret.json` |
 
-Профиль старого Flet-приложения (`<Planner>/app.db`, `<Planner>/token.json`)
-**никогда не читается, не пишется и не копируется автоматически**.
+Профиль удалённого legacy-приложения (`<Planner>/app.db`,
+`<Planner>/token.json`) **никогда не читается, не пишется и не копируется
+автоматически**.
 Скоупы нового десктопа — только `calendar` (Google Tasks не используется).
 
 ## Первое подключение
 
 1. Возьмите OAuth-клиент типа «Desktop app» в Google Cloud Console
-   (можно тот же client_secret, что у старого приложения, — это
-   идентификатор ПРИЛОЖЕНИЯ, аккаунт выбирается при входе) и положите
-   файл в `<PlannerDesktop>/secrets/client_secret.json`.
+   (client_secret — идентификатор ПРИЛОЖЕНИЯ, конкретный аккаунт
+   выбирается при входе) и положите файл в
+   `<PlannerDesktop>/secrets/client_secret.json`.
 2. Запустите десктоп на отдельном тестовом профиле:
 
    ```powershell
-   $env:PLANNER_DESKTOP_DATA_DIR = "D:\Users\v.pyatakov\myspace\planner-desktop-pilot"
+   $env:PLANNER_DESKTOP_DATA_DIR = "C:\planner-profiles\pilot"
    python run_desktop.py
    ```
 
@@ -158,10 +159,11 @@ sync нет.
 
 Контролируемый B3B live-пилот выполнен 17 июля 2026 года только после явного
 подтверждения, на личном аккаунте и `primary`, из соседнего изолированного
-профиля `D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot`.
+профиля `<live-pilot profile>`.
 Пилотный runner — `planner_desktop/scripts/run_phase3_2b3b_live_pilot.py`;
 обычный запуск без `PLANNER_DESKTOP_DATA_DIR` или с другим профилем
-отклоняется. Итог: один finite `COUNT=3` TEST-master, ETag race защищён, Use
+отклоняется (см. «Операционные скрипты» ниже). Итог: один finite `COUNT=3`
+TEST-master, ETag race защищён, Use
 Google и принятие remote cancellation дали нулевой write delta, master не
 изменялся occurrence-операциями, ordinary writes/flood равны нулю. Cleanup и
 restart-проверка подтвердили 0 active TEST masters/instances/ordinary events,
@@ -169,8 +171,36 @@ restart-проверка подтвердили 0 active TEST masters/instances/
 OAuth secrets, remote IDs и payloads runner не печатает и в отчёт не пишет.
 
 Fake-smoke B3B использует только
-`D:\Users\v.pyatakov\myspace\planner-desktop-occurrence-sync-smoke` и
+`<occurrence-sync smoke profile>` и
 `FakeCalendarGateway`: один instance update, одна cancellation, неизменный
 master, нулевой flood ordinary occurrence events, restart persistence и
 `qml_warnings=0`. Он остаётся отдельной детерминированной проверкой, а
 real-Google результат зафиксирован выше.
+
+## Операционные скрипты
+
+Все скрипты в `planner_desktop/scripts/` — воспроизводимая приёмочная
+оснастка, а не часть обычного запуска приложения. Ни один из них не
+вызывается самим Planner-ом.
+
+| Скрипт | Назначение | Сеть |
+|---|---|---|
+| `seed_phase*_smoke.py` | наполняет **изолированный** профиль детерминированными данными для визуального smoke | нет (`FakeCalendarGateway`) |
+| `capture_phase*_smoke.py` | снимает screenshots в `docs/screenshots/` после соответствующего `seed_*` | нет |
+| `run_phase3_2b3b_live_pilot.py` | контролируемый live-пилот occurrence-writes (Phase 3.2B3B) | **да, реальный Google** |
+| `run_phase3_2b3c1_live_pilot.py` | контролируемый live-пилот remote split (Phase 3.2B3C1) | **да, реальный Google** |
+
+Оба live-пилота защищены двухключевым guard-ом и **не запустятся**, пока
+обе переменные не указывают на один и тот же существующий изолированный
+каталог:
+
+```powershell
+$env:PLANNER_DESKTOP_DATA_DIR = "C:\planner-profiles\live-pilot"
+$env:PLANNER_LIVE_PILOT_PROFILE = "C:\planner-profiles\live-pilot"
+python -m planner_desktop.scripts.run_phase3_2b3b_live_pilot --preflight-only
+```
+
+Личных путей в репозитории нет: профиль каждый раз задаёт оператор.
+Runner-ы не печатают и не сохраняют account identity, токены, OAuth-секреты,
+remote IDs и payloads. Запускайте только на **тестовом** аккаунте, если у вас
+нет явной причины поступить иначе.

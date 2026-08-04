@@ -150,6 +150,12 @@ class SeriesCalendarLink:
     conflict_remote_snapshot_json: Optional[str] = None
     resolved_at: Optional[datetime] = None
     resolution_kind: Optional[str] = None
+    # Phase 3.2B3C2 provenance.  Existing rows are additively backfilled as
+    # Planner-created deterministic links.
+    link_origin: str = "planner_created"
+    remote_id_strategy: str = "planner_deterministic"
+    adoption_id: Optional[int] = None
+    ownership_claimed_at: Optional[datetime] = None
     id: Optional[int] = None
 
     @property

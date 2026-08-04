@@ -1340,12 +1340,6 @@ ScrollView {
         }
 
         SettingRow {
-            name: "Движок по умолчанию"
-            value: "legacy — старое Flet-приложение (main.py) остаётся основным и не изменялось"
-            iconName: "settings"
-        }
-
-        SettingRow {
             name: "Мобильная версия"
             value: "приложение Google Calendar на телефоне (двусторонняя синхронизация — в будущих фазах)"
             iconName: "calendar"

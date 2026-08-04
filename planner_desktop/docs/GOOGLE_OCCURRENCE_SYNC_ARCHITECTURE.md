@@ -209,7 +209,7 @@ Still deferred (Phase 3.2B3C2):
 
 The explicitly confirmed pilot passed on 17 July 2026 against the personal
 account's `primary` selector, using only the isolated sibling profile
-`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot`. It
+`<live-pilot profile>`. It
 created one future `COUNT=3`, Europe/Moscow, 15-minute TEST master with no
 guests or sensitive notes. The second occurrence was moved and retitled, a
 remote conflict and a second-edit ETag race were exercised, Keep Planner was

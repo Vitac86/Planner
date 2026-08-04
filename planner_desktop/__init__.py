@@ -1,6 +1,7 @@
-"""Экспериментальный греенфилд-десктоп Planner на PySide6 + Qt Quick/QML.
+"""Десктопное приложение Planner на PySide6 + Qt Quick/QML.
 
-Живёт рядом со старым Flet-приложением (main.py) и никак его не трогает:
-ни БД, ни синхронизацию, ни OAuth. Запуск — только через run_desktop.py.
-Данные в этом скелете — фейковые, in-memory (см. repositories/).
+Единственная поддерживаемая реализация Planner. Запуск — через
+run_desktop.py в корне репозитория (или start_planner.bat на Windows).
+Собственный профиль данных, собственный OAuth-токен, ручная
+синхронизация с Google Calendar; см. docs/ARCHITECTURE.md.
 """

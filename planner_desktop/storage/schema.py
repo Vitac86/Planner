@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # "end" — зарезервированное слово SQL, поэтому в кавычках.
 CREATE_TASKS_TABLE = """
@@ -284,6 +284,17 @@ CREATE TABLE IF NOT EXISTS external_calendar_series (
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     deleted_at TEXT,
+    raw_snapshot_json TEXT,
+    private_properties_json TEXT NOT NULL DEFAULT '{}',
+    calendar_access_role TEXT NOT NULL DEFAULT '',
+    organizer_self INTEGER,
+    event_type TEXT NOT NULL DEFAULT 'default',
+    locked INTEGER NOT NULL DEFAULT 0,
+    exception_count INTEGER NOT NULL DEFAULT 0,
+    exception_dates_json TEXT NOT NULL DEFAULT '[]',
+    duration_minutes INTEGER,
+    adopted_series_uid TEXT,
+    adoption_state TEXT,
     UNIQUE (provider, calendar_id, remote_event_id)
 )
 """
@@ -336,7 +347,11 @@ CREATE TABLE IF NOT EXISTS task_series_calendar_links (
     conflict_remote_payload_hash TEXT,
     conflict_remote_snapshot_json TEXT,
     resolved_at TEXT,
-    resolution_kind TEXT
+    resolution_kind TEXT,
+    link_origin TEXT NOT NULL DEFAULT 'planner_created',
+    remote_id_strategy TEXT NOT NULL DEFAULT 'planner_deterministic',
+    adoption_id INTEGER,
+    ownership_claimed_at TEXT
 )
 """
 
@@ -631,6 +646,64 @@ ON calendar_series_remote_splits (state, updated_at)
 """
 
 
+# Explicit adoption of one clean external Google recurring master into one new
+# local TaskSeries (Phase 3.2B3C2, schema v12).  The row is the durable boundary
+# between a marker-only remote claim and atomic local finalization.  Historical
+# completed, released and rolled-back rows are retained without cascading into
+# Task/TaskSeries history.
+CREATE_CALENDAR_SERIES_ADOPTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS calendar_series_adoptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    calendar_id TEXT NOT NULL,
+    remote_event_id TEXT NOT NULL,
+    external_catalog_id INTEGER,
+    reserved_series_uid TEXT NOT NULL UNIQUE,
+    remote_etag_base TEXT NOT NULL,
+    remote_snapshot_json TEXT NOT NULL,
+    canonical_remote_payload_hash TEXT NOT NULL,
+    preexisting_private_properties_json TEXT NOT NULL DEFAULT '{}',
+    claimed_private_properties_json TEXT,
+    claimed_remote_etag TEXT,
+    local_link_id INTEGER,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN (
+        'pending','remote_claimed','local_finalize_pending','completed',
+        'conflict','remote_deleted','rollback_pending','rolled_back',
+        'release_pending','release_conflict','released','terminal_error'
+    )),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    conflict_snapshot_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    rolled_back_at TEXT,
+    release_requested_at TEXT,
+    released_at TEXT
+)
+"""
+
+CREATE_ACTIVE_SERIES_ADOPTION_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_series_adoptions_active_remote
+ON calendar_series_adoptions (provider, calendar_id, remote_event_id)
+WHERE state IN (
+    'pending','remote_claimed','local_finalize_pending','conflict',
+    'rollback_pending','release_pending','release_conflict'
+)
+"""
+
+CREATE_COMPLETED_SERIES_ADOPTION_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_series_adoptions_completed_remote
+ON calendar_series_adoptions (provider, calendar_id, remote_event_id)
+WHERE state IN ('completed','release_pending','release_conflict')
+"""
+
+CREATE_SERIES_ADOPTION_STATE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_series_adoptions_state
+ON calendar_series_adoptions (state, updated_at)
+"""
+
+
 def _column_names(connection: sqlite3.Connection, table: str) -> set:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
@@ -752,6 +825,52 @@ def _migrate_external_series_link_columns(connection: sqlite3.Connection) -> Non
         )
 
 
+def _migrate_series_adoption_columns(connection: sqlite3.Connection) -> None:
+    """Additive v11 -> v12 catalog/link provenance and preflight data."""
+    external = _column_names(connection, "external_calendar_series")
+    external_additions = (
+        ("raw_snapshot_json", "TEXT"),
+        ("private_properties_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("calendar_access_role", "TEXT NOT NULL DEFAULT ''"),
+        ("organizer_self", "INTEGER"),
+        ("event_type", "TEXT NOT NULL DEFAULT 'default'"),
+        ("locked", "INTEGER NOT NULL DEFAULT 0"),
+        ("exception_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("exception_dates_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("duration_minutes", "INTEGER"),
+        ("adopted_series_uid", "TEXT"),
+        ("adoption_state", "TEXT"),
+    )
+    for name, declaration in external_additions:
+        if name not in external:
+            connection.execute(
+                f"ALTER TABLE external_calendar_series ADD COLUMN {name} {declaration}"
+            )
+
+    links = _column_names(connection, "task_series_calendar_links")
+    link_additions = (
+        ("link_origin", "TEXT NOT NULL DEFAULT 'planner_created'"),
+        (
+            "remote_id_strategy",
+            "TEXT NOT NULL DEFAULT 'planner_deterministic'",
+        ),
+        ("adoption_id", "INTEGER"),
+        ("ownership_claimed_at", "TEXT"),
+    )
+    for name, declaration in link_additions:
+        if name not in links:
+            connection.execute(
+                f"ALTER TABLE task_series_calendar_links ADD COLUMN {name} {declaration}"
+            )
+    if links:
+        connection.execute(
+            "UPDATE task_series_calendar_links SET "
+            "link_origin = COALESCE(NULLIF(link_origin, ''), 'planner_created'), "
+            "remote_id_strategy = COALESCE(NULLIF(remote_id_strategy, ''), "
+            "'planner_deterministic')"
+        )
+
+
 def create_schema(connection: sqlite3.Connection) -> None:
     """Создаёт таблицы, если их ещё нет (безопасно вызывать повторно).
 
@@ -789,6 +908,7 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_EXTERNAL_SERIES_STATUS_INDEX)
     connection.execute(CREATE_EXTERNAL_SERIES_LAST_SEEN_INDEX)
     connection.execute(CREATE_TASK_SERIES_CALENDAR_LINKS_TABLE)
+    _migrate_series_adoption_columns(connection)
     connection.execute(CREATE_ACTIVE_SERIES_LINK_INDEX)
     connection.execute(CREATE_ACTIVE_REMOTE_LINK_INDEX)
     connection.execute(CREATE_SERIES_LINK_STATUS_INDEX)
@@ -814,5 +934,9 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_REMOTE_SPLIT_SUCCESSOR_UID_INDEX)
     connection.execute(CREATE_REMOTE_SPLIT_SUCCESSOR_REMOTE_INDEX)
     connection.execute(CREATE_REMOTE_SPLIT_STATE_INDEX)
+    connection.execute(CREATE_CALENDAR_SERIES_ADOPTIONS_TABLE)
+    connection.execute(CREATE_ACTIVE_SERIES_ADOPTION_INDEX)
+    connection.execute(CREATE_COMPLETED_SERIES_ADOPTION_INDEX)
+    connection.execute(CREATE_SERIES_ADOPTION_STATE_INDEX)
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

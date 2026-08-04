@@ -61,7 +61,7 @@ Rectangle {
                     color: Theme.textPrimary
                 }
                 Label {
-                    text: "экспериментальная версия"
+                    text: "PySide6 / QML"
                     font.pixelSize: 11
                     font.family: Theme.fontFamily
                     color: Theme.textMuted

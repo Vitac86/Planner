@@ -469,7 +469,11 @@ FORBIDDEN_OLD_APP_IMPORT = re.compile(
 
 
 def test_desktop_sync_packages_import_no_google_and_no_old_app():
-    """Ни Google-клиентов/OAuth, ни модулей старого Flet-приложения.
+    """Ни Google-клиентов/OAuth, ни модулей удалённого legacy-приложения.
+
+    Имена `models`/`services`/`storage`/`core`/`ui`/`main` в регулярке —
+    это удалённые top-level пакеты; проверка остаётся защитой от их
+    случайного возврата.
 
     Исключение: sync/google_auth.py — назначенный адаптер OAuth; ему
     разрешены google-импорты, но только ленивые (внутри функций), чтобы

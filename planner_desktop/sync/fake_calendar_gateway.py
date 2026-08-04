@@ -33,6 +33,12 @@ from planner_desktop.domain.series_calendar_link import (
     PLANNER_SERIES_UID_PROPERTY,
     canonical_master_payload_fingerprint,
 )
+from planner_desktop.domain.series_adoption import (
+    ADOPTED_EXTERNAL_ORIGIN,
+    PLANNER_ADOPTION_ID_PROPERTY,
+    PLANNER_LINK_ORIGIN_PROPERTY,
+    PLANNER_OWNERSHIP_PROPERTIES,
+)
 from planner_desktop.sync.calendar_series_mapper import (
     master_event_to_owned_payload,
 )
@@ -53,7 +59,8 @@ class FakeCalendarGateway:
     """Календарь в памяти процесса. Никакой сети, никаких Google-импортов."""
 
     def __init__(self, base_time: Optional[datetime] = None,
-                 calendar_id: str = "primary") -> None:
+                 calendar_id: str = "primary",
+                 calendar_access_role: str = "owner") -> None:
         self._events: Dict[str, CalendarEvent] = {}
         self._instance_resources: Dict[str, Dict[str, Any]] = {}
         # Unrelated provider fields of a master resource (attendees, location
@@ -65,8 +72,11 @@ class FakeCalendarGateway:
         self._ticks = 0
         self._pending_errors: List[Exception] = []
         self._calendar_id = calendar_id
+        self._calendar_access_role = calendar_access_role
         self.list_call_count = 0
         self.write_call_count = 0
+        self.claim_call_count = 0
+        self.release_call_count = 0
 
     @property
     def calendar_id(self) -> str:
@@ -75,6 +85,8 @@ class FakeCalendarGateway:
     def reset_call_counts(self) -> None:
         self.list_call_count = 0
         self.write_call_count = 0
+        self.claim_call_count = 0
+        self.release_call_count = 0
 
     # ---- управление фейком из тестов ------------------------------------------
 
@@ -94,7 +106,36 @@ class FakeCalendarGateway:
         return replace(
             event,
             private_extended_properties=dict(event.private_extended_properties),
+            raw_payload=self._master_event_to_resource(event),
         )
+
+    def seed_external_recurring_master(
+        self,
+        event: CalendarEvent,
+        *,
+        extras: Optional[Mapping[str, Any]] = None,
+    ) -> CalendarEvent:
+        """Seed an organizer-owned external master without Planner markers."""
+        stored = replace(
+            event,
+            private_extended_properties=dict(event.private_extended_properties),
+        )
+        if not stored.id:
+            stored.id = f"external-{self._next_id}"
+            self._next_id += 1
+        stored.etag = stored.etag or '"1"'
+        stored.updated_at = stored.updated_at or self._tick()
+        self._events[stored.id] = stored
+        merged_extras = {
+            "eventType": "default",
+            "organizer": {"self": True},
+            "locked": False,
+        }
+        merged_extras.update(dict(extras or {}))
+        self._master_extras[stored.id] = deepcopy(merged_extras)
+        stored.raw_payload = self._master_event_to_resource(stored)
+        self._record_change(stored)
+        return self.get_recurring_master(stored.id)
 
     @property
     def events(self) -> List[CalendarEvent]:
@@ -171,6 +212,109 @@ class FakeCalendarGateway:
         self._record_change(event)
 
     # ---- explicit recurring-master contract ---------------------------------
+
+    def get_calendar_access(self, calendar_id: str) -> Dict[str, Any]:
+        self.list_call_count += 1
+        if str(calendar_id) != self._calendar_id:
+            raise TerminalGatewayError("Calendar identity changed.")
+        return {
+            "calendar_id": self._calendar_id,
+            "access_role": self._calendar_access_role,
+            "primary": self._calendar_id == "primary",
+        }
+
+    def claim_external_recurring_master(
+        self,
+        remote_event_id: str,
+        merged_private_properties: Mapping[str, str],
+        expected_etag: Optional[str],
+    ) -> CalendarEvent:
+        self.claim_call_count += 1
+        access = self.get_calendar_access(self._calendar_id)
+        if access.get("access_role") not in ("writer", "owner"):
+            raise TerminalGatewayError("Writer or owner access is required.")
+        current_resource = self.get_recurring_master_resource(remote_event_id)
+        if current_resource is None:
+            raise RemoteMasterConflictError("External master was deleted.")
+        current = self._events[remote_event_id]
+        if expected_etag and current.etag != expected_etag:
+            raise RemoteMasterConflictError(
+                "External master changed.", self.get_recurring_master(remote_event_id)
+            )
+        if current.status != "confirmed":
+            raise RemoteMasterConflictError("External master is not active.")
+        if any(
+            key in current.private_extended_properties
+            for key in PLANNER_OWNERSHIP_PROPERTIES
+        ):
+            raise TerminalGatewayError("Foreign Planner ownership exists.")
+        extras = self._master_extras.get(remote_event_id, {})
+        if str(extras.get("eventType") or "default") != "default":
+            raise TerminalGatewayError("Unsupported eventType.")
+        if bool(extras.get("locked")):
+            raise TerminalGatewayError("Master is locked.")
+        if not bool((extras.get("organizer") or {}).get("self")):
+            raise TerminalGatewayError("Organizer is not self.")
+        if extras.get("attendees"):
+            raise TerminalGatewayError("Attendee-bearing master.")
+        if extras.get("conferenceData") or extras.get("hangoutLink"):
+            raise TerminalGatewayError("Conference-bearing master.")
+        desired = dict(current.private_extended_properties)
+        desired.update(
+            {str(key): str(value) for key, value in merged_private_properties.items()}
+        )
+        self.write_call_count += 1
+        self._maybe_fail()
+        current.private_extended_properties = desired
+        self._bump_etag(current)
+        current.updated_at = self._tick()
+        current.raw_payload = self._master_event_to_resource(current)
+        self._record_change(current)
+        return self.get_recurring_master(remote_event_id)
+
+    def release_adopted_recurring_master(
+        self,
+        remote_event_id: str,
+        restored_private_properties: Mapping[str, str],
+        expected_etag: Optional[str],
+    ) -> CalendarEvent:
+        self.release_call_count += 1
+        current = self._events.get(remote_event_id)
+        if current is None or current.is_cancelled:
+            raise RemoteMasterConflictError("Adopted master was deleted.")
+        if expected_etag and current.etag != expected_etag:
+            raise RemoteMasterConflictError(
+                "Adopted master changed.", self.get_recurring_master(remote_event_id)
+            )
+        private = dict(current.private_extended_properties)
+        if (
+            private.get(PLANNER_LINK_ORIGIN_PROPERTY) != ADOPTED_EXTERNAL_ORIGIN
+            or not private.get(PLANNER_ADOPTION_ID_PROPERTY)
+        ):
+            raise TerminalGatewayError("Adoption identity is missing.")
+        restored = {
+            str(key): str(value)
+            for key, value in restored_private_properties.items()
+        }
+        for key, value in restored.items():
+            if private.get(key) != value:
+                raise RemoteMasterConflictError(
+                    "Unrelated private properties changed."
+                )
+        desired = {
+            key: value
+            for key, value in private.items()
+            if key not in PLANNER_OWNERSHIP_PROPERTIES
+        }
+        desired.update(restored)
+        self.write_call_count += 1
+        self._maybe_fail()
+        current.private_extended_properties = desired
+        self._bump_etag(current)
+        current.updated_at = self._tick()
+        current.raw_payload = self._master_event_to_resource(current)
+        self._record_change(current)
+        return self.get_recurring_master(remote_event_id)
 
     @staticmethod
     def _verify_master_owner(

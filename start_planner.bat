@@ -1,51 +1,79 @@
 @echo off
-setlocal ENABLEDELAYEDEXPANSION
+setlocal EnableExtensions
 
-:: перейти в папку скрипта
-cd /d "%~dp0"
+rem ---------------------------------------------------------------------------
+rem Planner (PySide6 + QML) launcher.
+rem Double-click this file in Explorer to start the application.
+rem Interpreter order: .venv\Scripts\python.exe -> py -3 -> python
+rem ---------------------------------------------------------------------------
 
-:: --- 1) venv приоритетно ---
-if exist "%~dp0.venv\Scripts\activate.bat" (
-  call "%~dp0.venv\Scripts\activate.bat"
-  goto :run_with_active_venv
-)
-if exist "%~dp0venv\Scripts\activate.bat" (
-  call "%~dp0venv\Scripts\activate.bat"
-  goto :run_with_active_venv
-)
+rem UTF-8 console + interpreter I/O so Cyrillic output renders correctly.
+chcp 65001 >nul 2>&1
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
-:: --- 2) py-launcher (3.13 -> 3.12 -> 3.11 -> 3) ---
-set "PYCMD="
-for %%V in (3.13 3.12 3.11 3) do (
-  py -%%V -c "import sys; print(sys.version)" >nul 2>&1 && set "PYCMD=py -%%V" && goto :run_with_py
-)
-
-:: --- 3) fallback на python из PATH ---
-where python >nul 2>&1 && set "PYCMD=python" && goto :run_with_py
-
-echo [ERROR] Python не найден. Установи Python 3.11+ или создай venv в папке проекта.
-pause
-exit /b 1
-
-:run_with_active_venv
-python -u main.py
-goto :post
-
-:run_with_py
-%PYCMD% -u main.py
-
-:post
-:: создать ярлык на рабочем столе (один раз)
-set "SHORTCUT=%USERPROFILE%\Desktop\Planner.lnk"
-if not exist "%SHORTCUT%" (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ws=New-Object -ComObject WScript.Shell;" ^
-    "$t=[Environment]::GetFolderPath('Desktop')+'\Planner.lnk';" ^
-    "$s=$ws.CreateShortcut($t);" ^
-    "$s.TargetPath='""%~dp0run_silent.vbs""';" ^
-    "$s.WorkingDirectory='""%~dp0""';" ^
-    "if (Test-Path '""%~dp0assets\icon.ico""') {$s.IconLocation='""%~dp0assets\icon.ico""'};" ^
-    "$s.Save()"
+rem Always operate relative to this script, never a hard-coded path.
+cd /d "%~dp0" || (
+  echo [ERROR] Cannot change directory to "%~dp0".
+  pause
+  exit /b 1
 )
 
-endlocal
+set "APP=%~dp0run_desktop.py"
+if not exist "%APP%" (
+  echo [ERROR] run_desktop.py not found next to this launcher:
+  echo         "%APP%"
+  pause
+  exit /b 1
+)
+
+rem --- 1) project virtual environment (preferred) ----------------------------
+set "PY="
+if exist "%~dp0.venv\Scripts\python.exe" set "PY="%~dp0.venv\Scripts\python.exe""
+if not defined PY if exist "%~dp0venv\Scripts\python.exe" set "PY="%~dp0venv\Scripts\python.exe""
+
+rem --- 2) py launcher --------------------------------------------------------
+if not defined PY (
+  py -3 -c "import sys" >nul 2>&1 && set "PY=py -3"
+)
+
+rem --- 3) python on PATH -----------------------------------------------------
+if not defined PY (
+  python -c "import sys" >nul 2>&1 && set "PY=python"
+)
+
+if not defined PY (
+  echo [ERROR] Python 3 not found.
+  echo         Install Python 3.11+ from https://www.python.org/downloads/
+  echo         or create a virtual environment in this folder:
+  echo             python -m venv .venv
+  echo             .venv\Scripts\python.exe -m pip install -r requirements.txt
+  pause
+  exit /b 1
+)
+
+rem --- dependency check (fast import probe, never reinstalls) ----------------
+%PY% -c "import PySide6" >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] PySide6 is not installed for the selected interpreter:
+  %PY% -c "import sys; print('        ' + sys.executable)" 2>nul
+  echo.
+  echo         Install the dependencies with:
+  echo             python -m pip install -r requirements.txt
+  echo.
+  pause
+  exit /b 1
+)
+
+rem --- launch (attached, so startup errors stay visible) ---------------------
+%PY% -u "%APP%" %*
+set "RC=%ERRORLEVEL%"
+
+rem Pause only on failure; a clean exit closes the window silently.
+if not "%RC%"=="0" (
+  echo.
+  echo [ERROR] Planner exited with code %RC%.
+  pause
+)
+
+endlocal & exit /b %RC%

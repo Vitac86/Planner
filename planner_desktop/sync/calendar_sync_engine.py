@@ -146,6 +146,7 @@ class CalendarSyncEngine:
         occurrence_sync_store=None,
         series_repository=None,
         split_store=None,
+        adoption_store=None,
     ) -> None:
         self._repository = repository
         self._store = store
@@ -162,6 +163,8 @@ class CalendarSyncEngine:
         self._occurrence_sync_store = occurrence_sync_store
         self._series_repository = series_repository
         self._split_store = split_store
+        self._adoption_store = adoption_store
+        self._calendar_access_role = ""
 
     # ---- реакция на локальные изменения ---------------------------------------
 
@@ -204,6 +207,13 @@ class CalendarSyncEngine:
     def pull_remote_changes(self) -> int:
         """Забирает и применяет удалённые изменения; возвращает число
         полученных событий (включая эхо собственных push-ей)."""
+        if self._adoption_store is not None:
+            access_getter = getattr(self._gateway, "get_calendar_access", None)
+            if callable(access_getter):
+                access = access_getter(self._external_series_calendar_id)
+                self._calendar_access_role = str(
+                    (access or {}).get("access_role") or ""
+                )
         batch = self._gateway.list_changes(self._store.get_sync_cursor())
         self.last_pull_stats = CalendarPullStats(total_events=len(batch.events))
         for event in batch.events:
@@ -271,6 +281,9 @@ class CalendarSyncEngine:
                 if self._quarantine_linked_instance(event, linked_parent):
                     self.last_pull_stats.linked_instance_changes_quarantined += 1
                 return
+            if self._handle_adoption_instance_pull(event):
+                return
+            self._record_external_exception(event)
         else:
             self.last_pull_stats.ordinary_events += 1
 
@@ -367,6 +380,8 @@ class CalendarSyncEngine:
         # echoes update plan ETags; unexpected changes mark the plan conflict;
         # neither master ever becomes an ordinary Task or an unowned external
         # master while the plan is active.
+        if self._handle_adoption_master_pull(event):
+            return
         if self._handle_split_master_pull(event):
             return
         repository = self._external_series_repository
@@ -426,6 +441,36 @@ class CalendarSyncEngine:
         remote_series_uid = event.private_extended_properties.get(
             PLANNER_SERIES_UID_PROPERTY
         )
+        raw = dict(event.raw_payload or {})
+        if not raw:
+            try:
+                from planner_desktop.sync.calendar_series_mapper import (
+                    master_event_to_owned_payload,
+                )
+
+                raw = master_event_to_owned_payload(event)
+                raw.update(
+                    {
+                        "id": event.id,
+                        "etag": event.etag,
+                        "status": event.status,
+                    }
+                )
+            except (TypeError, ValueError):
+                raw = {}
+        duration_minutes = None
+        if event.start is not None and event.end is not None:
+            try:
+                duration_minutes = int(
+                    (event.end - event.start).total_seconds() // 60
+                )
+            except (AttributeError, TypeError):
+                if event.is_all_day:
+                    duration_minutes = int((event.end - event.start).days * 1440)
+        previous_exception_count = existing.exception_count if existing else 0
+        previous_exception_dates = (
+            existing.exception_dates_json if existing else "[]"
+        )
         repository.upsert(ExternalCalendarSeries(
             provider=self._external_series_provider,
             calendar_id=self._external_series_calendar_id,
@@ -450,6 +495,36 @@ class CalendarSyncEngine:
             planner_owned=bool(remote_series_uid),
             linked_series_uid=(linked.series_uid if linked is not None else None),
             planner_payload_hash=remote_payload_hash,
+            raw_snapshot_json=json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            private_properties_json=json.dumps(
+                event.private_extended_properties,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            calendar_access_role=self._calendar_access_role,
+            organizer_self=(
+                bool((raw.get("organizer") or {}).get("self"))
+                if raw.get("organizer") is not None
+                else None
+            ),
+            event_type=str(raw.get("eventType") or "default"),
+            locked=bool(raw.get("locked")),
+            exception_count=previous_exception_count,
+            exception_dates_json=previous_exception_dates,
+            duration_minutes=duration_minutes,
+            adopted_series_uid=(
+                linked.series_uid
+                if linked is not None
+                and getattr(linked, "link_origin", "") == "adopted_external"
+                else (existing.adopted_series_uid if existing else None)
+            ),
+            adoption_state=(existing.adoption_state if existing else None),
         ))
         if linked is not None:
             etag_matches = (
@@ -484,6 +559,134 @@ class CalendarSyncEngine:
                 self._series_link_store.update_link(linked)
             else:
                 self._persist_linked_master_mismatch(event, linked)
+
+    def _handle_adoption_master_pull(self, event: CalendarEvent) -> bool:
+        """Suppress claimed echoes/orphans before ordinary catalog ownership."""
+        store = self._adoption_store
+        if store is None or not event.id:
+            return False
+        plan = store.get_active_adoption(
+            self._external_series_provider,
+            self._external_series_calendar_id,
+            event.id,
+        )
+        if plan is None:
+            return False
+        from planner_desktop.domain.google_series_split import (
+            master_content_fingerprint,
+        )
+        from planner_desktop.domain.series_adoption import (
+            PLANNER_ADOPTION_ID_PROPERTY,
+            SeriesAdoptionState,
+        )
+        from planner_desktop.sync.calendar_series_mapper import (
+            master_event_to_owned_payload,
+        )
+
+        if event.is_cancelled:
+            store.mark_remote_deleted(plan.id)
+            return True
+        try:
+            actual_hash = master_content_fingerprint(
+                master_event_to_owned_payload(event)
+            )
+        except (TypeError, ValueError):
+            actual_hash = None
+        if plan.state is SeriesAdoptionState.PENDING:
+            # Keep the row externally visible.  A change after acknowledgement
+            # invalidates the pending plan but is still persisted below.
+            if (
+                event.etag != plan.remote_etag_base
+                or actual_hash != plan.canonical_remote_payload_hash
+            ):
+                store.mark_conflict(
+                    plan.id,
+                    "Master изменён после подтверждения импорта.",
+                    json.dumps(
+                        event.raw_payload or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+                self.last_pull_stats.adoption_conflicts_detected += 1
+            return False
+        if plan.state in (
+            SeriesAdoptionState.REMOTE_CLAIMED,
+            SeriesAdoptionState.LOCAL_FINALIZE_PENDING,
+            SeriesAdoptionState.ROLLBACK_PENDING,
+        ):
+            private = event.private_extended_properties
+            expected_identity = (
+                str(private.get(PLANNER_ADOPTION_ID_PROPERTY) or "")
+                == str(plan.id)
+            )
+            if expected_identity and actual_hash == plan.canonical_remote_payload_hash:
+                if event.etag:
+                    store.update_claimed_etag(plan.id, event.etag)
+                return True
+            store.mark_conflict(
+                plan.id,
+                "Claimed master неожиданно изменён до локальной финализации.",
+                json.dumps(
+                    event.raw_payload or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            self.last_pull_stats.adoption_conflicts_detected += 1
+            return True
+        return False
+
+    def _handle_adoption_instance_pull(self, event: CalendarEvent) -> bool:
+        store = self._adoption_store
+        if store is None or not event.recurring_event_id:
+            return False
+        plan = store.get_active_adoption(
+            self._external_series_provider,
+            self._external_series_calendar_id,
+            event.recurring_event_id,
+        )
+        if plan is None:
+            return False
+        store.mark_conflict(
+            plan.id,
+            "Во время импорта обнаружен изменённый или отменённый экземпляр.",
+            json.dumps(
+                event.raw_payload or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        self.last_pull_stats.adoption_conflicts_detected += 1
+        return True
+
+    def _record_external_exception(self, event: CalendarEvent) -> None:
+        repository = self._external_series_repository
+        if (
+            repository is None
+            or not event.recurring_event_id
+            or event.original_start is None
+        ):
+            return
+        existing = repository.get(
+            self._external_series_provider,
+            self._external_series_calendar_id,
+            event.recurring_event_id,
+        )
+        if existing is None:
+            return
+        dates = list(existing.exception_dates)
+        value = event.original_start.isoformat()
+        if value not in dates:
+            dates.append(value)
+        existing.exception_count = max(existing.exception_count, len(dates))
+        existing.exception_dates_json = json.dumps(
+            dates, ensure_ascii=False, separators=(",", ":")
+        )
+        repository.upsert(existing)
 
     def _handle_split_master_pull(self, event: CalendarEvent) -> bool:
         """Split-aware master classification; True when fully handled here."""

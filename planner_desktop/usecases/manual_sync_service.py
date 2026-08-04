@@ -86,6 +86,15 @@ class ManualSyncResult:
     remote_split_rollbacks_completed: int = 0
     remote_split_terminal: int = 0
     remote_split_reconciliation_completions: int = 0
+    # Phase 3.2B3C2 additive external-series adoption counters.
+    external_adoptions_started: int = 0
+    external_ownership_claims_written: int = 0
+    external_adoptions_finalized: int = 0
+    external_adoption_conflicts: int = 0
+    external_adoption_rollbacks: int = 0
+    external_adoption_releases: int = 0
+    external_adoption_terminal: int = 0
+    external_adoption_reconciliations: int = 0
     occurrence_updates_pushed: int = 0
     occurrence_cancellations_pushed: int = 0
     occurrence_conflicts_detected: int = 0
@@ -166,6 +175,33 @@ class ManualSyncResult:
             )
         if self.remote_split_terminal:
             parts.append(f"разделений в ошибке {self.remote_split_terminal}")
+        if self.external_adoptions_started:
+            parts.append(f"импортов серий начато {self.external_adoptions_started}")
+        if self.external_ownership_claims_written:
+            parts.append(
+                "маркеров владения добавлено "
+                f"{self.external_ownership_claims_written}"
+            )
+        if self.external_adoptions_finalized:
+            parts.append(
+                f"импортов серий завершено {self.external_adoptions_finalized}"
+            )
+        if self.external_adoption_conflicts:
+            parts.append(
+                f"конфликтов импорта {self.external_adoption_conflicts}"
+            )
+        if self.external_adoption_rollbacks:
+            parts.append(
+                f"откатов импорта завершено {self.external_adoption_rollbacks}"
+            )
+        if self.external_adoption_releases:
+            parts.append(
+                f"серий Google возвращено {self.external_adoption_releases}"
+            )
+        if self.external_adoption_terminal:
+            parts.append(
+                f"импортов в ошибке {self.external_adoption_terminal}"
+            )
         if self.occurrence_updates_pushed:
             parts.append(f"occurrence updates {self.occurrence_updates_pushed}")
         if self.occurrence_cancellations_pushed:
@@ -210,6 +246,7 @@ class ManualSyncService:
         series_repository=None,
         occurrence_store=None,
         split_store=None,
+        adoption_store=None,
     ) -> None:
         self._repository = repository
         self._store = store
@@ -220,6 +257,7 @@ class ManualSyncService:
         self._series_repository = series_repository
         self._occurrence_store = occurrence_store
         self._split_store = split_store
+        self._adoption_store = adoption_store
         self._db_path: Optional[Path] = None
         self._lock = threading.Lock()
 
@@ -273,6 +311,9 @@ class ManualSyncService:
         from planner_desktop.storage.calendar_series_remote_split_store import (
             CalendarSeriesRemoteSplitStore,
         )
+        from planner_desktop.storage.calendar_series_adoption_store import (
+            CalendarSeriesAdoptionStore,
+        )
         from planner_desktop.storage.series_repository import SQLiteSeriesRepository
 
         repository = SQLiteTaskRepository(self._db_path)
@@ -295,15 +336,22 @@ class ManualSyncService:
                                     self._db_path, clock=self._clock
                                 )
                                 try:
-                                    return self._run_cycle(
-                                        repository,
-                                        store,
-                                        external_series,
-                                        series_store=series_store,
-                                        series_repository=series_repository,
-                                        occurrence_store=occurrence_store,
-                                        split_store=split_store,
+                                    adoption_store = CalendarSeriesAdoptionStore(
+                                        self._db_path, clock=self._clock
                                     )
+                                    try:
+                                        return self._run_cycle(
+                                            repository,
+                                            store,
+                                            external_series,
+                                            series_store=series_store,
+                                            series_repository=series_repository,
+                                            occurrence_store=occurrence_store,
+                                            split_store=split_store,
+                                            adoption_store=adoption_store,
+                                        )
+                                    finally:
+                                        adoption_store.close()
                                 finally:
                                     split_store.close()
                             finally:
@@ -329,6 +377,7 @@ class ManualSyncService:
         series_repository=None,
         occurrence_store=None,
         split_store=None,
+        adoption_store=None,
     ) -> ManualSyncResult:
         started = self._clock()
         pending_before = store.count_pending_ops()
@@ -338,6 +387,7 @@ class ManualSyncService:
         series_repository = series_repository or self._series_repository
         occurrence_store = occurrence_store or self._occurrence_store
         split_store = split_store or self._split_store
+        adoption_store = adoption_store or self._adoption_store
 
         try:
             gateway = self._gateway_provider()
@@ -361,11 +411,33 @@ class ManualSyncService:
             occurrence_sync_store=occurrence_store,
             series_repository=series_repository,
             split_store=split_store,
+            adoption_store=adoption_store,
         )
         series_result = None
         occurrence_result = None
         split_result = None
+        adoption_result = None
         try:
+            if (
+                adoption_store is not None
+                and series_repository is not None
+                and series_store is not None
+                and catalog is not None
+            ):
+                from planner_desktop.sync.calendar_series_adoption_engine import (
+                    CalendarSeriesAdoptionEngine,
+                )
+
+                # Adoption owns an existing remote identity and therefore runs
+                # before split/master/occurrence/ordinary queues.
+                adoption_result = CalendarSeriesAdoptionEngine(
+                    adoption_store,
+                    series_repository,
+                    repository,
+                    series_store,
+                    catalog,
+                    gateway,
+                ).process_active()
             if split_store is not None and series_repository is not None:
                 from planner_desktop.sync.calendar_series_remote_split_engine import (
                     CalendarSeriesRemoteSplitEngine,
@@ -498,6 +570,32 @@ class ManualSyncService:
             ),
             remote_split_reconciliation_completions=(
                 split_result.reconciliation_completions if split_result else 0
+            ),
+            external_adoptions_started=(
+                adoption_result.adoptions_started if adoption_result else 0
+            ),
+            external_ownership_claims_written=(
+                adoption_result.ownership_claims_written
+                if adoption_result else 0
+            ),
+            external_adoptions_finalized=(
+                adoption_result.adoptions_finalized if adoption_result else 0
+            ),
+            external_adoption_conflicts=(
+                (adoption_result.conflicts if adoption_result else 0)
+                + engine.last_pull_stats.adoption_conflicts_detected
+            ),
+            external_adoption_rollbacks=(
+                adoption_result.rollbacks if adoption_result else 0
+            ),
+            external_adoption_releases=(
+                adoption_result.releases if adoption_result else 0
+            ),
+            external_adoption_terminal=(
+                adoption_result.terminal if adoption_result else 0
+            ),
+            external_adoption_reconciliations=(
+                adoption_result.reconciliations if adoption_result else 0
             ),
             occurrence_updates_pushed=(
                 occurrence_result.updates_pushed if occurrence_result else 0

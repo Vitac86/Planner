@@ -67,6 +67,12 @@ def _row_to_link(row: sqlite3.Row) -> SeriesCalendarLink:
         conflict_remote_snapshot_json=row["conflict_remote_snapshot_json"],
         resolved_at=_text_to_dt(row["resolved_at"]),
         resolution_kind=row["resolution_kind"],
+        link_origin=row["link_origin"] or "planner_created",
+        remote_id_strategy=(
+            row["remote_id_strategy"] or "planner_deterministic"
+        ),
+        adoption_id=row["adoption_id"],
+        ownership_claimed_at=_text_to_dt(row["ownership_claimed_at"]),
     )
 
 
@@ -276,7 +282,9 @@ class CalendarSeriesSyncStore:
                 conflict_reason = ?, conflict_remote_etag = ?,
                 conflict_remote_payload_hash = ?,
                 conflict_remote_snapshot_json = ?, resolved_at = ?,
-                resolution_kind = ?
+                resolution_kind = ?, link_origin = ?,
+                remote_id_strategy = ?, adoption_id = ?,
+                ownership_claimed_at = ?
             WHERE id = ?
             """,
             (
@@ -297,6 +305,10 @@ class CalendarSeriesSyncStore:
                 link.conflict_remote_snapshot_json,
                 _dt_to_text(link.resolved_at),
                 link.resolution_kind,
+                link.link_origin,
+                link.remote_id_strategy,
+                link.adoption_id,
+                _dt_to_text(link.ownership_claimed_at),
                 link.id,
             ),
         )

@@ -58,8 +58,8 @@ from planner_desktop.viewmodels.series_rows import rule_from_map, rule_to_map
 logger = logging.getLogger(__name__)
 
 APP_MODE_TEXT = (
-    "Экспериментальный десктоп на PySide6 + Qt Quick/QML. "
-    "Старое Flet-приложение (main.py) остаётся основным и не затронуто."
+    "Десктоп на PySide6 + Qt Quick/QML — единственная поддерживаемая "
+    "версия Planner. Запуск: run_desktop.py (или start_planner.bat)."
 )
 SYNC_NOTE_TEXT = (
     "Синхронизация с Google Calendar выполняется ТОЛЬКО вручную — кнопкой "

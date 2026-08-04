@@ -44,7 +44,7 @@ def test_schema_v11_is_additive_and_idempotent(tmp_path):
     create_schema(connection)  # idempotent
     assert connection.execute("PRAGMA user_version").fetchone()[0] == (
         SCHEMA_VERSION
-    ) == 11
+    ) == 12
     tables = {
         row[0]
         for row in connection.execute(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+import json
 from typing import Any, Mapping, Optional, Tuple
 
 from planner_desktop.domain.google_recurrence import (
@@ -82,6 +83,20 @@ class ExternalCalendarSeries:
     planner_owned: bool = False
     linked_series_uid: Optional[str] = None
     planner_payload_hash: Optional[str] = None
+    # Phase 3.2B3C2: lossless local adoption preflight.  These values are
+    # populated only by an explicit manual pull; opening Settings remains a
+    # local SQLite read and never builds a Google gateway.
+    raw_snapshot_json: Optional[str] = None
+    private_properties_json: str = "{}"
+    calendar_access_role: str = ""
+    organizer_self: Optional[bool] = None
+    event_type: str = "default"
+    locked: bool = False
+    exception_count: int = 0
+    exception_dates_json: str = "[]"
+    duration_minutes: Optional[int] = None
+    adopted_series_uid: Optional[str] = None
+    adoption_state: Optional[str] = None
     id: Optional[int] = None
 
     @property
@@ -127,6 +142,36 @@ class ExternalCalendarSeries:
                 "Правило повторения не поддерживается."
             )
         return readable_google_recurrence_summary(parsed, schedule=schedule)
+
+    @property
+    def raw_snapshot(self) -> dict[str, Any]:
+        if not self.raw_snapshot_json:
+            return {}
+        try:
+            value = json.loads(self.raw_snapshot_json)
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def private_properties(self) -> dict[str, str]:
+        try:
+            value = json.loads(self.private_properties_json or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): str(item) for key, item in value.items()}
+
+    @property
+    def exception_dates(self) -> Tuple[str, ...]:
+        try:
+            value = json.loads(self.exception_dates_json or "[]")
+        except (TypeError, ValueError):
+            return ()
+        if not isinstance(value, list):
+            return ()
+        return tuple(str(item) for item in value)
 
     def clone(self) -> "ExternalCalendarSeries":
         return replace(self)

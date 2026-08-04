@@ -1,9 +1,8 @@
-"""Доменная задача нового десктопа.
+"""Доменная задача десктопа.
 
-Обычный dataclass: не зависит ни от Qt/QML, ни от Flet, ни от SQLModel
-старого приложения. Поля google_calendar_* заложены заранее под будущую
-двустороннюю синхронизацию с Google Calendar (см. sync/calendar_contract.py),
-но в этом скелете никогда не заполняются реальными данными.
+Обычный dataclass: не зависит ни от Qt/QML, ни от ORM. Поля
+google_calendar_* обслуживают ручную двустороннюю синхронизацию с Google
+Calendar (см. sync/calendar_contract.py).
 """
 from __future__ import annotations
 

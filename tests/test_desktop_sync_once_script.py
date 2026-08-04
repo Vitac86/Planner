@@ -1,6 +1,6 @@
 """Тесты CLI scripts/desktop_calendar_sync_once: отказ без --real-google,
 вывод сводки, изоляция профиля, чистота импорта (ни OAuth, ни Google API,
-ни QML, ни старого Flet UI).
+ни QML, ни модулей удалённого legacy-приложения).
 """
 import subprocess
 import sys
@@ -87,9 +87,11 @@ def test_data_dir_flag_sets_isolated_profile(monkeypatch, tmp_path, capsys):
 
 # ---- чистота импорта ---------------------------------------------------------------------
 
-def test_import_has_no_google_qt_or_flet_side_effects():
+def test_import_has_no_google_qt_or_legacy_side_effects():
     """Импорт CLI не тянет ни Google-клиенты (OAuth/сеть), ни PySide6/QML,
-    ни старое Flet-приложение. Проверяется в чистом интерпретаторе."""
+    ни модули удалённого legacy-приложения (`flet`, `main`, `ui.*` — они
+    удалены, проверка остаётся защитой от их возврата). Проверяется в
+    чистом интерпретаторе."""
     probe = (
         "import sys; import scripts.desktop_calendar_sync_once; "
         "bad = [m for m in sys.modules "

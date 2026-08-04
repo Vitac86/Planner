@@ -1,8 +1,10 @@
 # Продуктовый роадмап Planner Desktop (PySide6 + Qt Quick/QML)
 
-Документ фиксирует оставшийся путь нового десктопа от «работающей
-технической базы» до законченного настольного приложения, которое
-полностью заменяет старое Flet-приложение.
+Документ фиксирует оставшийся путь десктопа от «работающей технической
+базы» до законченного настольного приложения. Прежнее Flet-приложение
+уже заменено и удалено из репозитория; исторические записи о нём в
+таблицах приёмок ниже сохранены как есть — они фиксируют, что рамки
+каждой фазы соблюдались.
 
 Точка отсчёта (что уже есть и работает):
 
@@ -23,11 +25,11 @@
   в фазах 1–3 синхронизация запускается только явным действием пользователя,
   а фаза 4 может добавить исключительно opt-in режим с сохранением ручной
   кнопки и безопасного default-off поведения;
-- старое Flet-приложение (`main.py`, `ui/`, `services/`, `models/`), старый
-  sync-движок, UndatedTasksSync и старые инструменты миграции/пилота/
-  dead-letter не изменяются ни в одной фазе; старый `Planner/token.json`
-  никогда не читается и не копируется;
-- старый `Planner/app.db` не читается и не пишется в фазах 1–4; единственное
+- старое Flet-приложение (`main.py`, `ui/`, `services/`, `models/`), его
+  sync-движок, UndatedTasksSync и инструменты миграции/пилота/dead-letter
+  не изменялись ни в одной фазе и теперь удалены из репозитория целиком;
+  старый `Planner/token.json` никогда не читается и не копируется;
+- старый `Planner/app.db` не читается и не пишется; единственное возможное
   исключение — отдельный, явно запущенный read-only импорт фазы 5, который
   никогда не изменяет исходную БД;
 - все данные нового приложения — только в изолированном профиле
@@ -183,7 +185,7 @@
 | Пять focused Phase 1 файлов | PASS | `127 passed` |
 | Все desktop-тесты | PASS | `491 passed`; отдельный sync-регрессионный срез — `193 passed` |
 | Compile + collection + полный pytest | PASS с известным исключением | compileall — без ошибок; `612 tests collected`; полный прогон — `611 passed`, единственный сбой `test_macos_data_dir` на Windows |
-| Изолированный UI smoke + persistence после restart | PASS | 3 режима создания, 4 перехода расписания, 6 пресетов, 5 snooze-путей, complete/restore, delete confirmation, обе цели shortcuts и 3 layout-режима; после перезапуска обе оставленные задачи перечитаны из `D:\Users\v.pyatakov\myspace\planner-desktop-ui-smoke` |
+| Изолированный UI smoke + persistence после restart | PASS | 3 режима создания, 4 перехода расписания, 6 пресетов, 5 snooze-путей, complete/restore, delete confirmation, обе цели shortcuts и 3 layout-режима; после перезапуска обе оставленные задачи перечитаны из `<ui smoke profile>` |
 | Ручной Google-синк после Phase 1 | PASS без live-вызова | 193 теста покрывают очередь, mapper, engine, gateway, `ManualSyncService`, Settings и CLI; ручные контролы присутствуют на обновлённом Settings screenshot |
 | No auto-sync + legacy scope | PASS | startup/page-open/timer sync отсутствует; изменения ограничены `planner_desktop`, desktop-тестами и документацией, старый Flet/DB/token/tooling не затронут |
 
@@ -266,7 +268,7 @@ Calendar показывает реальные события в почасов�
 - `test_desktop_calendar_grid_viewmodel.py` — modes/dates, periods/today,
   current time, geometry rows, selection refresh, compact behavior;
 - `test_desktop_calendar_grid_keyboard.py` — plain/text/dialog routing;
-- профиль `D:\Users\v.pyatakov\myspace\planner-desktop-calendar-smoke`: 14 synthetic tasks,
+- профиль `<calendar smoke profile>`: 14 synthetic tasks,
   pending + dead-letter, scroll/current-time, click/double-click,
   agenda/daily, три display modes, compact и reopen persistence `14/14`.
 
@@ -518,7 +520,7 @@ base32hex event id и private Planner markers делают повтор посл
 - локальная Settings-диагностика link/queue/conflict/remote-deleted/terminal и
   quarantine; page-open, startup и timer сети не вызывают.
 
-Fake/injected smoke в `D:\Users\v.pyatakov\myspace\planner-desktop-google-series-write-smoke`
+Fake/injected smoke в `<series-write smoke profile>`
 подтвердил create → update того же id → delete, insert reconciliation,
 disconnect/reconnect, конфликт, remote cancellation, instance quarantine,
 ordinary sync, restart persistence, `occurrence_event_flood=0`,
@@ -537,7 +539,7 @@ ordinary sync, restart persistence, `occurrence_event_flood=0`,
 | Live-пилот recurring master (реальный Calendar API) | PASS | 15 июля 2026: create → idempotent re-sync → title update → local-only mutations → delete remote/keep local; после пилота повторно `9 passed` focused series-набор, `128 passed` ordinary sync slice, compileall без ошибок; код не менялся |
 
 Live-пилот **пройден 15 июля 2026 года** на изолированном профиле
-`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot` (собственные client_secret,
+`<live-pilot profile>` (собственные client_secret,
 token.json и app_desktop.db; старые `Planner/app.db` и `Planner/token.json`
 не читались и не копировались). OAuth выполнен только явным флоу, Google-аккаунт
 явно подтверждён пользователем перед первой записью (идентичность аккаунта в
@@ -624,7 +626,7 @@ Google — ноль, все вызовы происходили из явных 
   resolution_attempts_superseded, resolution_failures (use_google/disconnect —
   локальные действия, попадают в следующую сводку).
 
-Fake/injected smoke в `D:\Users\v.pyatakov\backup\planner-desktop-series-conflict-smoke`
+Fake/injected smoke в `<series-conflict smoke profile>`
 подтвердил: create+link, конфликт заголовка, Keep Planner success, гонку
 второй правки (stale решение НЕ перезаписало master), Use Google success,
 неподдерживаемое правило (действие заблокировано, raw RRULE виден),
@@ -646,7 +648,7 @@ ordinary task sync, `occurrence_event_flood=0`, `settings_gateway_calls=0`,
 | Live-пилот B3A (реальный Calendar API) | **PASS** | conflict → Keep Planner → second-edit race → Use Google → remote_deleted → generation 1 → explicit cleanup; `occurrence_event_flood=0` |
 
 Live-пилот **пройден 17 июля 2026 года** в изолированном профиле
-`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot` (собственные `client_secret.json`,
+`<live-pilot profile>` (собственные `client_secret.json`,
 `token.json` и `app_desktop.db`). Токен принадлежит личному Google-аккаунту,
 а не выделенному тестовому; этот факт и Calendar selector `primary` были явно
 сообщены пользователю, и перед финальной Google-записью получено отдельное
@@ -741,7 +743,7 @@ page-open/timer calls — 0, Settings/dialog-opening calls — 0. В финал�
 
 Контролируемый real-Google пилот **пройден 17 июля 2026 года** на личном
 аккаунте, в `primary`, только из изолированного соседнего профиля
-`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot` и после
+`<live-pilot profile>` и после
 явного подтверждения пользователя. Один будущий `COUNT=3` TEST-master
 (Europe/Moscow, 15 минут, без гостей/чувствительных заметок) прошёл local
 move+title, remote conflict, second-edit ETag race, повторный Keep Planner,
@@ -759,7 +761,7 @@ master-store и завершился `AttributeError`. Отдельная про
 чистый preflight и полный повтор прошли. Обезличенный отчёт не содержит account
 identity, OAuth secrets, token contents, remote IDs или payloads.
 
-Fake-приёмка в `D:\Users\v.pyatakov\myspace\planner-desktop-occurrence-sync-smoke` — **PASS**:
+Fake-приёмка в `<occurrence-sync smoke profile>` — **PASS**:
 ровно один instance UPDATE и один instance CANCEL, master ETag неизменен,
 `ordinary_occurrence_event_flood=0`, ETag race superseded без overwrite,
 Use Google без write, Keep both только локально, remote cancellation принят
@@ -831,7 +833,7 @@ Google calls = 0. Ordinary Task sync и recurring-master sync сохранили
 
 Контролируемый real-Google пилот **пройден 20 июля 2026 года** на личном
 аккаунте, в `primary`, только из изолированного соседнего профиля
-`D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot` и
+`<live-pilot profile>` и
 после явного подтверждения пользователя. Будущий `COUNT=5` TEST-мастер
 разделён с третьего экземпляра (новое название, 11:30): ровно один
 full-resource update (COUNT=2) и один детерминированный insert
@@ -848,7 +850,7 @@ occurrence=0`. Первый прогон остановился durable-конф
 RRULE в сравнения содержимого полный повтор прошёл. Adoption не
 тестировался; отчёт обезличен.
 
-Fake-приёмка в `D:\Users\v.pyatakov\myspace\planner-desktop-remote-split-smoke` — **PASS**:
+Fake-приёмка в `<remote-split smoke profile>` — **PASS**:
 COUNT=5 разделился ровно 2/3 одним `update` + одним `insert`, UNTIL-преемник
 сохранил исходный UNTIL, weekly never остался never, monthly-план остаётся
 `pending` до sync; будущее исключение заблокировало split с точной датой;
@@ -958,13 +960,17 @@ ordinary event flood = 0, master duplication = 0, restart persistence
   до записи хоть одной строки;
 - резервная копия профиля PlannerDesktop перед импортом + кнопка отката;
 - упаковка/сборка: установочный артефакт для Windows (PyInstaller или
-  аналог), иконка, версия, ярлык;
-- критерии выключения старого Flet-приложения и план отката на него.
+  аналог), иконка, версия, ярлык.
+
+> Выключение старого Flet-приложения уже выполнено: его код, тесты,
+> скрипты и документация удалены из репозитория, отката на него нет.
+> Профиль `<user data dir>/Planner` (`app.db`, `token.json`) остаётся на
+> диске пользователя нетронутым и служит источником для импорта ниже.
 
 ### Архитектурная работа
 
 - `migration/import_legacy.py` в planner_desktop (отдельный модуль,
-  НЕ трогающий старые скрипты миграции): маппинг схем старая → новая,
+  открывающий legacy-файл read-only): маппинг схем старая → новая,
   идемпотентность (повторный импорт не дублирует), отчёт;
 - политика привязок Google: импортированные задачи приходят БЕЗ
   event_id (иначе два клиента будут драться за одни события) — связь

@@ -68,9 +68,11 @@ from planner_desktop.usecases.series_calendar_link_service import (
 )
 
 
-EXPECTED_PROFILE = Path(
-    r"D:\Users\v.pyatakov\myspace\planner-desktop-google-series-live-pilot"
-)
+# Two-key guard: the operator must set BOTH the data dir the app will use
+# and, separately, PLANNER_LIVE_PILOT_PROFILE naming the very same directory.
+# Neither is hard-coded, so no personal path lives in the repository, and the
+# pilot still refuses to touch a profile that was not opted into explicitly.
+EXPECTED_PROFILE_ENV_VAR = "PLANNER_LIVE_PILOT_PROFILE"
 CALENDAR_ID = "primary"
 TEST_PREFIX = "[Planner Phase 3.2B3B TEST]"
 TIMEZONE_NAME = "Europe/Moscow"
@@ -439,13 +441,16 @@ def _sanitized_sync(result) -> dict[str, Any]:
 
 
 def run(*, preflight_only: bool = False) -> int:
-    profile = Path(os.environ.get("PLANNER_DESKTOP_DATA_DIR", ""))
-    _require(bool(str(profile)), "isolated_profile_not_set")
+    profile_raw = os.environ.get("PLANNER_DESKTOP_DATA_DIR", "").strip()
+    expected_raw = os.environ.get(EXPECTED_PROFILE_ENV_VAR, "").strip()
+    _require(bool(profile_raw), "isolated_profile_not_set")
+    _require(bool(expected_raw), "expected_profile_not_set")
+    profile = Path(profile_raw)
+    _require(profile.is_dir(), "isolated_profile_missing")
     _require(
-        profile.resolve() == EXPECTED_PROFILE.resolve(),
+        profile.resolve() == Path(expected_raw).resolve(),
         "unexpected_isolated_profile",
     )
-    _require(profile.is_dir(), "isolated_profile_missing")
 
     db_path = get_desktop_db_path()
     tasks = SQLiteTaskRepository(db_path)

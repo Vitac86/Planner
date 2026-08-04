@@ -1,7 +1,9 @@
-"""Тесты путей экспериментального хранилища нового десктопа.
+"""Тесты путей локального хранилища десктопа.
 
 Главное свойство: каталог PlannerDesktop/app_desktop.db всегда отделён
-от профиля старого Flet-приложения Planner/app.db.
+от профиля удалённого legacy-приложения Planner/app.db. Legacy-код удалён
+из репозитория, поэтому старый профиль задаётся здесь литералами — тесты
+остаются защитой от случайного возврата к нему.
 """
 from pathlib import Path
 
@@ -34,12 +36,14 @@ def test_db_path_differs_from_old_app_db():
 
 def test_runtime_default_never_points_into_old_profile(monkeypatch):
     monkeypatch.delenv(paths.DATA_DIR_ENV_VAR, raising=False)
-    # Старый конфиг импортируется только для сравнения путей.
-    from core import settings
+    # Профиль удалённого legacy-приложения: тот же платформенный базовый
+    # каталог, но имя "Planner" и файл "app.db".
+    legacy_dir = paths.get_desktop_data_dir().parent / "Planner"
+    legacy_db = legacy_dir / "app.db"
 
-    assert paths.get_desktop_data_dir() != settings.DATA_DIR
-    assert paths.get_desktop_db_path() != settings.DB_PATH
-    assert paths.get_desktop_db_path().name != settings.DB_PATH.name
+    assert paths.get_desktop_data_dir() != legacy_dir
+    assert paths.get_desktop_db_path() != legacy_db
+    assert paths.get_desktop_db_path().name != legacy_db.name
 
 
 # ---- платформенные ветки -----------------------------------------------------

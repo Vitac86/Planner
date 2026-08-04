@@ -1,7 +1,7 @@
-"""Точка входа нового PySide6/QML десктопа.
+"""Точка входа PySide6/QML десктопа Planner.
 
-Запускается только через run_desktop.py в корне репозитория.
-Старое Flet-приложение (main.py) не импортируется и не затрагивается.
+Запускается только через run_desktop.py в корне репозитория
+(или start_planner.bat на Windows).
 """
 from __future__ import annotations
 

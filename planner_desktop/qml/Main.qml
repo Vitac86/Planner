@@ -16,7 +16,7 @@ ApplicationWindow {
     // Минимальный работоспособный размер задаёт Python (domain/layout.py).
     minimumWidth: uiVm.minWindowWidth
     minimumHeight: uiVm.minWindowHeight
-    title: "Planner — экспериментальный десктоп (PySide6/QML)"
+    title: "Planner"
 
     Material.theme: Material.Light
     Material.accent: Theme.accent

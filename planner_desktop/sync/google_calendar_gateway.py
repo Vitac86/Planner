@@ -54,6 +54,12 @@ from planner_desktop.domain.series_calendar_link import (
     PLANNER_PAYLOAD_HASH_PROPERTY,
     PLANNER_SERIES_UID_PROPERTY,
 )
+from planner_desktop.domain.series_adoption import (
+    ADOPTED_EXTERNAL_ORIGIN,
+    PLANNER_ADOPTION_ID_PROPERTY,
+    PLANNER_LINK_ORIGIN_PROPERTY,
+    PLANNER_OWNERSHIP_PROPERTIES,
+)
 from planner_desktop.sync.calendar_series_mapper import (
     master_event_to_owned_payload,
     master_payload_hash,
@@ -365,6 +371,22 @@ class GoogleCalendarGateway:
     def calendar_id(self) -> str:
         return self._calendar_id
 
+    def get_calendar_access(self, calendar_id: str) -> Dict[str, Any]:
+        """Return local calendar ACL facts used by an explicit adoption preflight."""
+        if str(calendar_id) != self._calendar_id:
+            raise TerminalGatewayError("Calendar identity changed during adoption.")
+        try:
+            item = self._service.calendarList().get(
+                calendarId=self._calendar_id
+            ).execute()
+        except Exception as exc:
+            raise _classify(exc, f"get_calendar_access {calendar_id}") from exc
+        return {
+            "calendar_id": self._calendar_id,
+            "access_role": str(item.get("accessRole") or ""),
+            "primary": bool(item.get("primary")),
+        }
+
     # ---- push -------------------------------------------------------------------
 
     def insert_event(self, event: CalendarEvent) -> CalendarEvent:
@@ -438,6 +460,159 @@ class GoogleCalendarGateway:
         if event.is_cancelled:
             return None
         return event
+
+    def claim_external_recurring_master(
+        self,
+        remote_event_id: str,
+        merged_private_properties: Mapping[str, str],
+        expected_etag: Optional[str],
+    ) -> CalendarEvent:
+        """Conditionally add only private Planner ownership properties."""
+        access = self.get_calendar_access(self._calendar_id)
+        if str(access.get("access_role") or "") not in ("writer", "owner"):
+            raise TerminalGatewayError("Нужен доступ writer или owner.")
+        current = self.get_recurring_master_resource(remote_event_id)
+        if current is None:
+            raise RemoteMasterConflictError("Внешний recurring master удалён.")
+        if str(current.get("id") or "") != str(remote_event_id):
+            raise TerminalGatewayError("Google вернул другой event id.")
+        if str(current.get("status") or "confirmed") != "confirmed":
+            raise RemoteMasterConflictError("Recurring master больше не активен.")
+        if str(current.get("eventType") or "default") != "default":
+            raise TerminalGatewayError("Поддерживается только eventType=default.")
+        if bool(current.get("locked")):
+            raise TerminalGatewayError("Заблокированный recurring master недоступен.")
+        if not bool((current.get("organizer") or {}).get("self")):
+            raise TerminalGatewayError("Только организатор может принять серию.")
+        recurrence = [str(line) for line in current.get("recurrence") or ()]
+        if (
+            len([line for line in recurrence if line.upper().startswith("RRULE:")])
+            != 1
+            or any(
+                line.upper().startswith(("EXDATE:", "RDATE:", "EXRULE:"))
+                for line in recurrence
+            )
+        ):
+            raise TerminalGatewayError(
+                "Recurring master содержит неподдерживаемые recurrence-исключения."
+            )
+        if current.get("attendees"):
+            raise TerminalGatewayError("Серии с участниками не принимаются.")
+        if current.get("conferenceData") or current.get("hangoutLink"):
+            raise TerminalGatewayError("Серии с конференцией не принимаются.")
+        if expected_etag and str(current.get("etag") or "") != expected_etag:
+            raise RemoteMasterConflictError(
+                "ETag master изменился после подтверждения.",
+                payload_to_event(current),
+            )
+        current_private = {
+            str(key): str(value)
+            for key, value in (
+                ((current.get("extendedProperties") or {}).get("private") or {})
+            ).items()
+        }
+        if any(key in current_private for key in PLANNER_OWNERSHIP_PROPERTIES):
+            raise TerminalGatewayError(
+                "Recurring master уже содержит маркеры владения Planner."
+            )
+        desired = dict(current_private)
+        desired.update(
+            {str(key): str(value) for key, value in merged_private_properties.items()}
+        )
+        for key, value in current_private.items():
+            if desired.get(key) != value:
+                raise TerminalGatewayError(
+                    "Claim не может заменить unrelated private property."
+                )
+        try:
+            request = self._service.events().patch(
+                calendarId=self._calendar_id,
+                eventId=remote_event_id,
+                body={"extendedProperties": {"private": desired}},
+                sendUpdates="none",
+            )
+            headers = getattr(request, "headers", None)
+            if expected_etag and isinstance(headers, dict):
+                headers["If-Match"] = expected_etag
+            item = request.execute()
+        except Exception as exc:
+            if _http_status(exc) in (409, 412):
+                raise RemoteMasterConflictError(
+                    "Google отклонил marker-only claim из-за ETag race.",
+                    self.get_recurring_master(remote_event_id),
+                ) from exc
+            raise _classify(
+                exc, f"claim_external_recurring_master {remote_event_id}"
+            ) from exc
+        return payload_to_event(item)
+
+    def release_adopted_recurring_master(
+        self,
+        remote_event_id: str,
+        restored_private_properties: Mapping[str, str],
+        expected_etag: Optional[str],
+    ) -> CalendarEvent:
+        """Conditionally remove adoption markers without changing visible data."""
+        current = self.get_recurring_master_resource(remote_event_id)
+        if current is None:
+            raise RemoteMasterConflictError("Принятый recurring master удалён.")
+        if expected_etag and str(current.get("etag") or "") != expected_etag:
+            raise RemoteMasterConflictError(
+                "ETag master изменился перед release.",
+                payload_to_event(current),
+            )
+        current_private = {
+            str(key): str(value)
+            for key, value in (
+                ((current.get("extendedProperties") or {}).get("private") or {})
+            ).items()
+        }
+        if (
+            current_private.get(PLANNER_LINK_ORIGIN_PROPERTY)
+            != ADOPTED_EXTERNAL_ORIGIN
+            or not current_private.get(PLANNER_ADOPTION_ID_PROPERTY)
+        ):
+            raise TerminalGatewayError(
+                "Master не содержит ожидаемую adoption identity."
+            )
+        restored = {
+            str(key): str(value)
+            for key, value in restored_private_properties.items()
+        }
+        # Pre-adoption keys must still have their acknowledged values.  New
+        # unrelated keys are preserved, never silently removed.
+        for key, value in restored.items():
+            if current_private.get(key) != value:
+                raise RemoteMasterConflictError(
+                    "Unrelated private properties changed after adoption."
+                )
+        desired = {
+            key: value
+            for key, value in current_private.items()
+            if key not in PLANNER_OWNERSHIP_PROPERTIES
+        }
+        desired.update(restored)
+        try:
+            request = self._service.events().patch(
+                calendarId=self._calendar_id,
+                eventId=remote_event_id,
+                body={"extendedProperties": {"private": desired}},
+                sendUpdates="none",
+            )
+            headers = getattr(request, "headers", None)
+            if expected_etag and isinstance(headers, dict):
+                headers["If-Match"] = expected_etag
+            item = request.execute()
+        except Exception as exc:
+            if _http_status(exc) in (409, 412):
+                raise RemoteMasterConflictError(
+                    "Google отклонил marker release из-за ETag race.",
+                    self.get_recurring_master(remote_event_id),
+                ) from exc
+            raise _classify(
+                exc, f"release_adopted_recurring_master {remote_event_id}"
+            ) from exc
+        return payload_to_event(item)
 
     def insert_recurring_master(
         self, remote_event_id: str, master_payload: CalendarEvent

@@ -112,6 +112,9 @@ class CalendarPullStats:
     # Phase 3.2B3C1: unexpected remote master changes detected during an
     # active split plan (the plan itself moved to conflict).
     split_conflicts_detected: int = 0
+    # Phase 3.2B3C2: pull-side unexpected changes while a durable adoption
+    # claim is active.
+    adoption_conflicts_detected: int = 0
 
 
 @dataclass

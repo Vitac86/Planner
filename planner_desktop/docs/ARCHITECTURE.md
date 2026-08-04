@@ -2,11 +2,12 @@
 
 ## Что это
 
-Греенфилд-переписывание десктопного Planner **рядом** со старым
-Flet-приложением. Старое приложение (`main.py`, `ui/`, `services/`,
-`models/`) остаётся нетронутым и запускается как раньше со своим legacy
-sync-контуром. Новый Planner Desktop использует отдельный
-`CalendarSyncEngine`, запускаемый только явным ручным действием.
+Единственная поддерживаемая реализация десктопного Planner. Возникла как
+греенфилд-переписывание рядом с прежним Flet-приложением; то приложение
+(`main.py`, `ui/`, `services/`, `models/`) вместе со своим legacy
+sync-контуром удалено из репозитория. Planner Desktop использует
+собственный `CalendarSyncEngine`, запускаемый только явным ручным
+действием.
 
 Запуск нового приложения:
 
@@ -14,7 +15,8 @@ sync-контуром. Новый Planner Desktop использует отде�
 python run_desktop.py
 ```
 
-Запуск старого приложения — по-прежнему `python main.py`.
+На Windows то же самое делает `start_planner.bat` (двойной клик). Другой
+точки входа нет: legacy-приложение и его `main.py` удалены.
 
 ## Жёсткие ограничения
 
@@ -61,8 +63,8 @@ OAuth-токен нового десктопа изолирован (`<PlannerDe
 
 - файл БД: `<user data dir>/PlannerDesktop/app_desktop.db`
   (на Windows — `%APPDATA%\PlannerDesktop\app_desktop.db`);
-- каталог и имя файла намеренно отличаются от профиля старого
-  Flet-приложения (`<user data dir>/Planner/app.db`) — старый `app.db`
+- каталог и имя файла намеренно отличаются от профиля удалённого
+  legacy-приложения (`<user data dir>/Planner/app.db`) — старый `app.db`
   **никогда не читается и не пишется**;
 - **миграции старых данных нет** — новый десктоп стартует с пустой БД;
 - переопределение пути для разработки/тестов — переменная окружения
@@ -100,7 +102,7 @@ Domain (planner_desktop/domain)
       calendar_layout.py режет события по дням/видимому диапазону и
       детерминированно раскладывает overlap-колонки;
       calendar_interactions.py рассчитывает snap/target/move/resize/conversion
-      proposals и structured rejection; без Qt/Flet/SQLModel
+      proposals и structured rejection; без Qt и без ORM
 Repository (planner_desktop/repositories + planner_desktop/storage)
    ↓  SQLiteTaskRepository — по умолчанию (изолированный app_desktop.db);
       FakeTaskRepository — для тестов и демо-режима; общий контракт —

@@ -1,0 +1,8 @@
+# Development / test dependencies.
+# Install with:  python -m pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Test runner for tests/ (unit, storage/migration, sync-safety,
+# recurrence/series and ViewModel contract tests).
+pytest
