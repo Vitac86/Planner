@@ -8,7 +8,8 @@
 
 - у terminal-операций (dead-letter) нет бесконечных ретраев: после
   ``MAX_ATTEMPTS`` временных ошибок или первой постоянной ошибки операция
-  помечается terminal и в push больше не выбирается;
+  помечается terminal и в push больше не выбирается; отсутствие сети
+  откладывает попытку, не расходуя этот лимит;
 - строки операций удаляются только после успешного push-а или явной
   отмены (задача удалена до первого push-а); локальные задачи очередь
   не трогает вовсе — тумбстоунами занимается репозиторий.
@@ -89,31 +90,25 @@ class CalendarSyncStore:
 
     def enqueue_update(self, task_uid: str,
                        payload: Optional[Dict[str, Any]] = None) -> None:
-        """Update не ставится, если уже ждёт create/update той же задачи:
-        push всегда читает АКТУАЛЬНОЕ состояние задачи из репозитория,
-        поэтому одной отложенной операции достаточно."""
-        if self._has_pending(task_uid, OpKind.CREATE):
-            return
+        """Объединить правки, сохранив новое поколение ожидающей операции."""
         self._enqueue(OpKind.UPDATE, task_uid, payload)
 
     def enqueue_delete(self, task_uid: str,
                        payload: Optional[Dict[str, Any]] = None) -> None:
         """Delete вытесняет отложенные create/update той же задачи:
         пушить правки события, которое сейчас будет удалено, бессмысленно."""
-        self._connection.execute(
-            "DELETE FROM desktop_pending_calendar_ops "
-            "WHERE task_uid = ? AND status = ? AND op IN (?, ?)",
-            (task_uid, OpStatus.PENDING.value,
-             OpKind.CREATE.value, OpKind.UPDATE.value),
-        )
-        self._enqueue(OpKind.DELETE, task_uid, payload)
+        self._enqueue(OpKind.DELETE, task_uid, payload, supersede_updates=True)
+
+    def enqueue_event_cleanup(self, task_uid: str, event_id: str) -> None:
+        """Удалить результат запоздалого insert, сохранив новые правки задачи."""
+        self._enqueue(OpKind.DELETE, task_uid, {"event_id": event_id, "cleanup": True})
 
     def cancel_pending_ops(self, task_uid: str) -> None:
-        """Снять все отложенные операции задачи (удалена до первого push-а)."""
+        """Cancel local writes; retain cleanup of previously detached events."""
         self._connection.execute(
             "DELETE FROM desktop_pending_calendar_ops "
-            "WHERE task_uid = ? AND status = ?",
-            (task_uid, OpStatus.PENDING.value),
+            "WHERE task_uid = ? AND op IN (?, ?)",
+            (task_uid, OpKind.CREATE.value, OpKind.UPDATE.value),
         )
         self._connection.commit()
 
@@ -122,7 +117,7 @@ class CalendarSyncStore:
 
         Calendar interactions update the task repository and this queue through
         separate SQLite connections.  The snapshot lets the service restore the
-        exact queue state if the second write fails; it never performs network IO.
+        logical queue state if the second write fails; it never performs network IO.
         """
         rows = self._connection.execute(
             "SELECT * FROM desktop_pending_calendar_ops WHERE task_uid = ? "
@@ -134,49 +129,90 @@ class CalendarSyncStore:
     def restore_task_ops(
         self, task_uid: str, snapshot: List[Dict[str, Any]]
     ) -> None:
-        """Restore rows previously returned by :meth:`snapshot_task_ops`."""
+        """Restore logical operations as fresh generations, retaining cleanup.
+
+        A worker may still hold any snapshotted id. Reusing it would allow a
+        late acknowledgement to remove the compensating write we need now.
+        """
         with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            cleanup = [
+                row for row in self.snapshot_task_ops(task_uid)
+                if row["op"] == OpKind.DELETE.value and row["payload_json"]
+                and json.loads(row["payload_json"]).get("cleanup")
+                and not any(saved["payload_json"] == row["payload_json"] for saved in snapshot)
+            ]
             self._connection.execute(
                 "DELETE FROM desktop_pending_calendar_ops WHERE task_uid = ?",
                 (task_uid,),
             )
-            for row in snapshot:
+            for row in [*snapshot, *cleanup]:
                 self._connection.execute(
                     """
                     INSERT INTO desktop_pending_calendar_ops (
-                        id, op, task_uid, payload_json, attempts, last_error,
+                        op, task_uid, payload_json, attempts, last_error,
                         status, created_at, next_try_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        row["id"], row["op"], row["task_uid"],
+                        row["op"], row["task_uid"],
                         row["payload_json"], row["attempts"], row["last_error"],
                         row["status"], row["created_at"], row["next_try_at"],
                     ),
                 )
 
     def _enqueue(self, op: OpKind, task_uid: str,
-                 payload: Optional[Dict[str, Any]]) -> None:
-        if self._has_pending(task_uid, op):
-            return  # дедупликация: одинаковая операция уже ждёт push-а
-        now = self._clock()
-        self._connection.execute(
-            """
-            INSERT INTO desktop_pending_calendar_ops
-                (op, task_uid, payload_json, attempts, status,
-                 created_at, next_try_at)
-            VALUES (?, ?, ?, 0, ?, ?, ?)
-            """,
-            (
-                op.value,
-                task_uid,
-                json.dumps(payload, ensure_ascii=False) if payload else None,
-                OpStatus.PENDING.value,
-                _dt_to_text(now),
-                _dt_to_text(now),
-            ),
+                 payload: Optional[Dict[str, Any]], *,
+                 supersede_updates: bool = False) -> None:
+        # A fresh id is the operation's generation. An in-flight worker may
+        # acknowledge/retry only its old id, never a newer local edit. Acquire
+        # the write lock before deciding whether an update belongs to a create.
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if op == OpKind.UPDATE and self._has_pending(task_uid, OpKind.CREATE):
+                op = OpKind.CREATE
+            if supersede_updates:
+                self._connection.execute(
+                    "DELETE FROM desktop_pending_calendar_ops "
+                    "WHERE task_uid = ? AND op IN (?, ?)",
+                    (task_uid, OpKind.CREATE.value, OpKind.UPDATE.value),
+                )
+            payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
+            # Different delete targets must survive unschedule -> reschedule.
+            self._connection.execute(
+                "DELETE FROM desktop_pending_calendar_ops "
+                "WHERE task_uid = ? AND op = ? "
+                "AND (? != 'delete' OR payload_json IS ?)",
+                (task_uid, op.value, op.value, payload_json),
+            )
+            now = _dt_to_text(self._clock())
+            self._connection.execute(
+                """
+                INSERT INTO desktop_pending_calendar_ops
+                    (op, task_uid, payload_json, attempts, status,
+                     created_at, next_try_at)
+                VALUES (?, ?, ?, 0, ?, ?, ?)
+                """,
+                (op.value, task_uid, payload_json, OpStatus.PENDING.value, now, now),
+            )
+
+    def is_pending_op(self, op_id: int) -> bool:
+        """Whether a fetched operation is still the current pending generation."""
+        return self._connection.execute(
+            "SELECT 1 FROM desktop_pending_calendar_ops WHERE id = ? AND status = ?",
+            (op_id, OpStatus.PENDING.value),
+        ).fetchone() is not None
+
+    def has_event_delete(self, event_id: str) -> bool:
+        """Do not import an event whose detached local copy awaits deletion."""
+        rows = self._connection.execute(
+            "SELECT payload_json FROM desktop_pending_calendar_ops WHERE op = ?",
+            (OpKind.DELETE.value,),
+        ).fetchall()
+        return any(
+            row["payload_json"] and json.loads(row["payload_json"]).get("event_id") == event_id
+            for row in rows
         )
-        self._connection.commit()
 
     def _has_pending(self, task_uid: str, op: OpKind) -> bool:
         row = self._connection.execute(
@@ -206,6 +242,13 @@ class CalendarSyncStore:
             (task_uid, OpStatus.PENDING.value),
         ).fetchone()
         return row is not None
+
+    def has_unsynced_op(self, task_uid: str) -> bool:
+        """Failed local writes also protect user data from a subsequent pull."""
+        return self._connection.execute(
+            "SELECT 1 FROM desktop_pending_calendar_ops WHERE task_uid = ? LIMIT 1",
+            (task_uid,),
+        ).fetchone() is not None
 
     def count_pending_ops(self) -> int:
         """Сколько операций ждёт push-а (для статистики в UI/настройках)."""
@@ -262,20 +305,21 @@ class CalendarSyncStore:
         )
         self._connection.commit()
 
-    def requeue_op(self, op_id: int, error: str) -> None:
-        """Временная ошибка: attempts+1 и бэкофф; после MAX_ATTEMPTS — terminal."""
+    def requeue_op(self, op_id: int, error: str, *,
+                   consume_attempt: bool = True) -> None:
+        """Bounded retries; transport outages defer without consuming attempts."""
         row = self._connection.execute(
             "SELECT attempts FROM desktop_pending_calendar_ops WHERE id = ?",
             (op_id,),
         ).fetchone()
         if row is None:
             return
-        attempts = row["attempts"] + 1
-        if attempts >= MAX_ATTEMPTS:
+        attempts = row["attempts"] + int(consume_attempt)
+        if consume_attempt and attempts >= MAX_ATTEMPTS:
             self.mark_terminal(op_id, error, attempts=attempts)
             return
         delay = min(
-            RETRY_BASE_DELAY_SECONDS * 2 ** (attempts - 1),
+            RETRY_BASE_DELAY_SECONDS * 2 ** max(0, attempts - 1),
             RETRY_MAX_DELAY_SECONDS,
         )
         next_try = self._clock() + timedelta(seconds=delay)

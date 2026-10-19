@@ -25,7 +25,7 @@
 
 Конфликтная политика (детерминированная, фаза 1):
 
-1. Если у задачи есть pending-операция в очереди — remote её НЕ трогает:
+1. Если у задачи есть pending/terminal-операция в очереди — remote её НЕ трогает:
    локальная правка ещё не допушена, перезапись потеряла бы её.
    Задача «догонит» календарь после push-а следующего цикла.
 2. Иначе, если etag события совпадает с сохранённым в задаче — это эхо
@@ -40,7 +40,7 @@
 - локальный тумбстоун «липкий»: если delete уже допушен, поздние
   remote-правки того же события задачу не воскрешают;
 - unschedule (запланирована -> без даты) выполняет DesktopTaskService
-  (_detach_schedule): для непушенной задачи снимается pending create,
+  (_commit_schedule_change): для непушенной задачи снимается pending create,
   для привязанной одиночной ставится delete события (event_id — в payload)
   и задача отвязывается; экземпляры повторяющихся серий не отвязываются
   (сервис возвращает ошибку). record_local_update по-прежнему игнорирует
@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Optional
 
@@ -77,6 +78,7 @@ from planner_desktop.sync.sync_types import (
     OpKind,
     PendingOp,
     RetryableGatewayError,
+    NetworkUnavailableError,
     TerminalGatewayError,
 )
 
@@ -110,8 +112,7 @@ def record_local_update(store: "CalendarSyncStore", task: Task) -> None:
         record_local_delete(store, task)
         return
     if task.start is None:
-        # Unschedule (дата снята у уже синхронизированной задачи) в фазе 1
-        # не реализован: события не трогаем, новых операций не ставим.
+        # Unschedule снимает связь и ставит delete в DesktopTaskService.
         return
     if task.google_calendar_event_id is None:
         store.enqueue_create(task.uid)
@@ -193,10 +194,15 @@ class CalendarSyncEngine:
         (requeue/dead-letter не считаются) — для сводки ручного синка."""
         pushed = 0
         for op in self._store.list_due_ops(limit):
+            if not self._store.is_pending_op(op.id):
+                continue  # superseded/cancelled since this batch was fetched
             try:
                 self._push_op(op)
             except RetryableGatewayError as exc:
-                self._store.requeue_op(op.id, str(exc))
+                self._store.requeue_op(
+                    op.id, str(exc),
+                    consume_attempt=not isinstance(exc, NetworkUnavailableError),
+                )
             except TerminalGatewayError as exc:
                 self._store.mark_terminal(op.id, str(exc))
             else:
@@ -224,7 +230,10 @@ class CalendarSyncEngine:
     # ---- push одной операции ------------------------------------------------------
 
     def _push_op(self, op: PendingOp) -> None:
-        task = self._repository.get_by_uid(op.task_uid)
+        stored = self._repository.get_by_uid(op.task_uid)
+        # Fake repositories may expose references. Keep the exact sent version
+        # separately, just as a SQLite read does, throughout the network call.
+        task = replace(stored) if stored is not None else None
 
         if op.op == OpKind.DELETE.value:
             self._push_delete(op, task)
@@ -238,27 +247,42 @@ class CalendarSyncEngine:
             return
         if task.start is None:
             # Страховка: unschedule снимает/заменяет операции ещё в сервисе
-            # (_detach_schedule), сюда такие задачи попадать не должны.
+            # (_commit_schedule_change), сюда такие задачи попадать не должны.
             logger.debug("Пропуск push %s: у задачи %s нет даты", op.op, task.uid)
             return
 
-        if task.google_calendar_event_id is None:
-            created = self._gateway.insert_event(calendar_mapper.task_to_event(task))
-            task.google_calendar_event_id = created.id
-            task.google_calendar_etag = created.etag
-            self._repository.update(task)
+        previous_event_id = task.google_calendar_event_id
+        if previous_event_id is None:
+            remote = self._gateway.insert_event(calendar_mapper.task_to_event(task))
         else:
             patch = calendar_mapper.task_to_event_patch(task)
-            updated = self._gateway.patch_event(task.google_calendar_event_id, patch)
-            task.google_calendar_etag = updated.etag
-            self._repository.update(task)
+            remote = self._gateway.patch_event(previous_event_id, patch)
+
+        merged = self._repository.update_calendar_metadata(
+            task.uid, remote.id, remote.etag, previous_event_id,
+        )
+        current = self._repository.get_by_uid(task.uid)
+        if not merged or current is None or current.google_calendar_event_id != remote.id:
+            # A create may finish after unschedule/delete. Its event still
+            # exists remotely; persist cleanup instead of resurrecting a task.
+            if previous_event_id is None:
+                self._store.enqueue_event_cleanup(task.uid, remote.id)
+            return
+        if current.is_deleted:
+            self._store.enqueue_delete(task.uid, payload={"event_id": remote.id})
+        elif current.start is None:
+            self._store.enqueue_event_cleanup(task.uid, remote.id)
+        elif current.updated_at != task.updated_at:
+            # This also covers the short gap between a local repository write
+            # and its queue write. Acknowledge only the old operation below.
+            record_local_update(self._store, current)
 
     def _push_delete(self, op: PendingOp, task: Optional[Task]) -> None:
-        event_id = None
-        if task is not None:
+        # The explicit target belongs to this operation. A task may already
+        # have been rescheduled and linked to an entirely different event.
+        event_id = json.loads(op.payload_json).get("event_id") if op.payload_json else None
+        if event_id is None and task is not None:
             event_id = task.google_calendar_event_id
-        if event_id is None and op.payload_json:
-            event_id = json.loads(op.payload_json).get("event_id")
         if event_id:
             self._gateway.delete_event(event_id)
 
@@ -287,22 +311,25 @@ class CalendarSyncEngine:
         else:
             self.last_pull_stats.ordinary_events += 1
 
-        task = self._repository.get_by_google_event_id(event.id)
+        stored = self._repository.get_by_google_event_id(event.id)
+        task = replace(stored) if stored is not None else None
 
         if task is None:
-            if event.is_cancelled:
-                return  # незнакомое отменённое событие — не наше дело
+            if event.is_cancelled or self._store.has_event_delete(event.id):
+                return  # detached events awaiting cleanup must not reappear
             self._repository.add(calendar_mapper.event_to_new_task(event))
             return
 
-        if self._store.has_pending_op(task.uid):
-            # Политика №1: недопушенная локальная правка важнее remote.
+        if self._store.has_unsynced_op(task.uid):
+            # Failed as well as pending writes must not lose local changes.
             logger.debug("Pending-операция защищает задачу %s от pull", task.uid)
             return
 
         if event.is_cancelled:
             if not task.is_deleted:
-                self._repository.delete(task.id)
+                tombstone = replace(task)
+                tombstone.mark_deleted()
+                self._repository.apply_calendar_update(tombstone, task)
             return
 
         if task.is_deleted:
@@ -317,8 +344,8 @@ class CalendarSyncEngine:
             logger.debug("Ничья updated_at по задаче %s: оставляем локальную", task.uid)
             return
         if event.updated_at > task.updated_at:
-            calendar_mapper.apply_event_to_task(event, task)
-            self._repository.update(task)
+            updated = calendar_mapper.apply_event_to_task(event, replace(task))
+            self._repository.apply_calendar_update(updated, task)
         else:
             # Локальная новее: не затираем, а пушим её в календарь.
             record_local_update(self._store, task)

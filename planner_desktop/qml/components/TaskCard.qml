@@ -298,7 +298,7 @@ Item {
             border.color: Theme.warningSoftBorder
             border.width: 1
             ToolTip.visible: syncHover.hovered
-            ToolTip.text: "Операция ждёт отправки в Google Calendar (синк вручную)"
+            ToolTip.text: "Изменения ожидают отправки в Google Calendar"
 
             Row {
                 id: syncRow

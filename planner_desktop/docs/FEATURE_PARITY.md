@@ -90,7 +90,7 @@ Phase 3.2B3C.
 | Значок «Google» у связанной задачи | implemented (бейдж «Синк…» у задач с pending-операцией; бейдж «Google» у привязанных) | Фаза 1 |
 | Заметки задачи (превью в карточке) | implemented | Фаза 1 |
 | Тосты об успехе/ошибке | implemented — общий `Toast`, `toastMessage`/`toastError` и блокировка действий через `busy` | Фаза 1 |
-| Авто-push в Google после правки | deferred — в текущей сборке и фазах 1–3 background sync выключен, push копится в локальной очереди и отправляется вручную; фаза 4 может добавить только явный opt-in, выключенный по умолчанию | Фаза 4 |
+| Авто-push в Google после правки | implemented — после подключения Google включён по умолчанию; debounce 1 секунду, сохранение очереди при ошибке и повтор с задержкой 5 секунд…5 минут; настройка позволяет выключить | Фаза 4 |
 | Глобальный поиск | implemented — `Ctrl+F`, поиск по названию/заметкам/тегам с Python NFKC+casefold, quoted phrase, фильтрами и стабильным ранжированием | Фаза 3.1 |
 | Локальные теги | implemented — до 10 тегов на задачу, имя до 32 символов, регистронезависимая Unicode-уникальность, чипы в карточках/инспекторе/редакторе; в Google не отправляются | Фаза 3.1 |
 | Дублировать задачу | implemented — новая независимая задача без Google/recurrence linkage; scheduled-копия ставит ровно один `create`, undated остаётся локальной | Фаза 3.1 |
@@ -99,7 +99,7 @@ Phase 3.2B3C.
 | Шаблоны задач | implemented — ordinary/recurring, локальное управление в Settings, предзаполнение общего редактора без записи до «Создать», меню новой задачи и `Ctrl+Alt+N` | Фаза 3.2A |
 | Read-only discovery Google recurring masters | implemented — master/instance/ordinary classification, raw RRULE + support diagnostics, schema v7 catalog; master никогда не становится ordinary Task, pull даёт queue delta 0 | Фаза 3.2B1 |
 | Синхронизация локальной серии с Google | implemented — явный preflight/link к одному новому recurring master; master create/update/delete и conflict/recovery; один Planner-owned occurrence может безопасно update/cancel через отдельную очередь и full-resource ETag-защищённую запись; materialized occurrences не отправляются отдельно; remote split «этот и будущие» делит чистую связанную серию на два мастера durable-планом с явным rollback; existing-master adoption deferred | Фаза 3.2B2 / 3.2B3A / 3.2B3B / 3.2B3C1 |
-| Remote split «этот и будущие» связанной серии | implemented — durable план (schema v11), точный COUNT-подсчёт слотов генератором, преемник COUNT-остаток/lossless UNTIL/never, блокировка будущих исключений с точными датами, ETag+content race-защита, локальная атомарная финализация, явный rollback, split-aware pull; сеть только в ручном sync | Фаза 3.2B3C1 |
+| Remote split «этот и будущие» связанной серии | implemented — durable план (schema v11), точный COUNT-подсчёт слотов генератором, преемник COUNT-остаток/lossless UNTIL/never, блокировка будущих исключений с точными датами, ETag+content race-защита, локальная атомарная финализация, явный rollback, split-aware pull; сеть в общем ручном или автоматическом цикле | Фаза 3.2B3C1 |
 | Разрешение конфликтов связанной серии | implemented — SeriesConflictDialog со сравнением Planner ↔ Google, статусом поддержки/владения и тремя явными действиями с подтверждением; неподдерживаемое правило блокирует «Использовать версию Google» и показывает raw RRULE; история решений в Settings | Фаза 3.2B3A |
 | Исключение одного связанного Google-экземпляра | implemented — immutable original occurrence key, exact originalStartTime, title/notes/same-kind move/resize/cancel, Use Google / Keep Planner / Keep both locally / Ignore, remote cancellation persistence, ETag race и reconciliation; completion/tags/priority остаются локальными | Фаза 3.2B3B |
 
@@ -110,7 +110,7 @@ Phase 3.2B3C.
 | Чек-лист на сегодня (отметить/снять) | implemented — реальные ежедневные из SQLite, отметки по датам (`desktop_daily_completions`) | Фаза 1 |
 | CRUD ежедневных задач (создать/редактировать/удалить) | implemented — DailyTasksDialog + DailyTasksViewModel + DailyTaskService (тумбстоун при удалении) | Фаза 1 |
 | Маска дней недели (Пн…Вс) | implemented — 7-битная маска, чипы дней + пресеты «Будни/Выходные/Каждый день» | Фаза 1 |
-| Rollover в полночь + статус inactive | implemented иначе — отметка хранится по дате, «rollover» не нужен (каждый день чистый); enabled/disabled есть | Фаза 1 |
+| Rollover в полночь + статус inactive | implemented — отметки хранятся по датам, enabled/disabled есть; смена дня и возвращение после сна обновляют «Сегодня», ежедневный чек-лист и историю без перезапуска | Фаза 1 / 4 |
 
 ## Страница «Календарь» (ui/pages/calendar.py)
 
@@ -133,7 +133,7 @@ Phase 3.2B3C.
 | Перемещение событий мышью | implemented — timed между слотами/днями, timed ↔ all-day, all-day span сохраняется; invalid/recurring target получает явный отказ | Фаза 2.2 |
 | Auto-scroll во время drag | implemented по вертикали с ограниченной скоростью и остановкой на cancel/drop/focus loss; горизонтальная week auto-scroll отложена | Фаза 2.2 |
 | Автопрокрутка к текущему часу | implemented — один раз при открытии/переходе «Сегодня»; иначе к 08:00, без непрерывных прыжков | Фаза 2.1 |
-| Pull из Google при открытии страницы | deferred — в текущей сборке никакого startup/page-open sync нет; фаза 4 может добавить только opt-in background sync, выключенный по умолчанию | Фаза 4 |
+| Pull из Google при открытии страницы | superseded — общий автосинк после загрузки окна и примерно раз в минуту при открытом приложении; открытие страницы не создаёт лишний цикл | Фаза 4 |
 | Фильтр задач дня (все / активные / выполненные) | implemented — сегментированный фильтр над агендой + счётчики; сводка дня от фильтра не зависит | Фаза 1 |
 | Ежедневные задачи в календаре | implemented — режим «Ежедневные»: чек-лист на выбранный день (по маске дней недели), отметка ставится на выбранную дату, не только на сегодня | Фаза 1 |
 | Инспектор выбранной задачи | implemented — тот же TaskInspector, что на «Сегодня»: rail в wide и drawer в normal/compact; шесть scheduling-пресетов и действия edit/complete/delete/snooze согласованы | Фаза 1 |
@@ -173,12 +173,13 @@ Phase 3.2B3C.
 | Старая фича | Статус | Фаза |
 |---|---|---|
 | История выполненных задач | implemented — журнал по датам («Сегодня»/«Вчера»/полная дата) из двух локальных источников: разовые задачи (`Task.completed_at`, для выполненных до миграции — `updated_at`) и отметки ежедневных; фильтр 7 дней / 30 дней / всё; «вернуть в работу» для разовых (ежедневные отметки — только просмотр); «Подробнее» открывает общий редактор | Фаза 1 |
-| Настройки: статус синка | implemented (путь БД, pending/dead-letter счётчики, курсор, разбивка очереди create/update/delete, время последнего локального изменения) | Фаза 1 |
+| Настройки: статус синка | implemented — путь БД, pending/dead-letter, курсор, разбивка create/update/delete, время последнего изменения; состояние автоматического/ручного синка также видно в боковой панели | Фаза 1 / 4 |
 | Настройки: диагностика | implemented — версия схемы, счётчики задач/ежедневных/очереди, кнопка «Копировать» (без токенов и личных данных) | Фаза 1 |
 | Настройки: локальные теги | implemented — список со счётчиками задач, создание, переименование, удаление с подтверждением и явная пометка «не отправляются в Google Calendar» | Фаза 3.1 |
 | Настройки: кнопка «Синхронизировать сейчас» | implemented — активна, когда есть изолированный токен и синк не выполняется; работа в фоновом потоке, прогресс/итог/ошибка и время последнего успешного синка на странице | Фаза 1 |
 | Настройки: «Подключить Google Calendar» | implemented — явный браузерный OAuth (тестовый аккаунт), токен сохраняется ТОЛЬКО в `<PlannerDesktop>/token.json`; без client_secret.json кнопка выключена с подсказкой пути | Фаза 1 |
-| Реальный Google-синк (OAuth, сеть) | implemented — `GoogleCalendarGateway` по контракту CalendarGateway + `ManualSyncService` (общий для кнопки и CLI `python -m scripts.desktop_calendar_sync_once --real-google`); только ручной запуск, см. GOOGLE_SYNC_SETUP.md | Фаза 1 |
+| Реальный Google-синк (OAuth, сеть) | implemented — `GoogleCalendarGateway` по контракту CalendarGateway + `ManualSyncService` (общий для планировщика, кнопки и CLI `python -m scripts.desktop_calendar_sync_once --real-google`); OAuth только явный, см. GOOGLE_SYNC_SETUP.md | Фаза 1 / 4 |
 | Настройки: «Повторяющиеся серии Google» | implemented read-only — active/unsupported/cancelled/legacy counts, last refresh, recurrence summary, timed/all-day, timezone, instance count, status and selectable raw RRULE; открытие страницы читает только SQLite и не вызывает Google | Фаза 3.2B1 |
 | Настройки: «Связанные серии Google» | implemented — local-only counters и строки linked/pending create-update-delete/conflict/remote-deleted/terminal/quarantine; Planner-owned masters помечены в B1-каталоге; adoption controls для чужих master отсутствуют; v9 добавляет счётчики pending/failed/superseded решений, link generation и локальную историю разрешений | Фаза 3.2B2 / 3.2B3A |
-| Автоматический синк при старте/по таймеру | deferred — сейчас никакого автосинка; в фазе 4 допустим только явный opt-in переключатель, выключенный по умолчанию | Фаза 4 |
+| Автоматический синк при старте/по таймеру | implemented — включён по умолчанию после подключения Google, первый цикл после загрузки QML, pull примерно раз в минуту; переключатель сохраняет выбор в `desktop_sync_state`; общий busy с ручным синком/OAuth, успешные автоциклы без toast; закрытое приложение не синкает, очередь сохраняется | Фаза 4 |
+| Правка задачи во время синка | implemented — обычная очередь сохраняет более новую локальную версию и следующую операцию при завершении текущего сетевого запроса | Фаза 4 |

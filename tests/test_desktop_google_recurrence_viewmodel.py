@@ -66,7 +66,7 @@ def test_catalog_properties_are_readable_and_include_textual_state():
     assert vm.externalCancelledSeriesCount == 1
     assert vm.possibleLegacyMasterImportCount == 0
     assert vm.externalSeriesLastRefresh != "—"
-    assert "ручной синхронизации" in vm.externalSeriesNote
+    assert "при синхронизации" in vm.externalSeriesNote
     rows = vm.externalSeriesRows
     assert len(rows) == 3
     unsupported = next(row for row in rows if row["remoteEventId"] == "unsupported")

@@ -227,12 +227,12 @@ def test_save_emits_refresh_signals(vm):
 
 def test_stats_refresh_after_create_edit_delete_restore(service, repo):
     vm = TodayViewModel(service=service, now_provider=lambda: NOW)
-    today_text = datetime.now().strftime("%Y-%m-%d")
+    today_text = NOW.strftime("%Y-%m-%d")
     assert save(vm, title="Дело дня", scheduled=True, all_day=True,
                 date_text=today_text) is True
     assert vm.todayCount == 1 and vm.completedTodayCount == 0
 
-    uid = repo.list_today()[0].uid
+    uid = repo.list_today(NOW.date())[0].uid
     assert save(vm, uid=uid, title="Дело дня", scheduled=True, all_day=True,
                 date_text=today_text, completed=True) is True
     assert vm.completedTodayCount == 1

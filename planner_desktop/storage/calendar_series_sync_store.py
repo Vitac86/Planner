@@ -655,7 +655,8 @@ class CalendarSeriesSyncStore:
         )
         self._connection.commit()
 
-    def requeue_op(self, op_id: int, error: str) -> bool:
+    def requeue_op(self, op_id: int, error: str, *,
+                   consume_attempt: bool = True) -> bool:
         row = self._connection.execute(
             "SELECT attempts, series_uid FROM pending_calendar_series_ops "
             "WHERE id = ?",
@@ -663,12 +664,12 @@ class CalendarSeriesSyncStore:
         ).fetchone()
         if row is None:
             return False
-        attempts = int(row["attempts"]) + 1
-        if attempts >= MAX_ATTEMPTS:
+        attempts = int(row["attempts"]) + int(consume_attempt)
+        if consume_attempt and attempts >= MAX_ATTEMPTS:
             self.mark_terminal(op_id, error, attempts=attempts)
             return False
         delay = min(
-            RETRY_BASE_DELAY_SECONDS * 2 ** (attempts - 1),
+            RETRY_BASE_DELAY_SECONDS * 2 ** max(0, attempts - 1),
             RETRY_MAX_DELAY_SECONDS,
         )
         self._connection.execute(

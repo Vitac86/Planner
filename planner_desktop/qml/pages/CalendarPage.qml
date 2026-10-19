@@ -788,14 +788,14 @@ Item {
         id: confirmDeleteDialog
         headerText: "Удалить задачу?"
         message: "Задача будет помечена удалённой; связанное событие будет "
-                 + "удалено только при следующей ручной синхронизации."
+                 + "удалено при следующей синхронизации."
         onConfirmed: uid => calendarVm.deleteTask(uid)
         onClosed: page.restoreFocus()
     }
     ConfirmDialog {
         id: confirmBulkDeleteDialog
         headerText: "Удалить выбранные задачи?"
-        message: "Будут удалены только выбранные задачи из текущей агенды и панели без даты. Связанные события попадут в очередь ручного синка."
+        message: "Будут удалены только выбранные задачи из текущей агенды и панели без даты. Связанные события Google будут удалены при следующей синхронизации."
         onConfirmed: calendarVm.bulkDelete()
         onClosed: page.restoreFocus()
     }

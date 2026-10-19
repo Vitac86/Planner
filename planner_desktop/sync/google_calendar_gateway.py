@@ -35,13 +35,15 @@ Pull (list_changes):
   nextSyncToken.
 
 Классификация ошибок — без импорта googleapiclient (duck-typing по
-`exc.resp.status` / `exc.status_code`): 403(rate)/408/429/5xx и сетевые
-исключения -> RetryableGatewayError (бэкофф, потом dead-letter);
+`exc.resp.status` / `exc.status_code`): 403(rate)/408/429/5xx ->
+RetryableGatewayError (бэкофф, потом dead-letter); транспортные отказы ->
+NetworkUnavailableError (ожидание связи без расхода попыток операции);
 остальные HTTP -> TerminalGatewayError (сразу dead-letter).
 """
 from __future__ import annotations
 
 import logging
+from http.client import HTTPException
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -67,6 +69,7 @@ from planner_desktop.sync.calendar_series_mapper import (
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CONFIRMED,
     CalendarEvent,
+    NetworkUnavailableError,
     RemoteChangeBatch,
     RemoteMasterConflictError,
     RemoteOccurrenceConflictError,
@@ -115,7 +118,17 @@ def _classify(exc: BaseException, context: str) -> Exception:
     status = _http_status(exc)
     detail = f"{context}: {exc}"
     if status is None:
-        # Сеть/таймаут/DNS — временная беда, операцию можно повторить.
+        error_type = type(exc)
+        transport_error = (
+            isinstance(exc, (OSError, HTTPException))
+            or (error_type.__module__ == "httplib2"
+                and error_type.__name__ == "ServerNotFoundError")
+            or (error_type.__module__ == "google.auth.exceptions"
+                and error_type.__name__ == "TransportError")
+        )
+        if transport_error:
+            return NetworkUnavailableError(detail)
+        # Unknown adapter/programming errors must still exhaust their budget.
         return RetryableGatewayError(detail)
     if status in _RETRYABLE_STATUSES:
         return RetryableGatewayError(f"HTTP {status}. {detail}")
@@ -262,11 +275,13 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
     start: Any = None
     end: Any = None
     recurrence_start: Any = None
+    recurrence_end: Any = None
     if is_all_day:
         start = date.fromisoformat(start_raw["date"])
         recurrence_start = start
         end = (date.fromisoformat(end_raw["date"])
                if end_raw.get("date") else start + timedelta(days=1))
+        recurrence_end = end
     elif start_raw.get("dateTime"):
         start = _parse_timed(start_raw["dateTime"])
         # Keep the provider's wall-clock DTSTART separately.  The existing
@@ -284,6 +299,15 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
                 pass
         recurrence_start = provider_start.replace(tzinfo=None)
         end = _parse_timed(end_raw["dateTime"]) if end_raw.get("dateTime") else None
+        if end_raw.get("dateTime"):
+            provider_end = _parse_rfc3339(end_raw["dateTime"])
+            end_timezone = end_raw.get("timeZone") or start_raw.get("timeZone")
+            if end_timezone:
+                try:
+                    provider_end = provider_end.astimezone(ZoneInfo(end_timezone))
+                except Exception:
+                    pass
+            recurrence_end = provider_end.replace(tzinfo=None)
 
     return CalendarEvent(
         id=item.get("id"),
@@ -304,6 +328,7 @@ def payload_to_event(item: Mapping[str, Any]) -> CalendarEvent:
         start_timezone=start_raw.get("timeZone"),
         end_timezone=end_raw.get("timeZone"),
         recurrence_start=recurrence_start,
+        recurrence_end=recurrence_end,
         private_extended_properties={
             str(key): str(value)
             for key, value in (
@@ -644,7 +669,11 @@ class GoogleCalendarGateway:
         remote_hash = remote.private_extended_properties.get(
             PLANNER_PAYLOAD_HASH_PROPERTY
         )
-        if desired_hash and remote_hash == desired_hash:
+        if (
+            desired_hash
+            and remote_hash == desired_hash
+            and _master_content_matches(remote, desired_hash)
+        ):
             return remote
         raise RemoteMasterConflictError(
             "Мастер с детерминированным id уже принадлежит этой серии, "

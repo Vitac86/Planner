@@ -103,7 +103,7 @@ Rectangle {
                 ToolTip.visible: badgeHover.hovered
                 ToolTip.text: block.eventData.hasDeadLetter === true
                               ? "Ошибка синхронизации"
-                              : "Ожидает ручной синхронизации"
+                              : "Ожидает синхронизации"
                 HoverHandler { id: badgeHover }
             }
         }

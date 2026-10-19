@@ -12,7 +12,6 @@ from planner_desktop.domain.recurrence import (
     TaskSeries,
 )
 from planner_desktop.domain.series_calendar_link import (
-    PLANNER_SERIES_UID_PROPERTY,
     SeriesCalendarLink,
     SeriesLinkStatus,
 )
@@ -23,7 +22,7 @@ from planner_desktop.storage.calendar_series_sync_store import (
     CalendarSeriesSyncStore,
 )
 from planner_desktop.sync.fake_calendar_gateway import FakeCalendarGateway
-from planner_desktop.sync.sync_types import CalendarEvent
+from planner_desktop.sync.calendar_series_mapper import series_to_master_event
 
 
 def timed_series(uid: str = "series-1") -> TaskSeries:
@@ -90,16 +89,7 @@ def owned_gateway_with_instance(
     gateway = FakeCalendarGateway()
     gateway.insert_recurring_master(
         master_id,
-        CalendarEvent(
-            summary=series.title,
-            description=series.notes,
-            start=datetime(2026, 7, 20, 9),
-            end=datetime(2026, 7, 20, 9, 30),
-            recurrence_lines=("RRULE:FREQ=DAILY",),
-            private_extended_properties={
-                PLANNER_SERIES_UID_PROPERTY: series.uid,
-            },
-        ),
+        series_to_master_event(series),
     )
     identity = local_occurrence_to_google_original_start(
         series, occurrence_key

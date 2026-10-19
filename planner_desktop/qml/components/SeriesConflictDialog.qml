@@ -7,7 +7,7 @@ import "../theme"
 // Explicit resolution of one Planner-owned Google master conflict
 // (Phase 3.2B3A).  Opening the dialog reads only local SQLite state; the
 // only Google write ("Оставить версию Planner") happens later, inside the
-// next manual sync.  No action is pre-selected and Enter on the initial
+// next sync.  No action is pre-selected and Enter on the initial
 // focus never confirms anything; Esc cancels.
 Dialog {
     id: dialog
@@ -110,7 +110,7 @@ Dialog {
 
         Label {
             visible: (dialog.conflictData.pendingResolutionText || "").length > 0
-            text: "Ожидает ручной синхронизации: "
+            text: "Ожидает синхронизации: "
                   + (dialog.conflictData.pendingResolutionText || "")
             font.pixelSize: Theme.fontCaption
             font.family: Theme.fontFamily
@@ -163,7 +163,7 @@ Dialog {
                 Layout.fillWidth: true
                 Accessible.description:
                     "Перезапишет мастер Google текущей локальной серией при "
-                    + "следующей ручной синхронизации. Локальная серия не меняется."
+                    + "следующей синхронизации. Локальная серия не меняется."
                 onClicked: keepPlannerConfirm.openFor(dialog.seriesUid)
             }
             AppButton {
@@ -207,7 +207,7 @@ Dialog {
         id: keepPlannerConfirm
         headerText: "Оставить версию Planner?"
         message: "Изменится серия Google: её мастер будет перезаписан текущей "
-                 + "локальной серией при следующей ручной синхронизации. Если "
+                 + "локальной серией при следующей синхронизации. Если "
                  + "Google изменится ещё раз до синхронизации, перезапись "
                  + "остановится и потребуется новое решение."
         confirmText: "Оставить версию Planner"

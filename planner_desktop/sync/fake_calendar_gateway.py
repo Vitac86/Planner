@@ -41,6 +41,7 @@ from planner_desktop.domain.series_adoption import (
 )
 from planner_desktop.sync.calendar_series_mapper import (
     master_event_to_owned_payload,
+    master_payload_hash,
 )
 from planner_desktop.sync.sync_types import (
     EVENT_STATUS_CANCELLED,
@@ -347,7 +348,11 @@ class FakeCalendarGateway:
             actual_hash = existing.private_extended_properties.get(
                 PLANNER_PAYLOAD_HASH_PROPERTY
             )
-            if desired_hash and desired_hash == actual_hash:
+            if (
+                desired_hash
+                and desired_hash == actual_hash
+                and master_payload_hash(existing) == desired_hash
+            ):
                 return self.get_recurring_master(remote_event_id)
             raise RemoteMasterConflictError(
                 "Существующий мастер этой серии отличается.",
@@ -390,15 +395,7 @@ class FakeCalendarGateway:
         # маркеров недостаточно: чужая правка (например, summary с телефона)
         # НЕ обновляет приватные маркеры, и «свежий» маркер не должен
         # блокировать явную перезапись Keep-Planner (Phase 3.2B3A).
-        same_content = (
-            current.summary == master_payload.summary
-            and current.description == master_payload.description
-            and current.start == master_payload.start
-            and current.end == master_payload.end
-            and current.is_all_day == master_payload.is_all_day
-            and tuple(current.recurrence_lines)
-                == tuple(master_payload.recurrence_lines)
-        )
+        same_content = master_payload_hash(current) == desired_hash
         if desired_hash and desired_hash == current_hash and same_content:
             return self.get_recurring_master(remote_event_id)
         if expected_etag and current.etag != expected_etag:

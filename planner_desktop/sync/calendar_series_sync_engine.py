@@ -31,6 +31,7 @@ from planner_desktop.sync.sync_types import (
     CalendarEvent,
     RemoteMasterConflictError,
     RetryableGatewayError,
+    NetworkUnavailableError,
     TerminalGatewayError,
 )
 from planner_desktop.usecases.series_calendar_link_service import (
@@ -62,7 +63,10 @@ class CalendarSeriesSyncEngine:
                 op = self._refresh_latest_payload(op)
                 item = self._push_op(op)
             except RetryableGatewayError as exc:
-                remains_pending = self._store.requeue_op(op.id, str(exc))
+                remains_pending = self._store.requeue_op(
+                    op.id, str(exc),
+                    consume_attempt=not isinstance(exc, NetworkUnavailableError),
+                )
                 item = SeriesSyncItemResult(
                     op.series_uid,
                     op.op,

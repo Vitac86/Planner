@@ -153,16 +153,57 @@ class DesktopTaskService:
         return SERIES_INTERACTION_ERROR
 
     def create_task(self, task: Task) -> Task:
+        queue_snapshot = self._queue_snapshot(task.uid)
+        original_id = task.id
         created = self.repository.add(task)
-        if self._queue is not None and not self._is_local_series_occurrence(created):
-            record_local_create(self._queue, created)
-        return created
+        try:
+            if self._queue is not None and not self._is_local_series_occurrence(created):
+                record_local_create(self._queue, created)
+            return created
+        except Exception:
+            # A failed save must not leave an invisible task behind: Quick Add
+            # keeps its text on failure, and retrying must create only one row.
+            try:
+                self._restore_queue_snapshot(created.uid, queue_snapshot)
+            finally:
+                self.repository.hard_delete_by_uid(created.uid)
+                task.id = original_id
+            raise
 
-    def update_task(self, task: Task) -> Task:
-        updated = self.repository.update(task)
-        if self._queue is not None and not self._is_local_series_occurrence(updated):
-            record_local_update(self._queue, updated)
-        return updated
+    def update_task(self, task: Task, *, previous: Optional[Task] = None) -> Task:
+        current = self.repository.get_by_uid(task.uid)
+        original = deepcopy(previous if previous is not None else current)
+        queue_snapshot = self._queue_snapshot(task.uid)
+        # A background push may have attached an event while this editor held
+        # an older Task. Preserve that binding instead of enqueueing a duplicate
+        # create or overwriting the newer etag with the editor's stale value.
+        if (task.start is not None and current is not None
+                and current.google_calendar_event_id is not None):
+            for name in (
+                "google_calendar_event_id", "google_calendar_etag",
+                "google_calendar_recurring_event_id", "google_calendar_original_start",
+            ):
+                value = getattr(current, name)
+                setattr(task, name, value)
+                if original is not None:
+                    setattr(original, name, value)
+        try:
+            updated = self._update_local_task(task)
+            if self._queue is not None and not self._is_local_series_occurrence(updated):
+                record_local_update(self._queue, updated)
+            return updated
+        except Exception:
+            try:
+                self._restore_queue_snapshot(task.uid, queue_snapshot)
+            finally:
+                if original is not None:
+                    self._restore_repository_task(original)
+            raise
+
+    def _update_local_task(self, task: Task) -> Task:
+        """Merge local edits with metadata from any completed background push."""
+        update = getattr(self.repository, "update_local", self.repository.update)
+        return update(task)
 
     def complete_task(self, task_id: int, completed: bool = True) -> bool:
         """Локальная галочка: Calendar-операция сознательно не ставится."""
@@ -249,21 +290,24 @@ class DesktopTaskService:
         priority = int(priority)
         if priority not in (0, 1, 2, 3):
             return TaskOperationResult(errors=["Приоритет должен быть от 0 до 3."])
-        if task.priority == priority:
-            return TaskOperationResult(task=task)
-        original = deepcopy(task)
         try:
-            task.priority = priority
-            return TaskOperationResult(task=self.repository.update(task))
+            updated = self.repository.update_local_fields(uid, priority=priority)
+            if updated is None:
+                return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
+            return TaskOperationResult(task=updated)
         except Exception as exc:
-            try:
-                self._restore_repository_task(original)
-            except Exception as rollback_exc:
-                return TaskOperationResult(errors=[
-                    f"Не удалось изменить приоритет: {exc} "
-                    f"(ошибка отката: {rollback_exc})"
-                ])
             return TaskOperationResult(errors=[f"Не удалось изменить приоритет: {exc}"])
+
+    def _save_editor_local_fields(self, task: Task, original: Task) -> TaskOperationResult:
+        """Save only the local fields actually changed in this editor operation."""
+        updated = self.repository.update_local_fields(
+            task.uid,
+            priority=task.priority if task.priority != original.priority else None,
+            completed=task.completed if task.completed != original.completed else None,
+        )
+        if updated is None:
+            return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
+        return TaskOperationResult(task=updated)
 
     # ---- форма редактора (создание и правка) ------------------------------------
 
@@ -308,24 +352,24 @@ class DesktopTaskService:
         old_title = task.title
         old_notes = task.notes
         old_schedule = (task.start, task.end, task.duration_minutes, task.is_all_day)
+        original = deepcopy(task)
 
         apply_editor_fields(command, task)
         calendar_text_changed = task.title != old_title or task.notes != old_notes
 
         if becoming_unscheduled:
-            self._detach_schedule(task)
-            return TaskOperationResult(task=self.repository.update(task))
+            return self._commit_schedule_change(
+                task, start=None, end=None, duration_minutes=None,
+                is_all_day=False, unschedule=True, previous=original,
+            )
 
         # У recurring-instance расписание только проверяется выше, но не
         # пересобирается из минутной формы: так текстовая правка не теряет
         # секунды/timezone исходного Calendar-события.
         if recurring:
-            updated = (
-                self.update_task(task)
-                if calendar_text_changed
-                else self.repository.update(task)
-            )
-            return TaskOperationResult(task=updated)
+            if not calendar_text_changed:
+                return self._save_editor_local_fields(task, original)
+            return TaskOperationResult(task=self.update_task(task, previous=original))
 
         if command.add_to_calendar:
             start, end, duration, is_all_day = schedule_from_command(command)
@@ -339,12 +383,9 @@ class DesktopTaskService:
         )
         # Приоритет и completed — строго локальные поля. Calendar update нужен
         # только для текста события или реального изменения расписания.
-        updated = (
-            self.update_task(task)
-            if calendar_text_changed or schedule_changed
-            else self.repository.update(task)
-        )
-        return TaskOperationResult(task=updated)
+        if not calendar_text_changed and not schedule_changed:
+            return self._save_editor_local_fields(task, original)
+        return TaskOperationResult(task=self.update_task(task, previous=original))
 
     @staticmethod
     def _recurring_schedule_matches(
@@ -399,6 +440,7 @@ class DesktopTaskService:
             return None
         if duration_minutes is not None and duration_minutes <= 0:
             return None
+        original = deepcopy(task)
         task.is_all_day = is_all_day
         if is_all_day:
             start = start.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -419,7 +461,7 @@ class DesktopTaskService:
             )
             task.duration_minutes = minutes
             task.end = start + timedelta(minutes=minutes)
-        return self.update_task(task)
+        return self.update_task(task, previous=original)
 
     # ---- Phase 2.2 Calendar interactions ---------------------------------------
 
@@ -457,7 +499,7 @@ class DesktopTaskService:
         if current is None:
             return
         self._copy_task_state(snapshot, current)
-        self.repository.update(current)
+        self._update_local_task(current)
 
     def _commit_schedule_change(
         self,
@@ -468,9 +510,10 @@ class DesktopTaskService:
         duration_minutes: Optional[int],
         is_all_day: bool,
         unschedule: bool = False,
+        previous: Optional[Task] = None,
     ) -> TaskOperationResult:
         """Persist one interaction and compensate both stores on failure."""
-        original = deepcopy(task)
+        original = deepcopy(previous if previous is not None else task)
         proposed = (start, end, duration_minutes, is_all_day)
         if proposed == self._schedule_tuple(task):
             return TaskOperationResult(task=task)
@@ -481,17 +524,18 @@ class DesktopTaskService:
             task.duration_minutes = duration_minutes
             task.is_all_day = is_all_day
             if unschedule:
-                task.google_calendar_event_id = None
-                task.google_calendar_etag = None
-                task.google_calendar_recurring_event_id = None
-                task.google_calendar_original_start = None
-            updated = self.repository.update(task)
+                updated, detached_event_id = self.repository.detach_calendar_task(task)
+                # A push may have linked the task since the initial UI read.
+                # Keep that binding available if the queue write needs rollback.
+                original.google_calendar_event_id = detached_event_id
+            else:
+                updated = self._update_local_task(task)
             if self._queue is not None:
                 if unschedule:
-                    if original.google_calendar_event_id is not None:
+                    if detached_event_id is not None:
                         self._queue.enqueue_delete(
                             task.uid,
-                            payload={"event_id": original.google_calendar_event_id},
+                            payload={"event_id": detached_event_id},
                         )
                     else:
                         self._queue.cancel_pending_ops(task.uid)
@@ -923,30 +967,6 @@ class DesktopTaskService:
             is_all_day=False,
             unschedule=True,
         )
-
-    def _detach_schedule(self, task: Task) -> None:
-        """Снять расписание и привязку к календарю + правильные операции в очереди.
-
-        Порядок важен: event_id читается ДО отвязки. Push-движок для delete
-        берёт event_id из payload, поэтому отвязанная задача не мешает
-        удалению события.
-        """
-        if self._queue is not None:
-            if task.google_calendar_event_id is not None:
-                self._queue.enqueue_delete(
-                    task.uid, payload={"event_id": task.google_calendar_event_id}
-                )
-            else:
-                # События ещё нет — просто снимаем недопушенный create/update.
-                self._queue.cancel_pending_ops(task.uid)
-        task.start = None
-        task.end = None
-        task.duration_minutes = None
-        task.is_all_day = False
-        task.google_calendar_event_id = None
-        task.google_calendar_etag = None
-        task.google_calendar_recurring_event_id = None
-        task.google_calendar_original_start = None
 
     # ---- статистика очереди (для бейджей и настроек) -----------------------------
 

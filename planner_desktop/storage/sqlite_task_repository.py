@@ -193,6 +193,123 @@ class SQLiteTaskRepository:
         self._connection.commit()
         return task
 
+    def update_local(self, task: Task) -> Task:
+        """Save user edits while retaining a binding received during editing.
+
+        Hold the write lock from reading metadata through the ordinary update;
+        a background insert/patch reply cannot slip between these two writes.
+        Unschedule explicitly clears the binding and therefore bypasses merge.
+        """
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            current = self.get_by_uid(task.uid)
+            if (task.start is not None and current is not None
+                    and current.google_calendar_event_id is not None):
+                task.google_calendar_event_id = current.google_calendar_event_id
+                task.google_calendar_etag = current.google_calendar_etag
+                task.google_calendar_recurring_event_id = current.google_calendar_recurring_event_id
+                task.google_calendar_original_start = current.google_calendar_original_start
+            return self.update(task)
+
+    def update_local_fields(
+        self, uid: str, *, priority: Optional[int] = None,
+        completed: Optional[bool] = None,
+    ) -> Optional[Task]:
+        """Change only Planner fields; preserve the Calendar payload/version.
+
+        A remote pull may finish after an editor read its Task. Updating these
+        columns directly keeps the pulled title, schedule and tombstone intact.
+        Local completion/priority must not invalidate a pending pull's CAS or
+        make an old Calendar payload win the next timestamp comparison.
+        """
+        assignments, values = [], []
+        if priority is not None:
+            assignments.append("priority = ?")
+            values.append(priority)
+        if completed is not None:
+            assignments.extend([
+                "completed_at = CASE WHEN ? = 0 THEN NULL "
+                "WHEN completed = 0 THEN ? ELSE completed_at END",
+                "completed = ?",
+            ])
+            values.extend([int(completed), _dt_to_text(utc_now()), int(completed)])
+        with self._connection:
+            if assignments:
+                cursor = self._connection.execute(
+                    "UPDATE tasks SET " + ", ".join(assignments)
+                    + " WHERE uid = ? AND deleted_at IS NULL",
+                    (*values, uid),
+                )
+                if cursor.rowcount == 0:
+                    return None
+            current = self.get_by_uid(uid)
+            return current if current is not None and not current.is_deleted else None
+
+    def detach_calendar_task(self, task: Task) -> tuple[Task, Optional[str]]:
+        """Clear the binding and return the event actually detached under lock."""
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            current = self.get_by_uid(task.uid)
+            event_id = current.google_calendar_event_id if current is not None else None
+            task.google_calendar_event_id = None
+            task.google_calendar_etag = None
+            task.google_calendar_recurring_event_id = None
+            task.google_calendar_original_start = None
+            return self.update(task), event_id
+
+    def update_calendar_metadata(
+        self, uid: str, event_id: str, etag: Optional[str],
+        expected_event_id: Optional[str],
+    ) -> bool:
+        """Merge a push reply without rewriting user fields or their timestamp.
+
+        A detached/rescheduled task must not regain its old Calendar binding.
+        Tombstones retain the binding so the newly created event can be deleted.
+        """
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE tasks SET google_calendar_event_id = ?, google_calendar_etag = ? "
+                "WHERE uid = ? AND google_calendar_event_id IS ? "
+                "AND (start IS NOT NULL OR deleted_at IS NOT NULL)",
+                (event_id, etag, uid, expected_event_id),
+            )
+        return cursor.rowcount > 0
+
+    def apply_calendar_update(self, task: Task, expected: Task) -> bool:
+        """Apply pull only if the observed local version is still unchanged.
+
+        The condition and write are one SQLite statement, including the queue
+        check: another connection cannot edit/delete the task between them.
+        Local-only fields (completion, tags and priority) are never overwritten.
+        """
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE tasks SET title = ?, notes = ?, start = ?, "end" = ?,
+                    duration_minutes = ?, is_all_day = ?,
+                    google_calendar_event_id = ?, google_calendar_etag = ?,
+                    google_calendar_recurring_event_id = ?,
+                    google_calendar_original_start = ?, updated_at = ?, deleted_at = ?
+                WHERE uid = ? AND updated_at = ?
+                    AND google_calendar_event_id IS ? AND google_calendar_etag IS ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM desktop_pending_calendar_ops
+                        WHERE task_uid = tasks.uid
+                    )
+                """,
+                (
+                    task.title, task.notes, _dt_to_text(task.start), _dt_to_text(task.end),
+                    task.duration_minutes, int(task.is_all_day),
+                    task.google_calendar_event_id, task.google_calendar_etag,
+                    task.google_calendar_recurring_event_id,
+                    _dt_to_text(task.google_calendar_original_start),
+                    _dt_to_text(utc_now()), _dt_to_text(task.deleted_at),
+                    expected.uid, _dt_to_text(expected.updated_at),
+                    expected.google_calendar_event_id, expected.google_calendar_etag,
+                ),
+            )
+        return cursor.rowcount > 0
+
     def get(self, task_id: int) -> Optional[Task]:
         """Возвращает задачу по id, включая тумбстоуны (для проверок удаления)."""
         row = self._connection.execute(
@@ -231,20 +348,7 @@ class SQLiteTaskRepository:
         task = self.get(task_id)
         if task is None or task.is_deleted:
             return False
-        task.set_completed(completed)
-        task.touch()
-        self._connection.execute(
-            "UPDATE tasks SET completed = ?, completed_at = ?, updated_at = ? "
-            "WHERE id = ?",
-            (
-                int(task.completed),
-                _dt_to_text(task.completed_at),
-                _dt_to_text(task.updated_at),
-                task_id,
-            ),
-        )
-        self._connection.commit()
-        return True
+        return self.update_local_fields(task.uid, completed=completed) is not None
 
     # ---- списки (тумбстоуны скрыты) ------------------------------------------
 
@@ -319,7 +423,11 @@ class SQLiteTaskRepository:
         return self.list_all()
 
     def toggle_completed(self, uid: str) -> bool:
-        task = self.get_by_uid(uid)
-        if task is None or task.is_deleted:
-            return False
-        return self.complete(task.id, not task.completed)
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE tasks SET completed_at = CASE WHEN completed = 1 "
+                "THEN NULL ELSE ? END, completed = 1 - completed "
+                "WHERE uid = ? AND deleted_at IS NULL",
+                (_dt_to_text(utc_now()), uid),
+            )
+        return cursor.rowcount > 0

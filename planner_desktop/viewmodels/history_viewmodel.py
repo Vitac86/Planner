@@ -112,11 +112,13 @@ class HistoryViewModel(TaskActionsViewModel):
         return self._range_days
 
     def _groups(self) -> List:
-        return self._history.groups(range_days=self._range_days, today=date.today())
+        return self._history.groups(
+            range_days=self._range_days, today=self._now().date()
+        )
 
     @Property("QVariantList", notify=historyChanged)
     def groups(self) -> List[Dict[str, Any]]:
-        today = date.today()
+        today = self._now().date()
         result: List[Dict[str, Any]] = []
         for group in self._groups():
             rows = []

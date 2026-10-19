@@ -49,6 +49,7 @@ from planner_desktop.usecases.tag_service import TagService
 from planner_desktop.usecases.template_service import TemplateService
 from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
+from planner_desktop.viewmodels.date_rollover import DateRolloverMonitor
 from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
 from planner_desktop.viewmodels.search_viewmodel import SearchViewModel
 from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
@@ -63,8 +64,8 @@ def _build_services() -> tuple[DesktopTaskService, DailyTaskService]:
 
     Календарная очередь и ежедневные задачи живут в той же изолированной
     БД. Сетевых вызовов при сборке сервисов нет: реальный Google-шлюз
-    строится лениво внутри ManualSyncService и только по явному действию
-    пользователя (кнопка синка в настройках).
+    строится лениво внутри ManualSyncService при ручном или автоматическом
+    цикле. Автоматический планировщик запускается после загрузки QML.
 
     PLANNER_DESKTOP_DEMO=1 включает фейковые in-memory репозитории с
     демо-данными — ничего не пишется на диск. Старый Planner/app.db не
@@ -232,6 +233,13 @@ class MainWindow:
         self.search_viewmodel = SearchViewModel(self.service)
         self.ui_state_viewmodel = UiStateViewModel()
 
+        # Midnight and resume update local date-dependent views. Calendar's
+        # refresh preserves the user's chosen date and display mode.
+        self.date_rollover_monitor = DateRolloverMonitor()
+        self.date_rollover_monitor.dayChanged.connect(self.today_viewmodel.refresh)
+        self.date_rollover_monitor.dayChanged.connect(self.calendar_viewmodel.refresh)
+        self.date_rollover_monitor.dayChanged.connect(self.history_viewmodel.refresh)
+
         # Мутация задач на одной странице освежает остальные. Петли нет:
         # refresh() эмитит только *Changed-сигналы, а не tasksMutated.
         # Настройки — тоже мутатор: pull ручного синка меняет задачи.
@@ -242,6 +250,7 @@ class MainWindow:
                           self.settings_viewmodel, self.history_viewmodel,
                           self.search_viewmodel)
         for mutator in task_mutators:
+            mutator.tasksMutated.connect(self.settings_viewmodel.scheduleAutoSync)
             for listener in task_listeners:
                 if listener is not mutator:
                     mutator.tasksMutated.connect(listener.refresh)
@@ -269,10 +278,11 @@ class MainWindow:
         context.setContextProperty("uiVm", self.ui_state_viewmodel)
 
     def _build_manual_sync_service(self):
-        """ManualSyncService для кнопки «Синхронизировать сейчас».
+        """Общий ManualSyncService для ручных и автоматических циклов.
 
         Провайдер шлюза ленивый (google_auth.build_real_gateway): ни OAuth,
-        ни сети при создании окна — только при явном нажатии кнопки.
+        ни сети при создании окна. OAuth запускается только явно,
+        синк — кнопкой или планировщиком после загрузки QML.
         for_db_path обязателен: run_once() выполняется в фоновом Qt-потоке,
         а SQLite-соединения GUI-потока туда переносить нельзя — сервис
         открывает свои на время цикла. В режимах без очереди (демо/
@@ -293,3 +303,9 @@ class MainWindow:
         self.engine.load(str(QML_DIR / "Main.qml"))
         if not self.engine.rootObjects():
             raise RuntimeError("Не удалось загрузить qml/Main.qml")
+        self.settings_viewmodel.startAutoSync()
+        from PySide6.QtCore import QCoreApplication
+
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.settings_viewmodel.stopAutoSync)
