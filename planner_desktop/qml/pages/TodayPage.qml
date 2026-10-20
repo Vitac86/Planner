@@ -676,7 +676,7 @@ ScrollView {
     ConfirmDialog {
         id: confirmBulkDeleteDialog
         headerText: "Удалить выбранные задачи?"
-        message: "Будут удалены только выбранные видимые задачи. Связанные события попадут в очередь следующего ручного синка."
+        message: "Будут удалены только выбранные видимые задачи. Связанные события Google будут удалены при следующей синхронизации."
         onConfirmed: todayVm.bulkDelete()
         onClosed: page.restoreFocus()
     }

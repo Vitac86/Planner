@@ -13,6 +13,7 @@ Rectangle {
 
     property int currentIndex: 0
     signal pageSelected(int index)
+    signal syncSettingsRequested()
 
     // тонкая линия-разделитель справа
     Rectangle {
@@ -61,7 +62,7 @@ Rectangle {
                     color: Theme.textPrimary
                 }
                 Label {
-                    text: "PySide6 / QML"
+                    text: "Задачи и планы"
                     font.pixelSize: 11
                     font.family: Theme.fontFamily
                     color: Theme.textMuted
@@ -141,6 +142,12 @@ Rectangle {
 
         // ---- футер ----
         Rectangle {
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: settingsVm.syncStatusText + ". Открыть настройки синхронизации"
+            Accessible.onPressAction: sidebar.syncSettingsRequested()
+            Keys.onReturnPressed: sidebar.syncSettingsRequested()
+            Keys.onSpacePressed: sidebar.syncSettingsRequested()
             Layout.fillWidth: true
             implicitHeight: footerRow.implicitHeight + Theme.spacingMd * 2
             radius: Theme.radiusSmall
@@ -161,7 +168,7 @@ Rectangle {
                     Layout.alignment: Qt.AlignTop
                 }
                 Label {
-                    text: "Изолированная локальная БД.\nСинк с Google — только вручную."
+                    text: settingsVm.syncStatusText
                     font.pixelSize: 11
                     font.family: Theme.fontFamily
                     color: Theme.textMuted
@@ -169,6 +176,11 @@ Rectangle {
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: sidebar.syncSettingsRequested()
             }
         }
     }

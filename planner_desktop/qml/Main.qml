@@ -106,6 +106,10 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 currentIndex: root.currentPage
                 onPageSelected: index => root.currentPage = index
+                onSyncSettingsRequested: {
+                    root.currentPage = 3
+                    Qt.callLater(settingsPage.scrollToSync)
+                }
             }
 
             // Область контента с мягким вертикальным градиентом фона.
@@ -128,7 +132,7 @@ ApplicationWindow {
                     TodayPage { id: todayPage; objectName: "todayPage" }
                     CalendarPage { id: calendarPage; objectName: "calendarPage" }
                     HistoryPage { id: historyPage; objectName: "historyPage" }
-                    SettingsPage {}
+                    SettingsPage { id: settingsPage }
                 }
             }
         }

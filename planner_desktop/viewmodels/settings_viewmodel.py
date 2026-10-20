@@ -1,24 +1,7 @@
-"""ViewModel страницы «Настройки»: локальный статус + ручной Google-синк.
+"""Настройки, подключение Google и общий ручной/автоматический синк.
 
-Что здесь есть:
-
-- чтение локального состояния (путь БД, счётчики очереди, диагностика) —
-  как раньше, без сети;
-- статус подключения Google Calendar (только файловая система
-  изолированного профиля: есть ли client_secret.json / token.json;
-  сами токены наружу не отдаются);
-- два ЯВНЫХ действия пользователя: «Подключить Google Calendar»
-  (браузерный OAuth, рекомендуется тестовый аккаунт) и «Синхронизировать
-  сейчас» (ровно один цикл push+pull через ManualSyncService).
-
-Чего здесь НЕТ и не появится в этой фазе: автоматического/фонового
-синка — ни таймеров, ни запуска при старте. Сеть трогается только внутри
-явно нажатых действий, и обе операции выполняются вне GUI-потока
-(QtBackgroundExecutor), поэтому QML не замирает; результат возвращается
-сигналами, кнопки восстанавливаются и при успехе, и при ошибке.
-
-Для headless-тестов все внешние зависимости инъецируются:
-manual_sync_service, connection_checker, connector, executor.
+OAuth всегда запускается явно. Планировщик запускается окном после загрузки
+QML; сетевые операции выполняются через QtBackgroundExecutor.
 """
 from __future__ import annotations
 
@@ -54,6 +37,7 @@ from planner_desktop.usecases.manual_sync_service import (
 from planner_desktop.usecases.task_service import DesktopTaskService
 from planner_desktop.usecases.tag_service import TagService
 from planner_desktop.viewmodels.series_rows import rule_from_map, rule_to_map
+from planner_desktop.viewmodels.auto_sync import AutoSyncScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -62,17 +46,17 @@ APP_MODE_TEXT = (
     "версия Planner. Запуск: run_desktop.py (или start_planner.bat)."
 )
 SYNC_NOTE_TEXT = (
-    "Синхронизация с Google Calendar выполняется ТОЛЬКО вручную — кнопкой "
-    "ниже или командой `python -m scripts.desktop_calendar_sync_once "
-    "--real-google`. Автоматического и фонового синка нет: ни при старте, "
-    "ни по таймеру."
+    "После подключения Google изменения отправляются автоматически через "
+    "секунду после правки. Изменения из Google проверяются каждую минуту, "
+    "пока Planner открыт. Без связи задачи остаются на компьютере, а "
+    "отправка повторяется автоматически. Задачи без даты и отметки "
+    "о выполнении остаются локальными."
 )
 MANUAL_SYNC_NOTE_TEXT = (
-    "Ручной синк выполняет один цикл push+pull. Токен хранится в "
-    "изолированном профиле PlannerDesktop; профиль старого приложения не "
-    "используется. Для первого подключения используйте ТЕСТОВЫЙ "
-    "Google-аккаунт (см. docs/GOOGLE_SYNC_SETUP.md)."
+    "Кнопка «Синхронизировать сейчас» позволяет обновить данные немедленно. "
+    "Автосинхронизацию можно отключить — выбор сохранится после перезапуска."
 )
+AUTO_SYNC_ENABLED_KEY = "auto_sync_enabled"
 SYNC_UNAVAILABLE_TEXT = (
     "Синк недоступен в этом режиме (нет локальной очереди операций)."
 )
@@ -122,7 +106,8 @@ class SettingsViewModel(QObject):
                  occurrence_sync_store=None,
                  occurrence_resolution_service=None,
                  series_conflict_service=None,
-                 remote_split_service=None) -> None:
+                 remote_split_service=None,
+                 auto_sync_scheduler=None) -> None:
         super().__init__(parent)
         self._service = service
         self._daily = daily_service
@@ -145,6 +130,13 @@ class SettingsViewModel(QObject):
         self._tag_error = ""
         self._template_busy = False
         self._template_error = ""
+        self._auto_sync_enabled = service.get_sync_state(AUTO_SYNC_ENABLED_KEY) != "0"
+        self._sync_automatic = False
+        self._publishing_sync_result = False
+        self._auto_sync = (auto_sync_scheduler if auto_sync_scheduler is not None
+                           else AutoSyncScheduler(self))
+        self._auto_sync.syncRequested.connect(self._sync_automatically)
+        self._auto_sync.stateChanged.connect(self.syncStateChanged.emit)
 
     # ---- общие сведения ---------------------------------------------------------
 
@@ -239,6 +231,72 @@ class SettingsViewModel(QObject):
     def connectEnabled(self) -> bool:
         return self.hasClientSecret and self._busy_kind == ""
 
+    @Property(bool, notify=syncStateChanged)
+    def autoSyncEnabled(self) -> bool:
+        return self._auto_sync_enabled
+
+    @Slot(bool)
+    def setAutoSyncEnabled(self, enabled: bool) -> None:
+        if not self.hasSyncQueue:
+            return
+        try:
+            self._service.calendar_queue.set_state(AUTO_SYNC_ENABLED_KEY,
+                                                   "1" if enabled else "0")
+        except Exception as exc:
+            self._set_error(f"Не удалось сохранить настройку: {exc}")
+            return
+        self._auto_sync_enabled = bool(enabled)
+        self._auto_sync.set_enabled(enabled)
+        self.syncStateChanged.emit()
+
+    def startAutoSync(self) -> None:
+        self._auto_sync.start(self._auto_sync_enabled)
+
+    def stopAutoSync(self) -> None:
+        self._auto_sync.stop()
+
+    @Slot()
+    def scheduleAutoSync(self) -> None:
+        # Pull also emits tasksMutated to refresh pages. It must not cause a
+        # self-sustaining sync loop; local settings actions still schedule.
+        if not self._publishing_sync_result:
+            self._auto_sync.request()
+            self.syncStateChanged.emit()
+
+    @Property(str, notify=syncStateChanged)
+    def syncStatusText(self) -> str:
+        if not self.hasSyncQueue:
+            return "Демо · данные только в памяти"
+        if self.connectRunning:
+            return "Подключение Google Calendar…"
+        if self.syncRunning:
+            return "Синхронизация…"
+        if not self.googleConnected:
+            return "Сохранено на компьютере · Google не подключён"
+        if self.lastSyncError:
+            return ("Нет синхронизации · повторим автоматически"
+                    if self.autoSyncEnabled else "Ошибка синхронизации · см. настройки")
+        if (self.terminalOpsCount or self.terminalSeriesOpsCount
+                or self.terminalOccurrenceOpsCount or self.conflictedSeriesCount
+                or self.unresolvedOccurrenceQuarantineCount
+                or self.conflictRemoteSplitCount or self.terminalRemoteSplitCount):
+            return "Синхронизация требует внимания · см. настройки"
+        pending = (self.pendingOpsCount + self.pendingSeriesCreateCount
+                   + self.pendingSeriesUpdateCount + self.pendingSeriesDeleteCount
+                   + self.pendingOccurrenceUpdateCount + self.pendingOccurrenceCancelCount
+                   + self.activeRemoteSplitCount)
+        if pending:
+            return f"Сохранено на компьютере · ожидают отправки: {pending}"
+        if not self.autoSyncEnabled:
+            return "Автосинхронизация выключена"
+        if self.lastSyncAt == "—":
+            return "Автосинхронизация включена · ожидаем первый обмен"
+        return f"Google Calendar · обновлено {self.lastSyncAt}"
+
+    def _sync_automatically(self) -> None:
+        if self.autoSyncEnabled and self.manualSyncEnabled:
+            self._start_sync(automatic=True)
+
     # ---- сводка последнего синка ----------------------------------------------------
 
     @Property(str, notify=syncStateChanged)
@@ -273,6 +331,7 @@ class SettingsViewModel(QObject):
                             f"Ожидаемый путь: {self.clientSecretPath}")
             return
         self._busy_kind = "connect"
+        self._auto_sync.begin()
         self._set_error("", emit_signal=False)
         self.syncStateChanged.emit()
         self._submit(self._connector, self._on_connect_done)
@@ -287,10 +346,13 @@ class SettingsViewModel(QObject):
             self.toastMessage.emit("Google Calendar подключён")
         self.syncStateChanged.emit()
         self.stateChanged.emit()
+        self._auto_sync.finish(not isinstance(outcome, Exception))
+        if not isinstance(outcome, Exception):
+            self.scheduleAutoSync()
 
     @Slot()
     def syncNow(self) -> None:
-        """Один ручной цикл push+pull — вне GUI-потока. Никакого автозапуска."""
+        """Немедленный цикл через тот же исполнитель, что и автосинк."""
         if self._busy_kind:
             return
         if self._sync_service is None:
@@ -300,6 +362,11 @@ class SettingsViewModel(QObject):
             self._set_error("Google Calendar не подключён — сначала нажмите "
                             "«Подключить Google Calendar».")
             return
+        self._start_sync(automatic=False)
+
+    def _start_sync(self, *, automatic: bool) -> None:
+        self._sync_automatic = automatic
+        self._auto_sync.begin()
         self._busy_kind = "sync"
         self._set_error("", emit_signal=False)
         self.syncStateChanged.emit()
@@ -315,13 +382,19 @@ class SettingsViewModel(QObject):
             self._set_error(outcome.error, emit_signal=False)
         else:
             self._set_error("", emit_signal=False)
-            if isinstance(outcome, ManualSyncResult):
+            if isinstance(outcome, ManualSyncResult) and not self._sync_automatic:
                 self.toastMessage.emit(outcome.summary)
         self.syncStateChanged.emit()
         self.stateChanged.emit()   # счётчики очереди/курсор изменились
         self.externalSeriesStateChanged.emit()
         self.seriesLinksStateChanged.emit()
-        self.tasksMutated.emit()   # pull мог создать/обновить/удалить задачи
+        self._publishing_sync_result = True
+        try:
+            self.tasksMutated.emit()  # pull мог изменить задачи
+        finally:
+            self._publishing_sync_result = False
+        self._auto_sync.finish(isinstance(outcome, ManualSyncResult)
+                               and outcome.ok and outcome.pending_after == 0)
 
     @Slot()
     def refresh(self) -> None:
@@ -398,8 +471,8 @@ class SettingsViewModel(QObject):
     @Property(str, constant=True)
     def linkedSeriesNote(self) -> str:
         return (
-            "Здесь показаны локальные связи и очередь мастеров. Страница не "
-            "обращается к Google; сеть вызывается только кнопкой ручного синка."
+            "Здесь показаны связанные серии и ожидающие отправки изменения. "
+            "Они отправятся при следующей синхронизации."
         )
 
     def _series_link_diagnostics(self) -> dict:
@@ -601,6 +674,7 @@ class SettingsViewModel(QObject):
             self.toastMessage.emit(result.error)
             return False
         self.seriesLinksStateChanged.emit()
+        self.scheduleAutoSync()
         if mutates_tasks:
             self.tasksMutated.emit()
         return True
@@ -650,7 +724,7 @@ class SettingsViewModel(QObject):
         return (
             "Разрешение конфликтов выполняется только явными действиями "
             "пользователя. «Оставить версию Planner» и пересоздание серии "
-            "выполняются следующей ручной синхронизацией; «Использовать "
+            "выполняются следующей синхронизацией; «Использовать "
             "версию Google» и отключение — локальные операции без сети."
         )
 
@@ -697,10 +771,9 @@ class SettingsViewModel(QObject):
     @Property(str, constant=True)
     def remoteSplitNote(self) -> str:
         return (
-            "Разделение «этот и будущие» связанной серии выполняется "
-            "durable-планом: удалённые шаги происходят только при ручной "
-            "синхронизации. После завершения в Google существуют два "
-            "мастера: исходный (прошлые экземпляры) и преемник."
+            "Разделение «этот и будущие» применяется в Google при следующей "
+            "синхронизации. Прошлые события остаются в исходной серии, "
+            "а будущие переходят в новую."
         )
 
     def _remote_split_counts(self) -> dict:
@@ -794,6 +867,7 @@ class SettingsViewModel(QObject):
             )
             return False
         self.seriesLinksStateChanged.emit()
+        self.scheduleAutoSync()
         return True
 
     @Slot(int, result=bool)
@@ -1090,8 +1164,8 @@ class SettingsViewModel(QObject):
     @Property(str, constant=True)
     def seriesNote(self) -> str:
         return (
-            "Локальные серии не синхронизируются с Google Calendar в этой "
-            "фазе: экземпляры существуют только в Planner Desktop."
+            "Повторяющиеся задачи хранятся в Planner. Чтобы отправлять серию "
+            "в Google Calendar, подключите её к календарю в редакторе задачи."
         )
 
     def _recurrence_service(self):

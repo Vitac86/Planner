@@ -25,6 +25,11 @@ ScrollView {
             contentItem.contentY = Math.max(0, googleSeriesCatalog.y - Theme.spacingLg)
     }
 
+    function scrollToSync() {
+        if (contentItem)
+            contentItem.contentY = Math.max(0, syncPanel.y - Theme.spacingLg)
+    }
+
     // Карточка «иконка + название настройки + значение».
     component SettingRow: Panel {
         property string name: ""
@@ -93,7 +98,7 @@ ScrollView {
 
         PageHeader {
             title: "Настройки"
-            subtitle: "Данные хранятся локально на этом компьютере · синхронизация с Google — только вручную"
+            subtitle: "Сохранение на компьютере и синхронизация с Google Calendar"
             Layout.fillWidth: true
             stackActions: page.compact
         }
@@ -869,7 +874,7 @@ ScrollView {
                 Label {
                     visible: settingsVm.externalSeriesRows.length === 0
                     text: "Серии ещё не обнаружены. Каталог заполняется только "
-                          + "после явной ручной синхронизации."
+                          + "после синхронизации."
                     font.pixelSize: Theme.fontBody
                     font.family: Theme.fontFamily
                     color: Theme.textMuted
@@ -882,6 +887,8 @@ ScrollView {
 
         // ---- Статус очереди Calendar-синхронизации ----
         Panel {
+            id: syncPanel
+            objectName: "settingsSyncPanel"
             Layout.fillWidth: true
             implicitHeight: syncColumn.implicitHeight + 2 * Theme.spacingLg
 
@@ -1001,7 +1008,7 @@ ScrollView {
                         }
                         Badge {
                             visible: settingsVm.pendingOpsCount > 0
-                            text: "ждёт ручного синка"
+                            text: "ожидает отправки"
                             fg: Theme.warningText
                             bg: Theme.warningSoft
                         }
@@ -1051,7 +1058,7 @@ ScrollView {
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
 
-                // ---- Подключение и ручной синк (реальный Google-шлюз) ----
+                // ---- Подключение, автоматический и ручной синк ----
 
                 // Статус подключения (только файлы изолированного профиля).
                 RowLayout {
@@ -1085,7 +1092,25 @@ ScrollView {
                     }
                 }
 
-                // Действия: явное подключение и явный одноразовый синк.
+                Switch {
+                    objectName: "autoSyncSwitch"
+                    text: "Синхронизировать автоматически"
+                    checked: settingsVm.autoSyncEnabled
+                    enabled: settingsVm.hasSyncQueue
+                    onToggled: settingsVm.setAutoSyncEnabled(checked)
+                    Accessible.name: text
+                    Layout.fillWidth: true
+                }
+                Label {
+                    text: settingsVm.syncStatusText
+                    font.pixelSize: Theme.fontBody
+                    font.family: Theme.fontFamily
+                    color: Theme.textSecondary
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+
+                // Подключение и немедленное обновление по требованию.
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
@@ -1307,7 +1332,7 @@ ScrollView {
             }
         }
 
-        // ---- Предупреждение: автосинка нет ----
+        // ---- Справка о синхронизации и локальных полях ----
         Rectangle {
             Layout.fillWidth: true
             radius: Theme.radiusMedium

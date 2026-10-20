@@ -31,6 +31,7 @@ from planner_desktop.sync.calendar_series_occurrence_mapper import (
 from planner_desktop.sync.sync_types import (
     RemoteOccurrenceConflictError,
     RetryableGatewayError,
+    NetworkUnavailableError,
     TerminalGatewayError,
 )
 
@@ -96,7 +97,10 @@ class CalendarSeriesOccurrenceSyncEngine:
             try:
                 item = self._push_one(op)
             except RetryableGatewayError as exc:
-                self._store.requeue_op(op.id, str(exc))
+                self._store.requeue_op(
+                    op.id, str(exc),
+                    consume_attempt=not isinstance(exc, NetworkUnavailableError),
+                )
                 item = OccurrenceSyncItemResult(
                     op.series_uid,
                     op.occurrence_key,

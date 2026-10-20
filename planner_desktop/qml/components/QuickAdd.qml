@@ -16,6 +16,7 @@ Panel {
 
     property bool expanded: false
     property int priority: 0
+    readonly property bool hasDetails: notesField.text.length > 0 || calendarCheck.checked
     // Компактная раскладка окна: кнопки без подписей, чтобы строка не ломалась.
     property bool compact: false
 
@@ -41,7 +42,9 @@ Panel {
         if (todayVm.busy)
             return
         var ok
-        if (quickAdd.expanded) {
+        // Collapsing the controls only hides them; it must not discard notes
+        // or an explicitly selected schedule when the task is submitted.
+        if (quickAdd.expanded || quickAdd.hasDetails) {
             ok = todayVm.addTaskDetailed(
                 titleField.text, notesField.text, quickAdd.priority,
                 calendarCheck.checked, allDayCheck.checked,
@@ -92,6 +95,7 @@ Panel {
 
             AppTextField {
                 id: titleField
+                objectName: "quickAddTitle"
                 placeholderText: quickAdd.compact
                     ? "Новая задача…"
                     : "Новая задача…  напр. «Отчёт завтра 15:00»"
@@ -178,6 +182,7 @@ Panel {
 
             AppTextField {
                 id: notesField
+                objectName: "quickAddNotes"
                 placeholderText: "Заметка (необязательно)"
                 Layout.fillWidth: true
             }
@@ -188,6 +193,7 @@ Panel {
 
                 CheckBox {
                     id: calendarCheck
+                    objectName: "quickAddCalendar"
                     text: "Добавить в календарь"
                     font.pixelSize: Theme.fontBody
                     font.family: Theme.fontFamily
@@ -216,10 +222,12 @@ Panel {
 
                 DatePickerField {
                     id: dateField
+                    objectName: "quickAddDate"
                     width: 230
                 }
                 TimePickerField {
                     id: timeField
+                    objectName: "quickAddTime"
                     visible: !allDayCheck.checked
                     onAccepted: quickAdd.submit()
                 }
@@ -227,6 +235,7 @@ Panel {
 
             DurationPicker {
                 id: durationPicker
+                objectName: "quickAddDuration"
                 visible: calendarCheck.checked && !allDayCheck.checked
                 presets: todayVm.durationPresets
                 Layout.fillWidth: true

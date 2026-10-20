@@ -53,15 +53,24 @@ def master_event_to_owned_payload(event: CalendarEvent) -> dict[str, Any]:
         timezone_name = event.start_timezone or event.end_timezone
         if not timezone_name:
             raise ValueError("Timed recurring master requires an IANA timezone.")
-        start = _timed_value(event.start, timezone_name)
-        end = _timed_value(event.end, timezone_name)
+        # Google transport retains provider bounds separately: start/end are
+        # local-naive for ordinary Task mapping and cannot be interpreted as
+        # wall-clock time in the series zone on a different computer.
+        has_provider_bounds = (
+            isinstance(event.recurrence_start, datetime)
+            and isinstance(event.recurrence_end, datetime)
+        )
+        start_value = event.recurrence_start if has_provider_bounds else event.start
+        end_value = event.recurrence_end if has_provider_bounds else event.end
+        start = _timed_value(start_value, timezone_name)
+        end = _timed_value(end_value, event.end_timezone or timezone_name)
         start_body = {
             "dateTime": start.isoformat(),
             "timeZone": timezone_name,
         }
         end_body = {
             "dateTime": end.isoformat(),
-            "timeZone": timezone_name,
+            "timeZone": event.end_timezone or timezone_name,
         }
 
     body: dict[str, Any] = {
@@ -143,7 +152,10 @@ def remote_master_snapshot(event: CalendarEvent) -> dict[str, Any]:
         "summary": event.summary or "",
         "description": event.description or "",
         "start": _snapshot_bound(start, event.start_timezone),
-        "end": _snapshot_bound(event.end, event.end_timezone or event.start_timezone),
+        "end": _snapshot_bound(
+            event.recurrence_end or event.end,
+            event.end_timezone or event.start_timezone,
+        ),
         "recurrence": [str(line) for line in event.recurrence_lines],
         "updated_at": (
             event.updated_at.isoformat() if event.updated_at is not None else None

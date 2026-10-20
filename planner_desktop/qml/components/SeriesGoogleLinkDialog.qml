@@ -165,7 +165,7 @@ Dialog {
                 variant: "primary"
                 enabled: !!dialog.linkData.canConnect && dialog.vm && !dialog.vm.busy
                 Accessible.description:
-                    "Создаёт локальную операцию. Сеть будет вызвана только ручной синхронизацией."
+                    "Серия будет создана в Google Calendar при следующей синхронизации."
                 onClicked: {
                     if (dialog.vm.connectSeriesToGoogle(dialog.seriesUid))
                         dialog.refreshData()
@@ -219,7 +219,7 @@ Dialog {
     ConfirmDialog {
         id: remoteDeleteConfirm
         headerText: "Удалить серию из Google?"
-        message: "Удаление будет выполнено только при следующей ручной синхронизации. Локальная серия сохранится."
+        message: "Удаление будет выполнено при следующей синхронизации. Локальная серия сохранится."
         confirmText: "Удалить из Google"
         onConfirmed: uid => {
             if (dialog.vm.deleteGoogleSeriesKeepLocal(uid)) dialog.refreshData()
@@ -228,7 +228,7 @@ Dialog {
     ConfirmDialog {
         id: bothDeleteConfirm
         headerText: "Удалить локальную и Google-серию?"
-        message: "Google-мастер будет удалён ручной синхронизацией. Выполненная локальная история сохранится."
+        message: "Серия в Google будет удалена при следующей синхронизации. Выполненная локальная история сохранится."
         confirmText: "Удалить обе"
         onConfirmed: uid => {
             if (dialog.vm.deleteLocalAndGoogleSeries(uid)) {

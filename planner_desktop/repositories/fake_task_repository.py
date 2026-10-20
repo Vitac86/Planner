@@ -103,6 +103,66 @@ class FakeTaskRepository:
         task.touch()
         return task
 
+    def update_local(self, task: Task) -> Task:
+        current = self.get_by_uid(task.uid)
+        if (task.start is not None and current is not None
+                and current.google_calendar_event_id is not None):
+            task.google_calendar_event_id = current.google_calendar_event_id
+            task.google_calendar_etag = current.google_calendar_etag
+            task.google_calendar_recurring_event_id = current.google_calendar_recurring_event_id
+            task.google_calendar_original_start = current.google_calendar_original_start
+        return self.update(task)
+
+    def update_local_fields(
+        self, uid: str, *, priority: Optional[int] = None,
+        completed: Optional[bool] = None,
+    ) -> Optional[Task]:
+        current = self.get_by_uid(uid)
+        if current is None or current.is_deleted:
+            return None
+        if priority is not None:
+            current.priority = priority
+        if completed is not None:
+            current.set_completed(completed)
+        return current
+
+    def detach_calendar_task(self, task: Task) -> tuple[Task, Optional[str]]:
+        current = self.get_by_uid(task.uid)
+        event_id = current.google_calendar_event_id if current is not None else None
+        task.google_calendar_event_id = None
+        task.google_calendar_etag = None
+        task.google_calendar_recurring_event_id = None
+        task.google_calendar_original_start = None
+        return self.update(task), event_id
+
+    def update_calendar_metadata(
+        self, uid: str, event_id: str, etag: Optional[str],
+        expected_event_id: Optional[str],
+    ) -> bool:
+        task = self.get_by_uid(uid)
+        if (task is None or task.google_calendar_event_id != expected_event_id
+                or (task.start is None and not task.is_deleted)):
+            return False
+        task.google_calendar_event_id = event_id
+        task.google_calendar_etag = etag
+        return True
+
+    def apply_calendar_update(self, task: Task, expected: Task) -> bool:
+        current = self.get_by_uid(expected.uid)
+        if (current is None or current.updated_at != expected.updated_at
+                or current.google_calendar_event_id != expected.google_calendar_event_id
+                or current.google_calendar_etag != expected.google_calendar_etag):
+            return False
+        for name in (
+            "title", "notes", "start", "end", "duration_minutes", "is_all_day",
+            "google_calendar_event_id", "google_calendar_etag",
+            "google_calendar_recurring_event_id", "google_calendar_original_start",
+            "deleted_at",
+        ):
+            setattr(current, name, getattr(task, name))
+        current.touch()
+        return True
+
     def list_today(self, reference_date: Optional[date] = None) -> List[Task]:
         day = reference_date or datetime.now().date()
         return [
@@ -141,7 +201,6 @@ class FakeTaskRepository:
         if task is None or task.is_deleted:
             return False
         task.set_completed(completed)
-        task.touch()
         return True
 
     def toggle_completed(self, uid: str) -> bool:
@@ -149,7 +208,6 @@ class FakeTaskRepository:
         if task is None or task.is_deleted:
             return False
         task.set_completed(not task.completed)
-        task.touch()
         return True
 
     # ---- диагностика (паритет с SQLiteTaskRepository) ------------------------

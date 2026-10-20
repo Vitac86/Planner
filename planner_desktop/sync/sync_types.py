@@ -68,6 +68,9 @@ class CalendarEvent:
     # Provider wall-clock DTSTART retained for lossless UTC UNTIL analysis.
     # ``start`` keeps the long-standing local-naive Task mapping semantics.
     recurrence_start: Optional[Union[date, datetime]] = None
+    # Matching provider wall-clock end. Transported masters need both bounds
+    # to round-trip independently of the computer's local timezone.
+    recurrence_end: Optional[Union[date, datetime]] = None
     # Hidden application metadata on the calendar-local event copy.  Ordinary
     # Task mapping leaves it empty; B2 recurring-master writes use only the
     # Planner ownership/revision/hash markers defined in series_calendar_link.
@@ -153,6 +156,15 @@ class RetryableGatewayError(CalendarGatewayError):
 
     Очередь перепланирует операцию с бэкоффом; после MAX_ATTEMPTS
     попыток операция уходит в terminal — бесконечных ретраев нет.
+    Исключение — NetworkUnavailableError: ожидание сети не тратит попытки.
+    """
+
+
+class NetworkUnavailableError(RetryableGatewayError):
+    """Transport unavailable: defer without spending an operation's retry budget.
+
+    A long offline period is not evidence that task contents are invalid.
+    HTTP failures and unknown adapter errors retain the bounded retry policy.
     """
 
 

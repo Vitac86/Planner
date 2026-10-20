@@ -184,6 +184,19 @@ def test_identical_content_retry_still_skips_second_patch():
     assert reconciled.etag == created.etag
 
 
+def test_duplicate_insert_does_not_accept_stale_markers_after_foreign_edit():
+    service = Service()
+    gateway = GoogleCalendarGateway(service)
+    master = _master()
+    remote_id = deterministic_remote_event_id("s1")
+    gateway.insert_recurring_master(remote_id, master)
+    service.resource.items[remote_id]["summary"] = "Edited from phone"
+
+    with pytest.raises(RemoteMasterConflictError):
+        gateway.insert_recurring_master(remote_id, master)
+    assert service.resource.items[remote_id]["summary"] == "Edited from phone"
+
+
 def test_ordinary_insert_behavior_still_ignores_master_contract():
     service = Service()
     gateway = GoogleCalendarGateway(service)

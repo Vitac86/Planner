@@ -25,7 +25,7 @@ Dialog {
         Accessible.name: dialog.title
         spacing: Theme.spacingMd
         Label {
-            text: "Локальная запись останется как tombstone, а отмена будет отправлена только при ручной синхронизации. Мастер серии не изменится."
+            text: "Экземпляр будет отмечен как отменённый, а отмена отправится в Google при следующей синхронизации. Остальная серия не изменится."
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }

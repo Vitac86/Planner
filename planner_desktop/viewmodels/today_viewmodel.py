@@ -107,10 +107,11 @@ class TodayViewModel(TaskActionsViewModel):
     def refresh(self) -> None:
         self._ensure_today()
         super().refresh()
+        self.refreshDaily()
 
     def _visible_task_uids(self) -> List[str]:
         return list(dict.fromkeys(
-            [task.uid for task in self._repository.list_today()]
+            [task.uid for task in self._repository.list_today(self._now().date())]
             + [task.uid for task in self._repository.list_undated()]
         ))
 
@@ -118,12 +119,15 @@ class TodayViewModel(TaskActionsViewModel):
 
     @Property(str, notify=tasksChanged)
     def headerDateText(self) -> str:
-        return _header_date_text(date.today())
+        return _header_date_text(self._now().date())
 
     @Property("QVariantList", notify=tasksChanged)
     def todayTasks(self) -> List[Dict[str, Any]]:
         pending = self._service.pending_task_uids()
-        return [task_to_row(t, pending) for t in self._repository.list_today()]
+        return [
+            task_to_row(t, pending)
+            for t in self._repository.list_today(self._now().date())
+        ]
 
     @Property("QVariantList", notify=tasksChanged)
     def undatedTasks(self) -> List[Dict[str, Any]]:
@@ -141,22 +145,24 @@ class TodayViewModel(TaskActionsViewModel):
                 "notes": occ.task.notes,
                 "done": occ.done,
             }
-            for occ in self._daily.occurrences_for(date.today())
+            for occ in self._daily.occurrences_for(self._now().date())
         ]
 
     @Property(int, notify=dailyChanged)
     def dailyTotalCount(self) -> int:
-        return len(self._daily.occurrences_for(date.today()))
+        return len(self._daily.occurrences_for(self._now().date()))
 
     @Property(int, notify=dailyChanged)
     def dailyDoneCount(self) -> int:
-        return sum(1 for occ in self._daily.occurrences_for(date.today()) if occ.done)
+        return sum(
+            1 for occ in self._daily.occurrences_for(self._now().date()) if occ.done
+        )
 
     # ---- статистика шапки ---------------------------------------------------
 
     @Property(int, notify=tasksChanged)
     def todayCount(self) -> int:
-        return len(self._repository.list_today())
+        return len(self._repository.list_today(self._now().date()))
 
     @Property(int, notify=tasksChanged)
     def undatedCount(self) -> int:
@@ -164,7 +170,9 @@ class TodayViewModel(TaskActionsViewModel):
 
     @Property(int, notify=tasksChanged)
     def completedTodayCount(self) -> int:
-        return sum(1 for t in self._repository.list_today() if t.completed)
+        return sum(
+            1 for t in self._repository.list_today(self._now().date()) if t.completed
+        )
 
     @Property(int, notify=tasksChanged)
     def pendingSyncCount(self) -> int:
@@ -202,7 +210,7 @@ class TodayViewModel(TaskActionsViewModel):
         """Компактный Quick Add с лёгким разбором ввода: «Отчет 15:00»,
         «Позвонить Ивану завтра». Разбор консервативный (см. quick_parse),
         приоритет приходит из компактной строки."""
-        parsed = parse_natural(text)
+        parsed = parse_natural(text, today=self._now().date())
         return self._create_from_command(parsed.to_command(), priority=priority)
 
     @Slot(str, str, int, bool, bool, str, str, str, result=bool)
@@ -254,7 +262,7 @@ class TodayViewModel(TaskActionsViewModel):
     @Slot(str, result=bool)
     def toggleDaily(self, uid: str) -> bool:
         """Отметить/снять выполнение ежедневной задачи на сегодня."""
-        result = self._daily.toggle_completed(uid, date.today())
+        result = self._daily.toggle_completed(uid, self._now().date())
         if result is None:
             return False
         self.dailyChanged.emit()

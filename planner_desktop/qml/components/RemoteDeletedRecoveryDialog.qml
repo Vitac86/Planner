@@ -7,7 +7,7 @@ import "../theme"
 // Explicit recovery choices after the linked Google master was deleted
 // remotely (Phase 3.2B3A).  Opening reads only local SQLite state; the only
 // queued Google operation ("Создать серию в Google заново") executes during
-// the next manual sync with a new deterministic link generation.  Nothing is
+// the next sync with a new deterministic link generation.  Nothing is
 // pre-selected; Enter on initial focus confirms nothing; Esc cancels.
 Dialog {
     id: dialog
@@ -121,7 +121,7 @@ Dialog {
                          && dialog.vm && !dialog.vm.busy
                 Layout.fillWidth: true
                 Accessible.description:
-                    "Изменится Google: при следующей ручной синхронизации будет "
+                    "Изменится Google: при следующей синхронизации будет "
                     + "создан новый мастер с новым стабильным идентификатором."
                 onClicked: recreateConfirm.openFor(dialog.seriesUid)
             }
@@ -167,7 +167,7 @@ Dialog {
     ConfirmDialog {
         id: recreateConfirm
         headerText: "Создать серию в Google заново?"
-        message: "При следующей ручной синхронизации в Google будет создан "
+        message: "При следующей синхронизации в Google будет создан "
                  + "новый мастер (новое поколение связи с новым стабильным "
                  + "идентификатором). Повторные нажатия не создадут дубликатов."
         confirmText: "Создать заново"
