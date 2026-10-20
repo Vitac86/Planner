@@ -6,10 +6,12 @@ SQLiteTaskRepository (planner_desktop/storage) с тем же интерфейс
 """
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import date, datetime, time, timedelta
 from typing import List, Optional
 
 from planner_desktop.domain.task import Task
+from planner_desktop.domain.task_undo import prepare_task_undo
 
 
 def _today_at(hour: int, minute: int = 0) -> datetime:
@@ -134,6 +136,17 @@ class FakeTaskRepository:
         task.google_calendar_recurring_event_id = None
         task.google_calendar_original_start = None
         return self.update(task), event_id
+
+    def apply_undo(
+        self, expected: Task, previous: Optional[Task], *, sync_enabled: bool = False,
+    ) -> Task:
+        if sync_enabled:
+            raise ValueError("Отмена с синхронизацией требует SQLite-хранилище.")
+        current = self.get_by_uid(expected.uid)
+        target, _calendar_changed, _cleanup_id = prepare_task_undo(current, expected, previous)
+        for field in fields(Task):
+            setattr(current, field.name, getattr(target, field.name))
+        return current
 
     def update_calendar_metadata(
         self, uid: str, event_id: str, etag: Optional[str],

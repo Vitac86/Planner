@@ -16,12 +16,14 @@ list_all/list_today/list_undated/add/update/get/delete/complete.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
 from planner_desktop.domain.task import Task, utc_now
+from planner_desktop.domain.task_undo import GOOGLE_LINK_FIELDS, UNDO_FIELDS, prepare_task_undo
 from planner_desktop.domain.tags import normalized_tag_name
 from planner_desktop.storage.paths import ensure_desktop_data_dir, get_desktop_db_path
 from planner_desktop.storage.schema import create_schema
@@ -256,6 +258,86 @@ class SQLiteTaskRepository:
             task.google_calendar_recurring_event_id = None
             task.google_calendar_original_start = None
             return self.update(task), event_id
+
+    def apply_undo(
+        self, expected: Task, previous: Optional[Task], *, sync_enabled: bool = False,
+    ) -> Task:
+        """Compare, invert and queue in one transaction, excluding remote IO.
+
+        In-flight workers retain only old operation ids. Undelete never reuses
+        an event whose deletion may already have reached Google.
+        """
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            current = self.get_by_uid(expected.uid)
+            target, calendar_changed, cleanup_id = prepare_task_undo(current, expected, previous)
+            tag_ids = []
+            for name in target.tags:
+                row = self._connection.execute(
+                    "SELECT id FROM tags WHERE normalized_name = ?",
+                    (normalized_tag_name(name),),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Тег «{name}» больше не существует; отмена не применена.")
+                tag_ids.append(row["id"])
+            columns = [name for name in UNDO_FIELDS if name != "tags"]
+            columns.extend(GOOGLE_LINK_FIELDS)
+            columns.append("updated_at")
+            values = []
+            for name in columns:
+                value = getattr(target, name)
+                if isinstance(value, datetime):
+                    value = _dt_to_text(value)
+                elif isinstance(value, bool):
+                    value = int(value)
+                values.append(value)
+            assignments = ", ".join(f'"{name}" = ?' for name in columns)
+            self._connection.execute(
+                "UPDATE tasks SET " + assignments + " WHERE uid = ?",
+                (*values, target.uid),
+            )
+            self._connection.execute("DELETE FROM task_tags WHERE task_uid = ?", (target.uid,))
+            stamp = _dt_to_text(utc_now())
+            for tag_id in tag_ids:
+                self._connection.execute(
+                    "INSERT INTO task_tags (task_uid, tag_id, created_at) VALUES (?, ?, ?)",
+                    (target.uid, tag_id, stamp),
+                )
+            if sync_enabled and calendar_changed:
+                self._connection.execute(
+                    "DELETE FROM desktop_pending_calendar_ops "
+                    "WHERE task_uid = ? AND op IN ('create', 'update')", (target.uid,),
+                )
+                if cleanup_id:
+                    # Supersede identical cleanup with a fresh generation;
+                    # keep deletions of other previously detached events.
+                    rows = self._connection.execute(
+                        "SELECT id, payload_json FROM desktop_pending_calendar_ops "
+                        "WHERE task_uid = ? AND op = 'delete'", (target.uid,),
+                    ).fetchall()
+                    for row in rows:
+                        if row["payload_json"] and json.loads(row["payload_json"]).get("event_id") == cleanup_id:
+                            self._connection.execute(
+                                "DELETE FROM desktop_pending_calendar_ops WHERE id = ?", (row["id"],),
+                            )
+                    self._enqueue_undo_operation(
+                        target.uid, "delete", stamp,
+                        {"event_id": cleanup_id, "cleanup": True},
+                    )
+                if target.start is not None and not target.is_deleted:
+                    self._enqueue_undo_operation(
+                        target.uid, "update" if target.google_calendar_event_id else "create", stamp,
+                    )
+            return target
+
+    def _enqueue_undo_operation(self, uid, operation, stamp, payload=None) -> None:
+        self._connection.execute(
+            "INSERT INTO desktop_pending_calendar_ops "
+            "(op, task_uid, payload_json, attempts, status, created_at, next_try_at) "
+            "VALUES (?, ?, ?, 0, 'pending', ?, ?)",
+            (operation, uid, json.dumps(payload, ensure_ascii=False) if payload else None,
+             stamp, stamp),
+        )
 
     def update_calendar_metadata(
         self, uid: str, event_id: str, etag: Optional[str],

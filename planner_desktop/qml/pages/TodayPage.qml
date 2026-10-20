@@ -16,6 +16,7 @@ ScrollView {
     readonly property string layoutMode: uiVm.layoutModeFor(availableWidth)
     readonly property bool wide: layoutMode === "wide"
     readonly property bool compact: layoutMode === "compact"
+    readonly property bool showCompletionStats: typeof prefsVm === "undefined" || prefsVm.showCompletionStats
     property var focusReturnItem: null
     property real bodyWidth: wide ? Math.min(availableWidth - 48, 1140)
                                   : Math.min(availableWidth - (compact ? 32 : 48), 780)
@@ -236,6 +237,7 @@ ScrollView {
                         tintColor: Theme.accentSoft
                     }
                     StatTile {
+                        visible: page.showCompletionStats
                         value: todayVm.completedTodayCount
                         caption: "выполнено"
                         iconName: "check"
@@ -457,6 +459,7 @@ ScrollView {
 
                     // прогресс дня
                     Panel {
+                        visible: page.showCompletionStats
                         Layout.fillWidth: true
                         implicitHeight: progressCol.implicitHeight + 2 * Theme.spacingLg
 

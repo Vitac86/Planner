@@ -62,6 +62,8 @@ logs/
 *.db-shm
 *.sqlite
 *.sqlite3
+preferences.json
+drafts.json
 
 # --- Secrets and OAuth state --------------------------------------------------
 # Never commit these. See the README security section.

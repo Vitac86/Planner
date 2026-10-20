@@ -21,6 +21,8 @@ from planner_desktop.repositories.template_repository import (
     InMemoryTemplateRepository,
 )
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
+from planner_desktop.storage.draft_store import DraftStore
+from planner_desktop.storage.preferences_store import PreferencesStore
 from planner_desktop.storage.calendar_series_sync_store import (
     CalendarSeriesSyncStore,
 )
@@ -51,10 +53,14 @@ from planner_desktop.viewmodels.calendar_viewmodel import CalendarViewModel
 from planner_desktop.viewmodels.daily_tasks_viewmodel import DailyTasksViewModel
 from planner_desktop.viewmodels.date_rollover import DateRolloverMonitor
 from planner_desktop.viewmodels.history_viewmodel import HistoryViewModel
+from planner_desktop.viewmodels.drafts_viewmodel import DraftsViewModel
+from planner_desktop.viewmodels.preferences_viewmodel import PreferencesViewModel
 from planner_desktop.viewmodels.search_viewmodel import SearchViewModel
+from planner_desktop.viewmodels.sync_errors_viewmodel import SyncErrorsViewModel
 from planner_desktop.viewmodels.settings_viewmodel import SettingsViewModel
 from planner_desktop.viewmodels.today_viewmodel import TodayViewModel
 from planner_desktop.viewmodels.ui_state import UiStateViewModel
+from planner_desktop.viewmodels.undo_viewmodel import UndoViewModel
 
 QML_DIR = Path(__file__).resolve().parent / "qml"
 
@@ -101,6 +107,18 @@ class MainWindow:
         else:
             self.service, self.daily_service = _build_services()
         self.repository = self.service.repository
+        # Auxiliary state belongs to this profile. Injected repositories and
+        # demo mode remain in memory, even when a test injects a SQLite store.
+        profile_dir = (self.repository.db_path.parent
+                       if repository is None
+                       and isinstance(self.repository, SQLiteTaskRepository)
+                       else None)
+        self.preferences_viewmodel = PreferencesViewModel(PreferencesStore(
+            profile_dir / "preferences.json" if profile_dir is not None else None))
+        self.drafts_viewmodel = DraftsViewModel(
+            DraftStore(profile_dir / "drafts.json" if profile_dir is not None else None),
+            task_exists=self._draft_task_exists)
+        self.undo_viewmodel = UndoViewModel(self.service.undo_service)
         if isinstance(self.repository, SQLiteTaskRepository):
             self.tag_repository = SQLiteTagRepository(self.repository.db_path)
         else:
@@ -214,9 +232,11 @@ class MainWindow:
         self.service.materializer = self.materializer
 
         self.today_viewmodel = TodayViewModel(
-            service=self.service, daily_service=self.daily_service)
+            service=self.service, daily_service=self.daily_service,
+            default_duration_provider=lambda: self.preferences_viewmodel.defaultDurationMinutes)
         self.calendar_viewmodel = CalendarViewModel(
-            service=self.service, daily_service=self.daily_service)
+            service=self.service, daily_service=self.daily_service,
+            preferences=self.preferences_viewmodel)
         self.settings_viewmodel = SettingsViewModel(
             self.service, daily_service=self.daily_service,
             manual_sync_service=self._build_manual_sync_service(),
@@ -228,6 +248,12 @@ class MainWindow:
             occurrence_resolution_service=self.occurrence_resolution_service,
             series_conflict_service=self.series_conflict_service,
             remote_split_service=self.remote_split_service)
+        self.sync_errors_viewmodel = SyncErrorsViewModel(
+            self.service,
+            busy_provider=lambda: self.settings_viewmodel.syncBusy,
+            last_error_provider=lambda: self.settings_viewmodel.lastSyncError)
+        self.sync_errors_viewmodel.syncRequested.connect(self.settings_viewmodel.syncNow)
+        self.settings_viewmodel.syncStateChanged.connect(self.sync_errors_viewmodel.refresh)
         self.daily_viewmodel = DailyTasksViewModel(self.daily_service)
         self.history_viewmodel = HistoryViewModel(self.service, self.daily_service)
         self.search_viewmodel = SearchViewModel(self.service)
@@ -245,12 +271,13 @@ class MainWindow:
         # Настройки — тоже мутатор: pull ручного синка меняет задачи.
         task_mutators = (self.today_viewmodel, self.calendar_viewmodel,
                          self.history_viewmodel, self.search_viewmodel,
-                         self.settings_viewmodel)
+                         self.settings_viewmodel, self.undo_viewmodel)
         task_listeners = (self.today_viewmodel, self.calendar_viewmodel,
                           self.settings_viewmodel, self.history_viewmodel,
                           self.search_viewmodel)
         for mutator in task_mutators:
             mutator.tasksMutated.connect(self.settings_viewmodel.scheduleAutoSync)
+            mutator.tasksMutated.connect(self.sync_errors_viewmodel.refresh)
             for listener in task_listeners:
                 if listener is not mutator:
                     mutator.tasksMutated.connect(listener.refresh)
@@ -276,6 +303,14 @@ class MainWindow:
         context.setContextProperty("historyVm", self.history_viewmodel)
         context.setContextProperty("searchVm", self.search_viewmodel)
         context.setContextProperty("uiVm", self.ui_state_viewmodel)
+        context.setContextProperty("prefsVm", self.preferences_viewmodel)
+        context.setContextProperty("draftsVm", self.drafts_viewmodel)
+        context.setContextProperty("undoVm", self.undo_viewmodel)
+        context.setContextProperty("syncErrorsVm", self.sync_errors_viewmodel)
+
+    def _draft_task_exists(self, uid: str) -> bool:
+        task = self.repository.get_by_uid(uid)
+        return task is not None and not task.is_deleted
 
     def _build_manual_sync_service(self):
         """Общий ManualSyncService для ручных и автоматических циклов.
@@ -309,3 +344,4 @@ class MainWindow:
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.settings_viewmodel.stopAutoSync)
+            app.aboutToQuit.connect(self.drafts_viewmodel.flush)

@@ -44,6 +44,7 @@ from planner_desktop.domain.series_calendar_link import (
 )
 from planner_desktop.domain.task import Task
 from planner_desktop.usecases.task_service import DesktopTaskService
+from planner_desktop.usecases.undo_service import undoable
 from planner_desktop.usecases.bulk_task_service import (
     ACTION_ADD_TAG,
     ACTION_COMPLETE,
@@ -783,6 +784,7 @@ class TaskActionsViewModel(QObject):
             time_text, duration_text, completed, list(tag_ids),
         )
 
+    @undoable("Редактирование задачи", fields=("tags",))
     def _save_editor(
         self, uid: str, title: str, notes: str, priority: int,
         scheduled: bool, is_all_day: bool, date_text: str,
@@ -840,6 +842,11 @@ class TaskActionsViewModel(QObject):
         if tag_ids is not None and tag_service is not None:
             try:
                 tag_service.set_task_tags(result.task.uid, tag_ids)
+                self._service.undo_service.observe(
+                    result.task.uid,
+                    self._service.repository.get_by_uid(result.task.uid),
+                    fields=("tags",),
+                )
             except Exception as exc:
                 self._set_editor_error(f"Не удалось сохранить теги: {exc}")
                 return False
@@ -861,6 +868,7 @@ class TaskActionsViewModel(QObject):
         return {"ok": True, "id": tag.id, "name": tag.name, "error": ""}
 
     @Slot(str, "QVariantList", result=bool)
+    @undoable("Изменение тегов", fields=("tags",))
     def setTaskTags(self, uid: str, tag_ids) -> bool:
         tag_service = getattr(self._service, "tag_service", None)
         if tag_service is None:

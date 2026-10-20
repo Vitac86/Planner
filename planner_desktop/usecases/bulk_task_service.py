@@ -100,9 +100,18 @@ class BulkTaskService:
             return BulkActionResult(action=action, busy_rejected=True)
         self._busy = True
         try:
-            items = tuple(
-                self._apply_one(action, uid, value, now=now) for uid in ordered
-            )
+            labels = {
+                ACTION_DELETE: "Пакетное удаление", ACTION_COMPLETE: "Пакетное выполнение",
+                ACTION_RESTORE: "Возврат задач в работу", ACTION_PRIORITY: "Приоритет задач",
+                ACTION_ADD_TAG: "Добавление тега задачам", ACTION_REMOVE_TAG: "Снятие тега с задач",
+                ACTION_POSTPONE_TOMORROW: "Перенос задач", ACTION_UNSCHEDULE: "Снятие дат задач",
+            }
+            with self.task_service.undo_service.capture(
+                labels.get(action, "Пакетное действие"), ordered, autodetect=False,
+            ):
+                items = tuple(
+                    self._apply_one(action, uid, value, now=now) for uid in ordered
+                )
             return BulkActionResult(action=action, items=items)
         finally:
             self._busy = False
@@ -147,6 +156,9 @@ class BulkTaskService:
                 if not changed:
                     message = "Тег уже назначен." if action == ACTION_ADD_TAG else "Тег не назначен."
                     return BulkActionItemResult(uid, STATUS_SKIPPED, message)
+                self.task_service.undo_service.observe(
+                    uid, self.task_service.repository.get_by_uid(uid), fields=("tags",),
+                )
             elif action == ACTION_POSTPONE_TOMORROW:
                 if self.task_service._is_recurring_instance(task):
                     return BulkActionItemResult(

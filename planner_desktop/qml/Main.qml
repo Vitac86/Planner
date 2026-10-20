@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
@@ -25,6 +26,29 @@ ApplicationWindow {
     font.family: Theme.fontFamily
 
     property int currentPage: 0
+    property bool preferencesReady: false
+    Component.onCompleted: {
+        width = Math.max(minimumWidth, Math.min(prefsVm.windowWidth, Screen.desktopAvailableWidth))
+        height = Math.max(minimumHeight, Math.min(prefsVm.windowHeight, Screen.desktopAvailableHeight))
+        currentPage = prefsVm.startupPageIndex
+        preferencesReady = true
+    }
+    onCurrentPageChanged: if (preferencesReady) prefsVm.rememberPage(currentPage)
+    onWidthChanged: if (preferencesReady) windowSizeTimer.restart()
+    onHeightChanged: if (preferencesReady) windowSizeTimer.restart()
+    onClosing: {
+        rememberWindowSize()
+        draftsVm.flush()
+    }
+    function rememberWindowSize() {
+        if (preferencesReady && visibility === Window.Windowed)
+            prefsVm.rememberWindowSize(width, height)
+    }
+    Timer {
+        id: windowSizeTimer
+        interval: 500
+        onTriggered: root.rememberWindowSize()
+    }
 
     // ---- маршрутизация сокращений ----
     // Политика в Python (domain/keyboard.py через uiVm.allowShortcut):
@@ -35,7 +59,8 @@ ApplicationWindow {
     }
     readonly property bool anyDialogOpen:
         todayPage.dialogsOpen || calendarPage.dialogsOpen || historyPage.dialogsOpen
-        || globalSearch.blocksWindow
+        || settingsPage.dialogsOpen || globalSearch.blocksWindow || syncErrorEditor.visible
+        || syncErrorDeleteDialog.visible
     function _allow(name) {
         return uiVm.allowShortcut(name, root._typingNow(), root.anyDialogOpen)
     }
@@ -190,6 +215,12 @@ ApplicationWindow {
         enabled: !globalSearch.visible && root._allow("duplicate_selected")
         onActivated: root._duplicateSelectedOnCurrentPage()
     }
+    Shortcut {
+        sequences: [StandardKey.Undo]
+        // Text inputs keep their own undo history, including Quick Add drafts.
+        enabled: undoVm.canUndo && !root._typingNow() && !root.anyDialogOpen
+        onActivated: undoVm.undo()
+    }
 
     // Навигация по дням недели на «Календаре» стрелками (вне текстовых полей).
     Shortcut {
@@ -276,6 +307,53 @@ ApplicationWindow {
         id: toast
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
+        onActionTriggered: undoVm.undo()
+    }
+
+    AppButton {
+        objectName: "undoLastActionButton"
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.spacingMd
+        visible: undoVm.canUndo && !root.anyDialogOpen && !toast.visible
+        text: "Отменить"
+        variant: "secondary"
+        onClicked: undoVm.undo()
+        ToolTip.visible: hovered
+        ToolTip.text: undoVm.actionLabel + " (Ctrl+Z)"
+        Accessible.name: "Отменить: " + undoVm.actionLabel
+    }
+    Connections {
+        target: undoVm
+        function onActionRecorded(label) {
+            // Task viewmodels emit their success message after the service
+            // records history; show the action once that update has finished.
+            Qt.callLater(function() { toast.showAction(label, "Отменить") })
+        }
+        function onToastMessage(text) { toast.show(text) }
+        function onToastError(text) { toast.showError(text) }
+    }
+    Connections {
+        target: prefsVm
+        function onToastError(text) { toast.showError(text) }
+    }
+    Connections {
+        target: syncErrorsVm
+        function onToastMessage(text) { toast.show(text) }
+        function onOpenTaskRequested(uid) { syncErrorEditor.openForEdit(uid) }
+    }
+    TaskEditorDialog {
+        id: syncErrorEditor
+        objectName: "syncErrorTaskEditor"
+        vm: todayVm
+        onDeleteRequested: uid => syncErrorDeleteDialog.openFor(uid)
+    }
+    ConfirmDialog {
+        id: syncErrorDeleteDialog
+        objectName: "syncErrorDeleteDialog"
+        headerText: "Удалить задачу?"
+        message: "Задача будет удалена. Связанное событие Google будет удалено при синхронизации."
+        onConfirmed: uid => todayVm.deleteTask(uid)
     }
 
     Connections {
