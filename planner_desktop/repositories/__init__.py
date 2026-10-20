@@ -33,6 +33,10 @@ class TaskRepository(Protocol):
 
     def detach_calendar_task(self, task: Task) -> tuple[Task, Optional[str]]: ...
 
+    def apply_undo(
+        self, expected: Task, previous: Optional[Task], *, sync_enabled: bool = False,
+    ) -> Task: ...
+
     def update_calendar_metadata(
         self, uid: str, event_id: str, etag: Optional[str],
         expected_event_id: Optional[str],

@@ -15,8 +15,11 @@ Item {
     property string iconName: "check"
     property color iconColor: "#7CE6A6"
     property color bubbleColor: Theme.scrim
+    property string actionText: ""
+    signal actionTriggered()
 
     function show(text) {
+        actionText = ""
         message = text
         bubbleColor = Theme.scrim
         if (text.indexOf("далена") >= 0 || text.indexOf("далён") >= 0) {
@@ -29,11 +32,19 @@ Item {
     }
 
     function showError(text) {
+        actionText = ""
         message = text
         bubbleColor = "#7A2E33"
         iconName = "info"
         iconColor = "#FFC9CC"
         toastTimer.interval = 4200
+        toastTimer.restart()
+    }
+
+    function showAction(text, action) {
+        show(text)
+        actionText = action
+        toastTimer.interval = 6500
         toastTimer.restart()
     }
 
@@ -51,7 +62,7 @@ Item {
         id: toastBg
         radius: height / 2
         color: toast.bubbleColor
-        implicitHeight: 40
+        implicitHeight: Math.max(40, toastRow.implicitHeight + 8)
         implicitWidth: toastRow.implicitWidth + 34
 
         layer.enabled: true
@@ -83,7 +94,21 @@ Item {
                 font.weight: Font.Medium
                 elide: Text.ElideRight
                 // длинные ошибки не растягивают пилюлю на всё окно
-                Layout.maximumWidth: 520
+                Layout.maximumWidth: Math.min(520, Math.max(120,
+                    (toast.parent ? toast.parent.width : 680)
+                    - (toast.actionText.length > 0 ? 200 : 80)))
+            }
+            Button {
+                visible: toast.actionText.length > 0
+                text: toast.actionText
+                flat: true
+                palette.buttonText: "#FFFFFF"
+                font.bold: true
+                Accessible.name: toast.actionText
+                onClicked: {
+                    toastTimer.stop()
+                    toast.actionTriggered()
+                }
             }
         }
     }

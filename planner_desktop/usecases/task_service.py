@@ -49,6 +49,7 @@ from planner_desktop.domain.task import Task
 from planner_desktop.domain.series_calendar_link import (
     LINKED_OCCURRENCE_CHANGE_ERROR,
 )
+from planner_desktop.usecases.undo_service import UndoService, undoable
 from planner_desktop.repositories import TaskRepository
 from planner_desktop.storage.calendar_sync_store import CalendarSyncStore
 from planner_desktop.sync.calendar_sync_engine import (
@@ -119,6 +120,7 @@ class DesktopTaskService:
         self.recurrence_service = None
         self.template_service = None
         self.materializer = None
+        self.undo_service = UndoService(self)
 
     # ---- базовый CRUD ----------------------------------------------------------
 
@@ -152,6 +154,7 @@ class DesktopTaskService:
             return LINKED_OCCURRENCE_CHANGE_ERROR
         return SERIES_INTERACTION_ERROR
 
+    @undoable('Создание задачи', key='task')
     def create_task(self, task: Task) -> Task:
         queue_snapshot = self._queue_snapshot(task.uid)
         original_id = task.id
@@ -170,6 +173,7 @@ class DesktopTaskService:
                 task.id = original_id
             raise
 
+    @undoable('Изменение задачи', key='task')
     def update_task(self, task: Task, *, previous: Optional[Task] = None) -> Task:
         current = self.repository.get_by_uid(task.uid)
         original = deepcopy(previous if previous is not None else current)
@@ -205,14 +209,17 @@ class DesktopTaskService:
         update = getattr(self.repository, "update_local", self.repository.update)
         return update(task)
 
+    @undoable('Изменение выполнения', key='id', fields=('completed', 'completed_at'))
     def complete_task(self, task_id: int, completed: bool = True) -> bool:
         """Локальная галочка: Calendar-операция сознательно не ставится."""
         return self.repository.complete(task_id, completed)
 
+    @undoable('Изменение выполнения', fields=('completed', 'completed_at'))
     def toggle_completed(self, uid: str) -> bool:
         """Как complete_task: выполнено/не выполнено в календарь не уходит."""
         return self.repository.toggle_completed(uid)
 
+    @undoable('Удаление задачи', key='id', fields=('deleted_at',))
     def delete_task(self, task_id: int) -> bool:
         """Тумбстоун в репозитории + delete/отмена операций в очереди."""
         task = self.repository.get(task_id)
@@ -281,6 +288,7 @@ class DesktopTaskService:
             return TaskOperationResult(errors=[f"Не удалось дублировать задачу: {exc}"])
         return TaskOperationResult(task=created)
 
+    @undoable('Изменение приоритета', fields=('priority',))
     def set_priority(self, uid: str, priority: int) -> TaskOperationResult:
         """Update the local-only priority without a Calendar operation."""
 
@@ -298,6 +306,7 @@ class DesktopTaskService:
         except Exception as exc:
             return TaskOperationResult(errors=[f"Не удалось изменить приоритет: {exc}"])
 
+    @undoable("Изменение локальных полей", key="task", fields=("priority", "completed", "completed_at"))
     def _save_editor_local_fields(self, task: Task, original: Task) -> TaskOperationResult:
         """Save only the local fields actually changed in this editor operation."""
         updated = self.repository.update_local_fields(
@@ -319,6 +328,7 @@ class DesktopTaskService:
         task = self.create_task(build_task_from_editor(command))
         return TaskOperationResult(task=task)
 
+    @undoable('Редактирование задачи')
     def edit_task(self, uid: str, command: TaskEditorCommand) -> TaskOperationResult:
         """Правка существующей задачи, включая переходы расписания.
 
@@ -424,6 +434,7 @@ class DesktopTaskService:
 
     # ---- расписание --------------------------------------------------------------
 
+    @undoable('Изменение расписания')
     def schedule_task(
         self,
         uid: str,
@@ -501,6 +512,7 @@ class DesktopTaskService:
         self._copy_task_state(snapshot, current)
         self._update_local_task(current)
 
+    @undoable('Изменение расписания', key='task')
     def _commit_schedule_change(
         self,
         task: Task,
@@ -937,6 +949,7 @@ class DesktopTaskService:
             return TaskOperationResult(errors=[TASK_NOT_FOUND_ERROR])
         return TaskOperationResult(task=updated)
 
+    @undoable('Возврат задачи в работу', fields=('completed', 'completed_at'))
     def restore_task(self, uid: str) -> bool:
         """Вернуть выполненную задачу в работу (снять галочку).
 

@@ -21,8 +21,9 @@ busy-защита, тосты) — в базе TaskActionsViewModel; здесь 
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from PySide6.QtCore import Property, Signal, Slot
 
@@ -69,6 +70,7 @@ class TodayViewModel(TaskActionsViewModel):
                  parent=None,
                  service: DesktopTaskService | None = None,
                  daily_service: DailyTaskService | None = None,
+                 default_duration_provider: Callable[[], int] | None = None,
                  **kwargs) -> None:
         """CRUD идёт через DesktopTaskService: он же ставит Calendar-операции
         в очередь, когда сервис создан с CalendarSyncStore (см. main_window).
@@ -83,6 +85,7 @@ class TodayViewModel(TaskActionsViewModel):
         super().__init__(service, parent, **kwargs)
         self._repository = self._service.repository
         self._daily = daily_service or DailyTaskService(InMemoryDailyTaskRepository())
+        self._default_duration = default_duration_provider or (lambda: 60)
         self._error = ""
         self._ensure_today(notify=False)
 
@@ -238,6 +241,12 @@ class TodayViewModel(TaskActionsViewModel):
         if not self._begin("quickAdd", dedupe_key, dedupe=True):
             return False
         try:
+            if (command.add_to_calendar and not command.is_all_day
+                    and not command.duration_text.strip()):
+                minutes = self._default_duration()
+                if type(minutes) is not int or not 5 <= minutes <= 1440:
+                    raise ValueError("Длительность новой задачи должна быть от 5 до 1440 минут.")
+                command = replace(command, duration_text=str(minutes))
             result = execute_quick_add(command)
             if not result.ok:
                 self._set_error(" ".join(result.errors))

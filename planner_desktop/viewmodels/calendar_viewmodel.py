@@ -7,6 +7,7 @@ contracts remain available alongside the grid.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -100,6 +101,7 @@ class CalendarViewModel(TaskActionsViewModel):
     dailyMutated = Signal()
     displayModeChanged = Signal()
     gridChanged = Signal()
+    gridConfigChanged = Signal()
     editEventRequested = Signal(str)
     interactionChanged = Signal()
     occurrenceScheduleConfirmationRequested = Signal()
@@ -110,22 +112,28 @@ class CalendarViewModel(TaskActionsViewModel):
                  service: DesktopTaskService | None = None,
                  daily_service: DailyTaskService | None = None,
                  grid_config: CalendarGridConfig | None = None,
+                 preferences=None,
                  **kwargs) -> None:
         if service is None:
             service = DesktopTaskService(repository or FakeTaskRepository())
         super().__init__(service, parent, **kwargs)
         self._repository = self._service.repository
         self._daily = daily_service or DailyTaskService(InMemoryDailyTaskRepository())
-        self._filter = FILTER_ALL
-        self._display_mode = DISPLAY_WEEK
+        self._preferences = preferences
+        self._filter = preferences.calendarFilter if preferences else FILTER_ALL
+        self._display_mode = preferences.calendarMode if preferences else DISPLAY_WEEK
         self._responsive_mode = "normal"
         self._grid_config = grid_config or CalendarGridConfig(
-            visible_start_hour=DEFAULT_VISIBLE_START_HOUR,
-            visible_end_hour=DEFAULT_VISIBLE_END_HOUR,
+            visible_start_hour=(preferences.workStartHour if preferences
+                                else DEFAULT_VISIBLE_START_HOUR),
+            visible_end_hour=(preferences.workEndHour if preferences
+                              else DEFAULT_VISIBLE_END_HOUR),
         )
         today = self._now().date()
         self._week_start = _monday_of(today)
         self._selected_index = today.weekday()
+        if self._display_mode == DISPLAY_WORK_WEEK and self._selected_index > 4:
+            self._selected_index = 4
         self._dragging = False
         self._dragged_uid = ""
         self._drag_source_kind = ""
@@ -136,6 +144,23 @@ class CalendarViewModel(TaskActionsViewModel):
         self._resize_proposal: Optional[CalendarResizeProposal] = None
         self._interaction_busy = False
         self._ensure_visible(notify=False)
+        if preferences is not None:
+            preferences.settingsChanged.connect(self._apply_preferences)
+
+    def _apply_preferences(self) -> None:
+        """Apply display preferences without navigating away from the chosen day."""
+        self.setDisplayMode(self._preferences.calendarMode)
+        self.setFilter(self._preferences.calendarFilter)
+        config = replace(
+            self._grid_config,
+            visible_start_hour=self._preferences.workStartHour,
+            visible_end_hour=self._preferences.workEndHour,
+        )
+        if config != self._grid_config:
+            self.cancelInteraction()
+            self._grid_config = config
+            self.gridConfigChanged.emit()
+            self.gridChanged.emit()
 
     def _ensure_visible(self, *, notify: bool = True) -> None:
         """Материализовать экземпляры серий видимого диапазона + буфер.
@@ -173,7 +198,12 @@ class CalendarViewModel(TaskActionsViewModel):
 
     @Slot(str)
     def setDisplayMode(self, mode: str) -> None:
-        if mode not in _VALID_DISPLAY_MODES or mode == self._display_mode:
+        if mode not in _VALID_DISPLAY_MODES:
+            return
+        if (self._preferences is not None and mode != self._preferences.calendarMode
+                and not self._preferences.setCalendarMode(mode)):
+            return
+        if mode == self._display_mode:
             return
         self._display_mode = mode
         if mode == DISPLAY_WORK_WEEK and self._selected_index > 4:
@@ -347,11 +377,11 @@ class CalendarViewModel(TaskActionsViewModel):
 
     # ---- normalized grid data ---------------------------------------------------
 
-    @Property(int, constant=True)
+    @Property(int, notify=gridConfigChanged)
     def visibleStartHour(self) -> int:
         return self._grid_config.visible_start_hour
 
-    @Property(int, constant=True)
+    @Property(int, notify=gridConfigChanged)
     def visibleEndHour(self) -> int:
         return self._grid_config.visible_end_hour
 
@@ -1092,6 +1122,11 @@ class CalendarViewModel(TaskActionsViewModel):
 
     @Slot(str)
     def setFilter(self, mode: str) -> None:
+        if mode not in _VALID_FILTERS:
+            return
+        if (self._preferences is not None and mode != self._preferences.calendarFilter
+                and not self._preferences.setCalendarFilter(mode)):
+            return
         if mode in _VALID_FILTERS and mode != self._filter:
             self._filter = mode
             self.filterChanged.emit()

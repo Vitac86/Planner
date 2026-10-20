@@ -356,6 +356,117 @@ class CalendarSyncStore:
         ).fetchall()
         return [_row_to_op(row) for row in rows]
 
+    def list_failed_ops(self) -> List[PendingOp]:
+        """Current failures, including pending operations awaiting auto retry."""
+        rows = self._connection.execute(
+            "SELECT * FROM desktop_pending_calendar_ops "
+            "WHERE status = ? OR COALESCE(last_error, '') != '' ORDER BY id",
+            (OpStatus.TERMINAL.value,),
+        ).fetchall()
+        return [_row_to_op(row) for row in rows]
+
+    def terminal_retry_block_reason(self, op_id: int) -> str:
+        """Explain why a stopped operation cannot safely be retried locally.
+
+        This is only a UI preview. retry_terminal_op repeats every check while
+        holding the SQLite write lock, including the exact operation generation.
+        """
+        row = self._connection.execute(
+            "SELECT * FROM desktop_pending_calendar_ops WHERE id = ?", (op_id,),
+        ).fetchone()
+        return self._terminal_retry_block_reason(row)
+
+    def _terminal_retry_block_reason(self, row: Optional[sqlite3.Row]) -> str:
+        if row is None or row["status"] != OpStatus.TERMINAL.value:
+            return "Операция уже изменилась. Список обновлён."
+        task = self._connection.execute(
+            "SELECT * FROM tasks WHERE uid = ?", (row["task_uid"],),
+        ).fetchone()
+        if row["op"] == OpKind.DELETE.value:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+                event_id = payload.get("event_id") if isinstance(payload, dict) else None
+            except (TypeError, ValueError):
+                event_id = None
+            if not isinstance(event_id, str) or not event_id.strip():
+                return ("Не удалось однозначно определить удаляемое событие. "
+                        "Повтор заблокирован, чтобы не удалить другое событие.")
+            owner = self._connection.execute(
+                "SELECT 1 FROM tasks WHERE google_calendar_event_id = ? "
+                "AND deleted_at IS NULL AND start IS NOT NULL LIMIT 1",
+                (event_id,),
+            ).fetchone()
+            if owner is not None:
+                return ("Это событие снова связано с запланированной задачей. "
+                        "Повтор удаления заблокирован.")
+            # Distinct detached targets are independent and must be retained.
+            newer = self._connection.execute(
+                "SELECT payload_json FROM desktop_pending_calendar_ops "
+                "WHERE task_uid = ? AND op = ? AND id > ?",
+                (row["task_uid"], OpKind.DELETE.value, row["id"]),
+            ).fetchall()
+            for candidate in newer:
+                try:
+                    other = json.loads(candidate["payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(other, dict) and other.get("event_id") == event_id:
+                    return "Удаление уже заменено более новой операцией."
+            return ""
+        if task is None:
+            return "Локальная задача не найдена. Повтор отправки недоступен."
+        if task["deleted_at"] is not None:
+            return "Задача удалена. Устаревшее создание или обновление не отправляется."
+        if task["start"] is None:
+            return "У задачи больше нет даты; она остаётся на компьютере."
+        if task["series_uid"] is not None:
+            return "Этот экземпляр управляется через настройки повторяющейся серии."
+        newer = self._connection.execute(
+            "SELECT 1 FROM desktop_pending_calendar_ops "
+            "WHERE task_uid = ? AND id > ? LIMIT 1",
+            (row["task_uid"], row["id"]),
+        ).fetchone()
+        if newer is not None:
+            return "У задачи есть более новые изменения. Старая отправка не повторяется."
+        has_event = bool(task["google_calendar_event_id"])
+        if (row["op"] == OpKind.CREATE.value and has_event
+                or row["op"] == OpKind.UPDATE.value and not has_event):
+            return "Связь задачи с Google изменилась. Старая отправка не повторяется."
+        return ""
+
+    def retry_terminal_op(
+        self, op_id: int, *, expected_last_error: Optional[str] = None,
+    ) -> int:
+        """Retry one valid generation as a fresh id; never discard other work.
+
+        Task state and queue are checked in one transaction. Explicit delete
+        targets survive rescheduling and missing local tasks, but cannot delete
+        an event currently owned by a live scheduled task.
+        """
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT * FROM desktop_pending_calendar_ops WHERE id = ?", (op_id,),
+            ).fetchone()
+            reason = self._terminal_retry_block_reason(row)
+            if reason:
+                raise ValueError(reason)
+            if (expected_last_error is not None
+                    and (row["last_error"] or "") != expected_last_error):
+                raise ValueError("Причина ошибки изменилась. Проверьте обновлённый список.")
+            now = _dt_to_text(self._clock())
+            cursor = self._connection.execute(
+                "INSERT INTO desktop_pending_calendar_ops "
+                "(op, task_uid, payload_json, attempts, last_error, status, "
+                "created_at, next_try_at) VALUES (?, ?, ?, 0, NULL, ?, ?, ?)",
+                (row["op"], row["task_uid"], row["payload_json"],
+                 OpStatus.PENDING.value, now, now),
+            )
+            self._connection.execute(
+                "DELETE FROM desktop_pending_calendar_ops WHERE id = ?", (op_id,),
+            )
+            return int(cursor.lastrowid)
+
     # ---- состояние синка (курсор pull-а и т.п.) --------------------------------
 
     def get_state(self, key: str) -> Optional[str]:

@@ -11,6 +11,9 @@ ScrollView {
     contentWidth: availableWidth
     clip: true
     readonly property bool compact: availableWidth < 700
+    readonly property bool dialogsOpen: tagDeleteDialog.visible || templateDeleteDialog.visible
+                                        || templateEditor.visible || occurrenceConflictDialog.visible
+                                        || keepPlannerOccurrenceConfirm.visible || remoteSplitRecoveryDialog.visible
 
     // Счётчики очереди могли измениться на других страницах.
     onVisibleChanged: if (visible) settingsVm.refresh()
@@ -27,7 +30,7 @@ ScrollView {
 
     function scrollToSync() {
         if (contentItem)
-            contentItem.contentY = Math.max(0, syncPanel.y - Theme.spacingLg)
+            contentItem.contentY = Math.max(0, (syncErrorsPanel.visible ? syncErrorsPanel.y : syncPanel.y) - Theme.spacingLg)
     }
 
     // Карточка «иконка + название настройки + значение».
@@ -98,12 +101,17 @@ ScrollView {
 
         PageHeader {
             title: "Настройки"
-            subtitle: "Сохранение на компьютере и синхронизация с Google Calendar"
+            subtitle: "Личный вид планировщика и синхронизация с Google Calendar"
             Layout.fillWidth: true
             stackActions: page.compact
         }
 
         Item { implicitHeight: Theme.spacingXs }
+
+        PreferencesPanel {
+            Layout.fillWidth: true
+            vm: typeof prefsVm !== "undefined" ? prefsVm : null
+        }
 
         SettingRow {
             name: "Режим приложения"
@@ -886,6 +894,13 @@ ScrollView {
         }
 
         // ---- Статус очереди Calendar-синхронизации ----
+        SyncErrorsPanel {
+            id: syncErrorsPanel
+            Layout.fillWidth: true
+            vm: typeof syncErrorsVm !== "undefined" ? syncErrorsVm : null
+            settingsModel: settingsVm
+        }
+
         Panel {
             id: syncPanel
             objectName: "settingsSyncPanel"
@@ -978,7 +993,7 @@ ScrollView {
                     OpChip { label: "создать"; value: settingsVm.pendingCreateCount }
                     OpChip { label: "обновить"; value: settingsVm.pendingUpdateCount }
                     OpChip { label: "удалить"; value: settingsVm.pendingDeleteCount }
-                    OpChip { label: "dead-letter"; value: settingsVm.terminalOpsCount }
+                    OpChip { label: "нужна помощь"; value: settingsVm.terminalOpsCount }
                 }
 
                 GridLayout {
@@ -1366,7 +1381,7 @@ ScrollView {
 
         SettingRow {
             name: "Мобильная версия"
-            value: "приложение Google Calendar на телефоне (двусторонняя синхронизация — в будущих фазах)"
+            value: "Запланированные задачи доступны в Google Calendar на телефоне после синхронизации. Изменения из Google появляются в Planner, пока приложение открыто и включена автосинхронизация."
             iconName: "calendar"
         }
 

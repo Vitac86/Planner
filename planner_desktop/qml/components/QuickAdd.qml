@@ -9,7 +9,7 @@ import "../theme"
 // парсером (todayVm.addQuick): «Отчёт завтра 15:00» → дата/время сами.
 // Раскрытые «Детали» дают явные поля с нативными пикерами даты/времени
 // (todayVm.addTaskDetailed) — сырые строки дат пользователь не видит.
-// Enter создаёт задачу, Escape очищает/сворачивает. Вся валидация — в
+// Enter создаёт задачу, Escape сворачивает детали, сохраняя черновик. Вся валидация — в
 // Python: невалидный ввод даёт видимую ошибку и не «вешает» интерфейс.
 Panel {
     id: quickAdd
@@ -19,6 +19,32 @@ Panel {
     readonly property bool hasDetails: notesField.text.length > 0 || calendarCheck.checked
     // Компактная раскладка окна: кнопки без подписей, чтобы строка не ломалась.
     property bool compact: false
+    property var draftStore: typeof draftsVm !== "undefined" ? draftsVm : null
+    property var preferences: typeof prefsVm !== "undefined" ? prefsVm : null
+    property bool draftRestored: false
+    property bool _draftReady: false
+    property bool _draftHydrating: false
+    property bool _draftTouched: false
+    property bool _durationCustomized: false
+
+    Connections {
+        target: quickAdd.preferences
+        function onSettingsChanged() {
+            if (quickAdd._durationCustomized || quickAdd.draftRestored) return
+            quickAdd._draftHydrating = true
+            durationPicker.reset(String(quickAdd.preferences.defaultDurationMinutes))
+            quickAdd._draftHydrating = false
+            if (quickAdd._draftTouched) quickAdd.persistDraft()
+        }
+    }
+
+    onPriorityChanged: persistDraft()
+    onExpandedChanged: persistDraft()
+    Component.onCompleted: restoreDraft()
+    Component.onDestruction: {
+        if (_draftTouched || draftRestored) persistDraft()
+        if (draftStore) draftStore.flush()
+    }
 
     implicitHeight: layout.implicitHeight + 2 * Theme.spacingLg
 
@@ -28,14 +54,55 @@ Panel {
     }
 
     function clearForm() {
+        _draftHydrating = true
         titleField.text = ""
         notesField.text = ""
         dateField.dateText = ""
         timeField.timeText = ""
-        durationPicker.reset("")
+        durationPicker.reset(preferences ? String(preferences.defaultDurationMinutes) : "")
         calendarCheck.checked = false
         allDayCheck.checked = false
         quickAdd.priority = 0
+        _draftHydrating = false
+        _draftTouched = false
+        _durationCustomized = false
+        draftRestored = false
+        if (draftStore) draftStore.discardDraft("quick-add", "")
+    }
+
+    function persistDraft() {
+        if (!_draftReady || _draftHydrating || !draftStore) return
+        if (!_draftTouched && !draftRestored && titleField.text.length === 0
+                && notesField.text.length === 0 && priority === 0
+                && !calendarCheck.checked) return
+        _draftTouched = true
+        draftStore.saveDraft("quick-add", "", {
+            title: titleField.text, notes: notesField.text,
+            priority: priority, expanded: expanded,
+            calendarChecked: calendarCheck.checked, allDay: allDayCheck.checked,
+            dateText: dateField.dateText, timeText: timeField.timeText,
+            durationText: durationPicker.durationText
+        })
+    }
+
+    function restoreDraft() {
+        _draftHydrating = true
+        durationPicker.reset(preferences ? String(preferences.defaultDurationMinutes) : "")
+        var data = draftStore ? draftStore.loadDraft("quick-add", "") : ({})
+        if (data && Object.keys(data).length > 0) {
+            titleField.text = data.title || ""
+            notesField.text = data.notes || ""
+            priority = data.priority || 0
+            expanded = !!data.expanded
+            calendarCheck.checked = !!data.calendarChecked
+            allDayCheck.checked = !!data.allDay
+            dateField.dateText = data.dateText || ""
+            timeField.timeText = data.timeText || ""
+            durationPicker.reset(data.durationText || "")
+            draftRestored = true
+        }
+        _draftHydrating = false
+        _draftReady = true
     }
 
     function submit() {
@@ -102,9 +169,9 @@ Panel {
                 Layout.fillWidth: true
                 onAccepted: quickAdd.submit()
                 Keys.onEscapePressed: {
-                    if (text.length > 0) quickAdd.clearForm()
-                    else quickAdd.expanded = false
+                    quickAdd.expanded = false
                 }
+                onTextChanged: quickAdd.persistDraft()
             }
 
             // компактный выбор приоритета
@@ -169,6 +236,34 @@ Panel {
             }
         }
 
+        RowLayout {
+            visible: quickAdd.draftRestored || quickAdd._draftTouched
+            Layout.fillWidth: true
+            Label {
+                objectName: "quickAddDraftNotice"
+                text: quickAdd.draftRestored
+                      ? "Черновик восстановлен" : "Несохранённый черновик"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                Layout.fillWidth: true
+            }
+            AppButton {
+                objectName: "quickAddDiscardDraft"
+                text: "Сбросить черновик"
+                variant: "ghost"
+                onClicked: quickAdd.clearForm()
+            }
+        }
+        Label {
+            text: quickAdd.draftStore ? quickAdd.draftStore.storageError : ""
+            visible: text.length > 0
+            color: Theme.warningText
+            font.pixelSize: Theme.fontCaption
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
         // ---- расширенные поля ----
         ColumnLayout {
             id: details
@@ -185,6 +280,7 @@ Panel {
                 objectName: "quickAddNotes"
                 placeholderText: "Заметка (необязательно)"
                 Layout.fillWidth: true
+                onTextChanged: quickAdd.persistDraft()
             }
 
             RowLayout {
@@ -203,10 +299,13 @@ Panel {
                             var res = todayVm.applyEditorPreset("today", "allday", "", "")
                             if (res.ok) dateField.dateText = res.dateText
                         }
+                        quickAdd.persistDraft()
                     }
                 }
                 CheckBox {
                     id: allDayCheck
+                    objectName: "quickAddAllDay"
+                    onCheckedChanged: quickAdd.persistDraft()
                     text: "Весь день"
                     visible: calendarCheck.checked
                     font.pixelSize: Theme.fontBody
@@ -224,12 +323,14 @@ Panel {
                     id: dateField
                     objectName: "quickAddDate"
                     width: 230
+                    onDateTextChanged: quickAdd.persistDraft()
                 }
                 TimePickerField {
                     id: timeField
                     objectName: "quickAddTime"
                     visible: !allDayCheck.checked
                     onAccepted: quickAdd.submit()
+                    onTimeTextChanged: quickAdd.persistDraft()
                 }
             }
 
@@ -239,6 +340,11 @@ Panel {
                 visible: calendarCheck.checked && !allDayCheck.checked
                 presets: todayVm.durationPresets
                 Layout.fillWidth: true
+                onDurationTextChanged: {
+                    if (quickAdd._draftReady && !quickAdd._draftHydrating)
+                        quickAdd._durationCustomized = true
+                    quickAdd.persistDraft()
+                }
             }
         }
 

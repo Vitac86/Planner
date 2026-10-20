@@ -27,6 +27,16 @@ Dialog {
     property string taskUid: ""
     property bool recurringInstance: false
     property bool linkedTask: false
+    // Optional injections keep this component usable in isolated QML tests.
+    property var draftStore: typeof draftsVm !== "undefined" ? draftsVm : null
+    property var preferences: typeof prefsVm !== "undefined" ? prefsVm : null
+    property bool draftRestored: false
+    property bool _draftActive: false
+    property bool _draftHydrating: false
+    property bool _draftTouched: false
+    property string _draftContext: "editor:new"
+    property string _draftUid: ""
+    property var _draftBaseData: ({})
 
     // Экземпляр ЛОКАЛЬНОЙ серии (Phase 3.2A): сохранение всегда идёт через
     // явный выбор области изменений (SeriesScopeDialog).
@@ -63,6 +73,14 @@ Dialog {
     property string schedMode: "none"
 
     signal deleteRequested(string uid)
+
+    onSchedModeChanged: _draftChanged()
+    onRecurEnabledChanged: _draftChanged()
+    onAboutToHide: {
+        _persistDraft()
+        if (draftStore) draftStore.flush()
+        _draftActive = false
+    }
 
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -117,6 +135,99 @@ Dialog {
     }
 
     // ---- открытие ----------------------------------------------------------
+
+    function _defaultDuration() {
+        return preferences ? String(preferences.defaultDurationMinutes) : ""
+    }
+
+    function _draftPayload() {
+        return {
+            title: titleField.text, notes: notesArea.text,
+            priority: priorityRow.current, mode: schedMode,
+            dateText: dateField.dateText, timeText: timeField.timeText,
+            durationText: durationPicker.durationText,
+            completed: completedCheck.checked, tagIds: tagPicker.selectedIds,
+            recurring: recurEnabled, rule: ruleEditor.ruleMap(),
+            rulePreset: ruleEditor.currentPreset,
+            ruleCustomVisible: ruleEditor.customVisible
+        }
+    }
+
+    function _draftChanged() {
+        if (!_draftActive || _draftHydrating) return
+        _draftTouched = true
+        _persistDraft()
+    }
+
+    function _persistDraft() {
+        if (draftStore && _draftActive && !_draftHydrating
+                && (_draftTouched || draftRestored))
+            draftStore.saveDraft(_draftContext, _draftUid, _draftPayload())
+    }
+
+    function _restoreFields(data) {
+        // Only editable fields are restored. Link/series metadata and the
+        // original schedule for scope decisions always come from the task DB.
+        if (data.title !== undefined) titleField.text = data.title
+        if (data.notes !== undefined) notesArea.text = data.notes
+        if (data.priority !== undefined) _setPriority(data.priority)
+        if (data.mode !== undefined && !recurringInstance) schedMode = data.mode
+        if (!recurringInstance) {
+            if (data.dateText !== undefined) dateField.dateText = data.dateText
+            if (data.timeText !== undefined) timeField.timeText = data.timeText
+            if (data.durationText !== undefined) durationPicker.reset(data.durationText)
+        }
+        if (data.completed !== undefined) completedCheck.checked = data.completed
+        if (data.tagIds !== undefined) tagPicker.reset(data.tagIds)
+        if (!isEdit && data.recurring !== undefined) recurEnabled = data.recurring
+        if (data.rule !== undefined && (!isEdit || seriesOccurrence)) {
+            ruleEditor.reset(data.rule, data.rulePreset || "")
+            ruleEditor.customVisible = !!data.ruleCustomVisible
+        }
+        _updateRecurrenceSummary()
+    }
+
+    function _beginDraft(data, context, uid, restore) {
+        _persistDraft()
+        _draftActive = false
+        _draftHydrating = true
+        _draftTouched = false
+        draftRestored = false
+        _draftContext = context
+        _draftUid = uid
+        _draftBaseData = data
+        _resetForm(data)
+        var saved = draftStore && restore ? draftStore.loadDraft(context, uid) : ({})
+        if (saved && Object.keys(saved).length > 0) {
+            _restoreFields(saved)
+            draftRestored = true
+        }
+        _draftHydrating = false
+        _draftActive = true
+    }
+
+    function discardDraft() {
+        if (draftStore) draftStore.discardDraft(_draftContext, _draftUid)
+        _draftHydrating = true
+        var original = isEdit ? vm.editorDataFor(taskUid) : _draftBaseData
+        if (isEdit && (!original || !original.exists)) {
+            _draftActive = false
+            close()
+        } else {
+            _resetForm(original)
+        }
+        draftRestored = false
+        _draftTouched = false
+        _draftHydrating = false
+    }
+
+    function _savedSuccessfully() {
+        _draftActive = false
+        _draftTouched = false
+        draftRestored = false
+        if (draftStore) draftStore.discardDraft(_draftContext, _draftUid)
+        close()
+    }
 
     function _prepareNestedPopups() {
         if (!taskEditorDialog._scopeDialogObject)
@@ -183,10 +294,10 @@ Dialog {
         isEdit = false
         taskUid = ""
         recurringInstance = false
-        _resetForm({
+        _beginDraft({
             mode: (prefillDateText && prefillDateText.length > 0) ? "allday" : "none",
-            dateText: prefillDateText || ""
-        })
+            dateText: prefillDateText || "", durationText: _defaultDuration()
+        }, "editor:new", "", true)
         open()
         titleField.forceActiveFocus()
     }
@@ -206,7 +317,8 @@ Dialog {
         isEdit = false
         taskUid = ""
         recurringInstance = false
-        _resetForm(data)
+        _beginDraft(data, "editor:new", "", false)
+        _draftChanged()
         open()
         titleField.forceActiveFocus()
     }
@@ -218,24 +330,30 @@ Dialog {
         taskUid = ""
         recurringInstance = false
         var defaults = vm.newScheduledDefaults()
-        _resetForm({
+        _beginDraft({
             mode: defaults.mode,
             dateText: (prefillDateText && prefillDateText.length > 0)
                       ? prefillDateText : defaults.dateText,
-            timeText: defaults.timeText
-        })
+            timeText: defaults.timeText, durationText: _defaultDuration()
+        }, "editor:new", "", true)
         open()
         titleField.forceActiveFocus()
     }
 
     function openForEdit(uid) {
         var data = vm.editorDataFor(uid)
-        if (!data || !data.exists)
+        if (!data || !data.exists) {
+            if (draftStore) {
+                draftStore.discardDraft("editor:task", uid)
+                draftStore.discardDraft("editor:occurrence", uid)
+            }
             return
+        }
         isEdit = true
         taskUid = uid
         recurringInstance = data.isRecurringInstance
-        _resetForm(data)
+        _beginDraft(data, data.isSeriesOccurrence ? "editor:occurrence" : "editor:task",
+                    uid, true)
         open()
         titleField.forceActiveFocus()
     }
@@ -293,7 +411,7 @@ Dialog {
         var ok = taskEditorDialog.vm.saveOccurrenceScoped(
             taskEditorDialog.taskUid, scope, taskEditorDialog._recurrencePayload())
         if (ok)
-            taskEditorDialog.close()
+            taskEditorDialog._savedSuccessfully()
     }
 
     // ---- режимы и пресеты -----------------------------------------------------
@@ -357,7 +475,7 @@ Dialog {
         // Новая задача с включённым повторением -> локальная серия.
         if (!taskEditorDialog.isEdit && taskEditorDialog.recurEnabled && !taskEditorDialog.recurringInstance) {
             if (vm.saveEditorAsSeries(taskEditorDialog._recurrencePayload()))
-                taskEditorDialog.close()
+                taskEditorDialog._savedSuccessfully()
             return
         }
         var ok = vm.saveEditorWithTags(
@@ -374,7 +492,7 @@ Dialog {
             tagPicker.selectedIds
         )
         if (ok)
-            taskEditorDialog.close()
+            taskEditorDialog._savedSuccessfully()
     }
 
     Component {
@@ -390,7 +508,7 @@ Dialog {
         RemoteSeriesSplitDialog {
             objectName: "remoteSeriesSplitDialog"
             vm: taskEditorDialog.vm
-            onPlanCreated: taskEditorDialog.close()
+            onPlanCreated: taskEditorDialog._savedSuccessfully()
         }
     }
 
@@ -442,8 +560,12 @@ Dialog {
             objectName: "taskTemplatePicker"
             onTemplateChosen: uid => {
                 var data = taskEditorDialog.vm.templatePrefill(uid)
-                if (data && data.exists)
+                if (data && data.exists) {
+                    taskEditorDialog._draftHydrating = true
                     taskEditorDialog._resetForm(data)
+                    taskEditorDialog._draftHydrating = false
+                    taskEditorDialog._draftChanged()
+                }
             }
         }
     }
@@ -516,13 +638,44 @@ Dialog {
             }
         }
 
+        RowLayout {
+            visible: taskEditorDialog.draftRestored || taskEditorDialog._draftTouched
+            Layout.fillWidth: true
+            Label {
+                objectName: "editorDraftNotice"
+                text: taskEditorDialog.draftRestored
+                      ? "Черновик восстановлен" : "Несохранённый черновик"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.fontFamily
+                Layout.fillWidth: true
+            }
+            AppButton {
+                objectName: "editorDiscardDraft"
+                text: "Сбросить черновик"
+                variant: "ghost"
+                enabled: !taskEditorDialog.vm || !taskEditorDialog.vm.busy
+                onClicked: taskEditorDialog.discardDraft()
+            }
+        }
+        Label {
+            text: taskEditorDialog.draftStore ? taskEditorDialog.draftStore.storageError : ""
+            visible: text.length > 0
+            color: Theme.warningText
+            font.pixelSize: Theme.fontCaption
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
         // ---- название: главное поле ----
         AppTextField {
             id: titleField
+            objectName: "editorTitle"
             placeholderText: "Что нужно сделать?"
             font.pixelSize: Theme.fontSubtitle + 1
             Layout.fillWidth: true
             onAccepted: taskEditorDialog.submit()
+            onTextChanged: taskEditorDialog._draftChanged()
         }
 
         // ---- заметки ----
@@ -542,6 +695,8 @@ Dialog {
 
                 B.TextArea {
                     id: notesArea
+                    objectName: "editorNotes"
+                    onTextChanged: taskEditorDialog._draftChanged()
                     placeholderText: "Заметки (необязательно)"
                     placeholderTextColor: Theme.textMuted
                     wrapMode: TextArea.Wrap
@@ -591,10 +746,14 @@ Dialog {
             }
             DatePickerField {
                 id: dateField
+                objectName: "editorDate"
                 enabled: !taskEditorDialog.recurringInstance
                 Layout.fillWidth: true
                 Layout.maximumWidth: 300
-                onDateTextChanged: taskEditorDialog._updateRecurrenceSummary()
+                onDateTextChanged: {
+                    taskEditorDialog._updateRecurrenceSummary()
+                    taskEditorDialog._draftChanged()
+                }
             }
 
             Label {
@@ -606,10 +765,14 @@ Dialog {
             }
             TimePickerField {
                 id: timeField
+                objectName: "editorTime"
                 visible: taskEditorDialog.schedMode === "timed"
                 enabled: !taskEditorDialog.recurringInstance
                 onAccepted: taskEditorDialog.submit()
-                onTimeTextChanged: taskEditorDialog._updateRecurrenceSummary()
+                onTimeTextChanged: {
+                    taskEditorDialog._updateRecurrenceSummary()
+                    taskEditorDialog._draftChanged()
+                }
             }
 
             Label {
@@ -623,6 +786,11 @@ Dialog {
             }
             DurationPicker {
                 id: durationPicker
+                objectName: "editorDuration"
+                onDurationTextChanged: {
+                    taskEditorDialog._updateRecurrenceSummary()
+                    taskEditorDialog._draftChanged()
+                }
                 visible: taskEditorDialog.schedMode === "timed"
                 enabled: !taskEditorDialog.recurringInstance
                 presets: taskEditorDialog.vm ? taskEditorDialog.vm.durationPresets : []
@@ -757,11 +925,15 @@ Dialog {
 
         RecurrenceRuleEditor {
             id: ruleEditor
+            objectName: "editorRecurrence"
             visible: taskEditorDialog.recurEnabled && !taskEditorDialog.recurringInstance
                      && (!taskEditorDialog.isEdit || taskEditorDialog.seriesOccurrence)
             presets: taskEditorDialog.vm ? taskEditorDialog.vm.recurrencePresets : []
             Layout.fillWidth: true
-            onRuleEdited: taskEditorDialog._updateRecurrenceSummary()
+            onRuleEdited: {
+                taskEditorDialog._updateRecurrenceSummary()
+                taskEditorDialog._draftChanged()
+            }
         }
 
         Label {
@@ -777,6 +949,8 @@ Dialog {
 
         TagPicker {
             id: tagPicker
+            objectName: "editorTags"
+            onSelectedIdsChanged: taskEditorDialog._draftChanged()
             Layout.fillWidth: true
             availableTags: taskEditorDialog.vm ? taskEditorDialog.vm.availableTags : []
             onCreateRequested: name => {
@@ -800,7 +974,9 @@ Dialog {
             }
             Row {
                 id: priorityRow
+                objectName: "editorPriority"
                 property int current: 0
+                onCurrentChanged: taskEditorDialog._draftChanged()
                 spacing: Theme.spacingXs
 
                 Repeater {
@@ -871,6 +1047,8 @@ Dialog {
             Item { Layout.fillWidth: true }
             CheckBox {
                 id: completedCheck
+                objectName: "editorCompleted"
+                onCheckedChanged: taskEditorDialog._draftChanged()
                 text: "Выполнено"
                 visible: taskEditorDialog.isEdit
                 font.pixelSize: Theme.fontBody
